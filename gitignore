@@ -1,0 +1,33 @@
+# Dane logowania / sekrety - NIGDY nie commitować
+.env
+.env.*
+!.env.example
+*.json
+!package.json
+strix-dashboard-*.json
+
+# Sesja logowania do przeglądarki (Playwright) - zawiera aktywne ciasteczka sesji
+auth_state.json
+
+# Cache i stan lokalny (dane robocze, nie sekrety, ale i tak nie trzeba wersjonować)
+project_key_cache.json
+task_sync_state.json
+workflow_graph_cache.json
+user_map.json
+section_status_map.json
+*_report.json
+
+# Logi
+logs/
+*.log
+
+# Zrzuty ekranu z błędów
+error_*.png
+
+# Środowisko Python
+.venv/
+__pycache__/
+*.pyc
+
+# Pliki wyjściowe
+getint_routing_checklist.xlsx

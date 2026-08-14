@@ -17,10 +17,16 @@ jednocześnie i to jest problemem, uruchamiaj oba kierunki naprzemiennie
 (najpierw asana_jira_sync.py, potem ten skrypt), nie równolegle.
 
 Synchronizuje: tytuł, opis (z konwersją ADF -> HTML), termin, przypisanego
-(przez ODWRÓCONY user_map.json), oraz NOWE komentarze i załączniki z Jiry.
-Status NIE jest synchronizowany zwrotnie (Asana nie ma bezpośredniego
-odpowiednika "kolumny/statusu" 1:1 - sekcje to inna koncepcja niż workflow
-Jiry; zostaw to jako ręczne albo daj znać, jeśli chcesz to też dopisać).
+(przez ODWRÓCONY user_map.json), status -> sekcja (przez ODWRÓCONĄ
+section_status_map.json - patrz uwaga niżej), oraz NOWE komentarze i
+załączniki z Jiry.
+
+UWAGA o statusie -> sekcji: section_status_map.json mapuje WIELE sekcji
+Asany na JEDEN status Jiry (kierunek w przód), więc odwrócenie tego jest z
+natury NIEJEDNOZNACZNE, jeśli więcej niż jedna sekcja wskazuje na ten sam
+status - w takim wypadku bierzemy PIERWSZĄ pasującą sekcję z pliku (kolejność
+zależy od tego, jak plik jest zapisany). Jeśli to problem w Twoim przypadku,
+uporządkuj plik tak, żeby preferowana sekcja była pierwsza dla danego statusu.
 
 Wymaga tych samych zmiennych w .env co asana_jira_sync.py, plus tego samego
 task_sync_state.json i user_map.json (odczytywane, nie tworzone od zera).
@@ -50,6 +56,7 @@ from asana_jira_sync import (  # reużywamy konwersji, stanu i konfiguracji - be
     JIRA_BASE_URL,
     REQUEST_TIMEOUT,
     adf_to_html,
+    load_section_status_map,
     load_state,
     load_user_map,
     request_with_retry,
@@ -60,12 +67,93 @@ from notify import setup_file_logging, send_slack_summary
 
 def get_jira_issue(issue_key: str) -> Optional[dict]:
     url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}"
-    params = {"fields": "summary,description,duedate,assignee,updated,comment"}
+    params = {"fields": "summary,description,duedate,assignee,updated,comment,status"}
     resp = requests.get(url, auth=JIRA_AUTH, params=params, timeout=REQUEST_TIMEOUT)
     if resp.status_code == 404:
         return None
     resp.raise_for_status()
     return resp.json()
+
+
+def build_reversed_section_map(section_status_map: dict) -> dict:
+    """Odwraca section_status_map.json (sekcja Asany -> status Jiry, lub lista
+    statusów) na (nazwa statusu Jiry, znormalizowana -> LISTA kandydatów -
+    nazw sekcji Asany, w kolejności występowania w pliku). Wiele sekcji może
+    mapować na ten sam status (typowe przy współdzielonym pliku dla różnych
+    szablonów projektów) - w takim wypadku sprawdzimy PO KOLEI, która z nich
+    faktycznie istnieje w KONKRETNYM projekcie Asany (patrz resolve_target_section).
+
+    Wartość może być JEDNYM statusem (string) ALBO LISTĄ statusów - przydatne,
+    gdy jedna sekcja (np. "In progress" w prostym, kilkusekcyjnym projekcie)
+    powinna sensownie odpowiadać kilku różnym, bardziej szczegółowym statusom
+    Jiry (np. "In progress" ORAZ "Feedback Required")."""
+    reversed_map: dict[str, list[str]] = {}
+    for section_name, raw_value in section_status_map.items():
+        status_names = raw_value if isinstance(raw_value, list) else [raw_value]
+        for status_name in status_names:
+            if not status_name:
+                continue
+            key = status_name.strip().lower()
+            reversed_map.setdefault(key, []).append(section_name)
+    return reversed_map
+
+
+_asana_sections_cache: dict[str, list[dict]] = {}
+
+
+def get_asana_sections(project_gid: str) -> list[dict]:
+    """Zwraca [{gid, name}, ...] sekcji danego projektu Asany. Cache'owane
+    per projekt na czas przebiegu."""
+    if project_gid in _asana_sections_cache:
+        return _asana_sections_cache[project_gid]
+    url = f"{ASANA_API}/projects/{project_gid}/sections"
+    resp = requests.get(url, headers=ASANA_HEADERS, params={"opt_fields": "name"}, timeout=REQUEST_TIMEOUT)
+    resp.raise_for_status()
+    sections = resp.json().get("data", [])
+    _asana_sections_cache[project_gid] = sections
+    return sections
+
+
+def get_current_asana_section(task_gid: str, project_gid: str) -> Optional[dict]:
+    """Zwraca {gid, name} aktualnej sekcji zadania W KONKRETNYM projekcie
+    (ten sam problem wieloprojektowości co w asana_jira_sync.py - filtrujemy
+    po project_gid, nie bierzemy pierwszego z brzegu membershipu)."""
+    url = f"{ASANA_API}/tasks/{task_gid}"
+    resp = requests.get(
+        url, headers=ASANA_HEADERS,
+        params={"opt_fields": "memberships.section.name,memberships.project.gid"},
+        timeout=REQUEST_TIMEOUT,
+    )
+    resp.raise_for_status()
+    for m in resp.json().get("data", {}).get("memberships", []):
+        if m.get("project", {}).get("gid") == project_gid:
+            return m.get("section")
+    return None
+
+
+def move_asana_task_to_section(task_gid: str, section_gid: str) -> None:
+    url = f"{ASANA_API}/sections/{section_gid}/addTask"
+    resp = request_with_retry(
+        "POST", url, headers=ASANA_HEADERS, json={"data": {"task": task_gid}}, timeout=REQUEST_TIMEOUT
+    )
+    if resp.status_code >= 300:
+        raise RuntimeError(f"Błąd przenoszenia zadania {task_gid} do sekcji {section_gid}: {resp.status_code} {resp.text}")
+
+
+def resolve_target_section(project_gid: str, candidate_names: list) -> "tuple[dict | None, list]":
+    """Próbuje PO KOLEI kandydatów (sekcji), aż znajdzie taką, która
+    faktycznie istnieje w TYM KONKRETNYM projekcie Asany. Zwraca
+    (znaleziona_sekcja_albo_None, lista_wypróbowanych_nazw) - druga wartość
+    do czytelnego komunikatu, gdyby żadna nie pasowała."""
+    sections = get_asana_sections(project_gid)
+    sections_by_name = {s["name"].strip().lower(): s for s in sections}
+    tried = []
+    for name in candidate_names:
+        tried.append(name)
+        match = sections_by_name.get(name.strip().lower())
+        if match:
+            return match, tried
+    return None, tried
 
 
 def get_jira_new_comments(issue_key: str, since_comment_ids: set) -> list[dict]:
@@ -99,6 +187,16 @@ def update_asana_task(asana_gid: str, name: str, html_notes: str, due_on: Option
     if assignee_gid:
         data["assignee"] = assignee_gid
     resp = request_with_retry("PUT", url, headers=ASANA_HEADERS, json={"data": data}, timeout=REQUEST_TIMEOUT)
+
+    if resp.status_code >= 300 and assignee_gid:
+        # Przypisany użytkownik mógł nie mieć dostępu do tego projektu w Asanie
+        # - spróbuj bez assignee, żeby przynajmniej reszta pól (tytuł, opis,
+        # termin) się zaktualizowała, zamiast tracić całą aktualizację.
+        data.pop("assignee", None)
+        resp = request_with_retry("PUT", url, headers=ASANA_HEADERS, json={"data": data}, timeout=REQUEST_TIMEOUT)
+        if resp.status_code < 300:
+            print(f"      [INFO] Assignee z Jiry nie mógł być przypisany w Asanie ({asana_gid}) — zaktualizowano bez niego.")
+
     if resp.status_code >= 300:
         raise RuntimeError(f"Błąd aktualizacji zadania Asany {asana_gid}: {resp.status_code} {resp.text}")
 
@@ -120,8 +218,14 @@ def upload_asana_attachment(asana_gid: str, filename: str, content: bytes) -> No
         raise RuntimeError(f"Błąd wgrywania załącznika w Asanie ({asana_gid}): {resp.status_code} {resp.text}")
 
 
-def sync_project_back(jira_key: str, project_state: dict, user_map_reversed: dict, dry_run: bool) -> dict:
-    stats = {"updated": 0, "comments": 0, "attachments": 0, "errors": 0, "skipped": 0}
+def sync_project_back(jira_key: str, state: dict, user_map_reversed: dict, dry_run: bool,
+                       asana_project_gid: Optional[str] = None, reversed_section_map: Optional[dict] = None) -> dict:
+    stats = {"updated": 0, "comments": 0, "attachments": 0, "errors": 0, "skipped": 0, "status_ok": 0, "status_failed": 0}
+    project_state = state.setdefault(jira_key, {})
+    if os.getenv("DEBUG_SYNC"):
+        print(f"  [DEBUG] {jira_key}: {len(project_state)} zadań śledzonych w stanie, "
+              f"asana_project_gid={asana_project_gid!r}, kandydatów w mapie={len(reversed_section_map)}")
+    reversed_section_map = reversed_section_map or {}
 
     for asana_gid, task_state in project_state.items():
         issue_key = task_state.get("jira_key")
@@ -144,12 +248,56 @@ def sync_project_back(jira_key: str, project_state: dict, user_map_reversed: dic
                 assignee = fields.get("assignee") or {}
                 assignee_gid = user_map_reversed.get(assignee.get("accountId")) if assignee.get("accountId") else None
 
+                if os.getenv("DEBUG_SYNC"):
+                    print(f"    [DEBUG] {issue_key} -> asana_gid={asana_gid}")
+                    print(f"    [DEBUG] jira_updated={jira_updated!r} vs last_known={last_known_updated!r}")
+                    print(f"    [DEBUG] summary={summary!r}")
+                    print(f"    [DEBUG] description_html={description_html!r}")
+                    print(f"    [DEBUG] due_on={due_on!r}, assignee_gid={assignee_gid!r}")
+
                 if dry_run:
                     print(f"    [DRY-RUN] Zaktualizowałbym w Asanie zadanie odpowiadające {issue_key}: '{summary}'")
                 else:
                     update_asana_task(asana_gid, summary, description_html, due_on, assignee_gid)
                     task_state["jira_updated"] = jira_updated
                 stats["updated"] += 1
+
+            # Status -> sekcja (opcjonalne, tylko jeśli mamy GID projektu Asany
+            # i tabelę odwróconą - patrz build_reversed_section_map na górze pliku).
+            if asana_project_gid and reversed_section_map:
+                status_name = (fields.get("status") or {}).get("name", "")
+                candidate_names = reversed_section_map.get(status_name.strip().lower(), [])
+                if os.getenv("DEBUG_SYNC"):
+                    print(f"    [DEBUG-STATUS] {issue_key}: status_name={status_name!r}, "
+                          f"candidate_names={candidate_names!r}, asana_project_gid={asana_project_gid!r}")
+                if candidate_names:
+                    target_section, tried = resolve_target_section(asana_project_gid, candidate_names)
+                    if os.getenv("DEBUG_SYNC"):
+                        print(f"    [DEBUG-STATUS] target_section={target_section!r}, tried={tried!r}")
+                    if not target_section:
+                        tried_str = "', '".join(tried)
+                        print(f"    [OSTRZEŻENIE] {issue_key}: status '{status_name}' — żadna z możliwych sekcji "
+                              f"('{tried_str}') nie istnieje w tym projekcie Asany.")
+                    else:
+                        current_section = get_current_asana_section(asana_gid, asana_project_gid)
+                        current_name = (current_section or {}).get("name", "")
+                        if os.getenv("DEBUG_SYNC"):
+                            print(f"    [DEBUG-STATUS] current_section={current_section!r}")
+                        if current_name.strip().lower() != target_section["name"].strip().lower():
+                            if dry_run:
+                                print(f"    [DRY-RUN] Przeniósłbym zadanie odpowiadające {issue_key} "
+                                      f"do sekcji '{target_section['name']}' (status: '{status_name}').")
+                                stats["status_ok"] += 1
+                            else:
+                                try:
+                                    move_asana_task_to_section(asana_gid, target_section["gid"])
+                                    print(f"    Przeniesiono zadanie ({issue_key}) do sekcji '{target_section['name']}'.")
+                                    stats["status_ok"] += 1
+                                except Exception as exc:  # noqa: BLE001
+                                    print(f"    [OSTRZEŻENIE] {issue_key}: nie udało się przenieść do sekcji: {exc}")
+                                    stats["status_failed"] += 1
+                        elif os.getenv("DEBUG_SYNC"):
+                            print(f"    [DEBUG-STATUS] {issue_key}: już we właściwej sekcji, bez zmian.")
 
             # Nowe komentarze
             synced_comment_ids = set(task_state.get("synced_from_jira_comment_ids", []))
@@ -192,23 +340,33 @@ def sync_project_back(jira_key: str, project_state: dict, user_map_reversed: dic
             print(f"    [BŁĄD] {issue_key}: {exc}")
             stats["errors"] += 1
 
+        if not dry_run:
+            # ZAPISZ STAN PO KAŻDYM ZADANIU, nie dopiero po całym projekcie —
+            # ten sam błąd, który znaleźliśmy i naprawiliśmy w asana_jira_sync.py:
+            # przerwanie w połowie (np. utrata internetu) traciło cały postęp
+            # dla danego projektu, co przy restarcie prowadziło do duplikatów.
+            save_state(state)
+
         time.sleep(0.3)
 
     return stats
 
 
-def get_project_keys(args) -> list[str]:
+def get_project_pairs(args) -> list[tuple[str, str, str]]:
+    """Zwraca (klucz_Jira, nazwa_projektu_Asana, link_Asany) — potrzebne, żeby
+    ustalić GID projektu Asany (do synchronizacji statusu -> sekcja)."""
     if args.project_keys:
-        return [k.strip().upper() for k in args.project_keys.split(",") if k.strip()]
+        keys = [k.strip().upper() for k in args.project_keys.split(",") if k.strip()]
+        return [(k, "", "") for k in keys]
     sheet_rows = core.get_sheet_rows()
     cache = core.load_key_cache()
-    keys = []
+    pairs = []
     for row in sheet_rows:
         norm_name = core.normalize(row.project_name)
         key = row.jira_key or cache.get(norm_name)
         if key:
-            keys.append(key)
-    return keys
+            pairs.append((key, row.project_name, row.asana_project_link))
+    return pairs
 
 
 def main() -> None:
@@ -224,20 +382,35 @@ def main() -> None:
     state = load_state()
     user_map = load_user_map()  # Asana gid -> Jira accountId
     user_map_reversed = {v: k for k, v in user_map.items()}  # Jira accountId -> Asana gid
+    section_status_map = load_section_status_map()
+    reversed_section_map = build_reversed_section_map(section_status_map)
+    if not reversed_section_map:
+        print(
+            "UWAGA: section_status_map.json puste/nie istnieje — status NIE będzie "
+            "synchronizowany zwrotnie (tylko tytuł/opis/termin/przypisany/komentarze).\n"
+        )
 
-    project_keys = get_project_keys(args)
+    project_pairs = get_project_pairs(args)
     if args.limit:
-        project_keys = project_keys[: args.limit]
-    print(f"Projektów do synchronizacji (Jira -> Asana): {len(project_keys)}")
+        project_pairs = project_pairs[: args.limit]
+    print(f"Projektów do synchronizacji (Jira -> Asana): {len(project_pairs)}")
     if args.dry_run:
         print("TRYB DRY-RUN — nic nie zostanie zapisane.\n")
 
-    totals = {"updated": 0, "comments": 0, "attachments": 0, "errors": 0, "skipped": 0}
-    for i, jira_key in enumerate(project_keys):
+    totals = {"updated": 0, "comments": 0, "attachments": 0, "errors": 0, "skipped": 0, "status_ok": 0, "status_failed": 0}
+    for i, (jira_key, project_name, asana_link) in enumerate(project_pairs):
         if jira_key not in state or not state[jira_key]:
             continue  # nic jeszcze nie zsynchronizowane w tę stronę dla tego projektu
-        print(f"\n[{i + 1}/{len(project_keys)}] {jira_key}")
-        stats = sync_project_back(jira_key, state[jira_key], user_map_reversed, args.dry_run)
+        print(f"\n[{i + 1}/{len(project_pairs)}] {jira_key}")
+
+        asana_project_gid = None
+        if reversed_section_map:
+            asana_project_gid = core.extract_asana_project_gid(asana_link) if asana_link else None
+            if not asana_project_gid:
+                print("  [OSTRZEŻENIE] Brak asana_project_link — status NIE zostanie zsynchronizowany dla "
+                      "tego projektu (dopasowanie po nazwie celowo wyłączone). Uzupełnij link w arkuszu.")
+
+        stats = sync_project_back(jira_key, state, user_map_reversed, args.dry_run, asana_project_gid, reversed_section_map)
         for k in totals:
             totals[k] += stats.get(k, 0)
         if not args.dry_run:
@@ -248,6 +421,8 @@ def main() -> None:
     print(f"  Zaktualizowano w Asanie: {totals['updated']}")
     print(f"  Komentarzy:              {totals['comments']}")
     print(f"  Załączników:             {totals['attachments']}")
+    print(f"  Statusy OK:              {totals['status_ok']}")
+    print(f"  Statusy błąd:            {totals['status_failed']}")
     print(f"  Błędy:                   {totals['errors']}")
 
     if not args.dry_run:

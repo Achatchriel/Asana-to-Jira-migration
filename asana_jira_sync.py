@@ -871,10 +871,18 @@ def resolve_target_status_id(project_key: str, section_name: Optional[str],
     nazwy statusu — te zwykle się nie pokrywają, sekcje bywają etapami/
     kamieniami milowymi). Brak wpisu w tabeli = zadanie zostaje przy
     domyślnym statusie startowym (zwraca None), a sekcja trafia do
-    unmapped_sections, żeby na końcu pokazać, czego jeszcze brakuje w mapie."""
+    unmapped_sections, żeby na końcu pokazać, czego jeszcze brakuje w mapie.
+
+    Wartość w section_status_map może być JEDNYM statusem (string) ALBO
+    LISTĄ statusów - jeśli lista, w kierunku Asana->Jira bierzemy PIERWSZY
+    (kierunek zwrotny w jira_asana_sync.py używa WSZYSTKICH jako kandydatów)."""
     if not section_name:
         return None
-    target_status_name = section_status_map.get(section_name)
+    raw_value = section_status_map.get(section_name)
+    if not raw_value:
+        unmapped_sections.add(section_name)
+        return None
+    target_status_name = raw_value[0] if isinstance(raw_value, list) else raw_value
     if not target_status_name:
         unmapped_sections.add(section_name)
         return None
@@ -896,17 +904,11 @@ def sync_project(asana_project_name: str, jira_key: str, state: dict,
                   asana_project_link: str = "") -> dict:
     project_state = state.setdefault(jira_key, {})
 
-    asana_gid = None
-    gid_from_link = core.extract_asana_project_gid(asana_project_link)
-    if gid_from_link:
-        # Link podany wprost - pewniejsze niż dopasowanie po nazwie (omija
-        # literówki, duplikaty nazw, zmiany nazwy w Asanie).
-        asana_gid = gid_from_link
-    else:
-        asana_gid = find_asana_project_gid(asana_project_name)
-
+    asana_gid = core.extract_asana_project_gid(asana_project_link) if asana_project_link else None
     if not asana_gid:
-        print(f"  [OSTRZEŻENIE] Nie znaleziono projektu '{asana_project_name}' w Asanie — pomijam.")
+        print(f"  [OSTRZEŻENIE] Brak asana_project_link dla '{jira_key}' ('{asana_project_name}') — "
+              f"pomijam (dopasowanie po nazwie zostało celowo wyłączone, bo bywa niejednoznaczne "
+              f"przy zduplikowanych nazwach projektów w Asanie). Uzupełnij link w arkuszu.")
         return {"created": 0, "updated": 0, "skipped": 0, "errors": 0, "comments": 0, "attachments": 0, "status_ok": 0, "status_failed": 0, "unmapped_sections": set()}
 
     tasks = get_asana_tasks(asana_gid)

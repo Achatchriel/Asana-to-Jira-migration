@@ -27,6 +27,12 @@ pip install -r requirements.txt
    - **Google Sheets**: service account (JSON key) from [Google Cloud Console](https://console.cloud.google.com/)
      — remember to **share the sheet** with the service account's email address.
 
+   To quickly check whether `ASANA_TOKEN` actually works (independent of
+   access to any specific project — useful when debugging `403` errors):
+   ```bash
+   python check_asana_token.py
+   ```
+
 ## 3. Board type
 
 By default **all created projects are company-managed Kanban boards**
@@ -146,15 +152,33 @@ Works exactly like the developer group (section 5): the role is checked
 once at startup, added after each project creation, warning instead of a
 hard failure if it doesn't work.
 
+**Additionally:** you can have the lead of **each** project (different per
+project — the `lead_account_id` column in the sheet, or
+`DEFAULT_LEAD_ACCOUNT_ID`) automatically granted administrator permissions
+**on their own** project, independently of the global `ADMIN_ACCOUNT_ID`
+list above:
+
+```
+ADD_LEAD_AS_ADMIN=true
+```
+
+Both mechanisms are combined into **one** API request per project (no
+duplicates if the person happens to be both the lead and on the
+`ADMIN_ACCOUNT_ID` list).
+
 ## 7. Google Sheet format
 
 The first row is the header (case-insensitive). **`asana_project_link` is
-required** to get an enriched description (from Asana notes) and for
-`asana_jira_sync.py`/`jira_asana_sync.py` to work — without it the project
-is still created in Jira, but without a description and without the
-ability to sync tasks for that row. `project_name` can be left blank if
-you provided the link — the name will be fetched automatically from
-Asana. The remaining columns are optional:
+strictly required.** Without it (or if access to the given link fails, e.g.
+a private project the token has no access to) — **the entire row is
+skipped, no project is created in Jira** (not just without a description —
+not at all). This is intentional: name-based matching was removed as
+unreliable (see the `asana_project_link` bullet below), so without a link
+there's no safe way to unambiguously identify the right project in Asana.
+The script prints a combined summary of all skipped rows at the end of the
+run. `project_name` can be left blank if you provided the link — the name
+will be fetched automatically from Asana. The remaining columns are
+optional:
 
 | project_name              | jira_key | project_type_key | template_key | lead_account_id       | description | board_template_id | asana_project_link |
 |-----------------------------|----------|--------------------|-----------------|--------------------------|--------------|--------------------|----------------------|
@@ -162,15 +186,15 @@ Asana. The remaining columns are optional:
 | Homepage redesign            |          | business           |                 |                          | Redesign UI  | 7276               | https://app.asana.com/0/1111111111111111/list |
 | *(blank — name pulled from link)* |  |    |                 |                          |              |                    | https://app.asana.com/0/9876543210987654/list |
 
-- **`board_template_id`** — used ONLY by `bulk_configure_columns_simple.py`
-  (not by `bulk_configure_columns.py` or `jira_sync.py`). The template board
-  ID for the COLUMN LAYOUT of this specific project — useful when the
-  template project has several boards with different layouts (e.g.
-  `REFERENCE2` has both an 11-column layout on board 6110 and a simpler
-  4-column one on boards 7276/7273/7274/7275). Blank = the row is handled
-  by `bulk_configure_columns.py` (default template, `JIRA_TEMPLATE_BOARD_ID`
-  from `.env`); filled in = the row is handled exclusively by
-  `bulk_configure_columns_simple.py`.
+- **`board_template_id`** — used by `bulk_configure_columns.py` (not by
+  `jira_sync.py`). The template board ID for the COLUMN LAYOUT of this
+  specific project — useful when the template project has several boards
+  with different layouts (e.g. `REFERENCE2` has both an 11-column layout on
+  board 6110 and a simpler 4-column one on boards 7276/7273/7274/7275).
+  Blank = the default template is used (`JIRA_TEMPLATE_BOARD_ID` from
+  `.env`); filled in = exactly that board is used — **per row**, so
+  different projects can use different templates within a single run of
+  the script.
 
 - **`asana_project_link`** — a DIRECT link to the project in Asana (copied
   from the browser's address bar). This is the **only** way to identify an
@@ -297,13 +321,28 @@ the whole thing).
 
 3. **Section → status mapping** — Asana sections tend to be stages/
    milestones (e.g. "3. Kickoff"), not names matching Jira statuses
-   directly ("In Progress"). List the project's sections:
+   directly ("In Progress"). List a **single** project's sections:
    ```bash
    python list_asana_sections.py "Exact project name in Asana"
    python list_asana_sections.py --link "https://app.asana.com/0/123456789/list"
    ```
-   Fill in `section_status_map.json` (key = section name, value = Jira
-   status name **or a list of statuses**, e.g.
+   Or, for many projects at once — list **unique** sections across **all**
+   rows in the sheet in one run (with a ready-to-paste
+   `"section: example project": "",` format, and an automatic comparison
+   against what's already mapped):
+   ```bash
+   python list_all_asana_sections.py
+   python list_all_asana_sections.py --limit 10          # test on a sample
+   python list_all_asana_sections.py --save result.json  # save to a file
+   ```
+   **Important:** a key pasted this way includes an appended example
+   project name (after a colon) — that's just a context hint, not the real
+   section name. Before saving it into `section_status_map.json`, strip
+   everything after the **last** `": "` (unless the real section name
+   itself contains a colon — then check manually which colon is "yours").
+
+   Fill in `section_status_map.json` (key = the **plain** section name,
+   value = Jira status name **or a list of statuses**, e.g.
    `["In progress", "Feedback Required"]` — useful when one section in a
    simple project should reasonably correspond to several more granular
    statuses on the reverse direction). This table is global — shared
@@ -352,7 +391,9 @@ DEBUG_SYNC=1 python asana_jira_sync.py --limit 1 --project-keys KEY
 |---|---|
 | `asana_jira_sync.py` | main sync script, Asana → Jira |
 | `jira_asana_sync.py` | reverse direction, Jira → Asana (section 12) |
-| `list_asana_sections.py` | lists an Asana project's sections (for `section_status_map.json`) |
+| `list_asana_sections.py` | lists a SINGLE Asana project's sections (for `section_status_map.json`) |
+| `list_all_asana_sections.py` | lists unique sections across ALL projects in the sheet at once, compared against what's already mapped |
+| `check_asana_token.py` | diagnostics: checks whether ASANA_TOKEN is valid and has workspace access (independent of any specific project) |
 | `section_status_map.json` | mapping: Asana section → Jira status(es) (filled in manually) |
 | `generate_user_map.py` | generates `user_map.json` (matched by email) |
 | `list_asana_members.py` | lists Asana workspace members/guests with their gid |
@@ -375,11 +416,13 @@ synchronization (`asana_jira_sync.py`) should NOT be run right after
 creating a project, because the board isn't ready yet:
 
 1. `python jira_sync.py` — create the project(s).
-2. `python bulk_configure_columns.py` (for rows without `board_template_id`)
-   **and/or** `python bulk_configure_columns_simple.py` (for rows with
-   `board_template_id` filled in) — create the columns.
+2. `python bulk_configure_columns.py` — create the columns (template
+   per row: the default from `.env`, or from the `board_template_id`
+   column if filled in — one run handles all projects regardless of which
+   template they need).
 3. **You manually** drag statuses into the correct columns in Jira (a
-   cheat-sheet is printed at the end of step 2).
+   cheat-sheet is printed at the end of step 2, separately for each
+   template used).
 4. Only now: `python asana_jira_sync.py` — task syncing makes sense, since
    tasks land on an already-ready, correctly configured board.
 5. Optionally, as ongoing work happens: `python jira_asana_sync.py` — the

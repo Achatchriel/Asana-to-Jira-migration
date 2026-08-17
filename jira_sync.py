@@ -97,16 +97,24 @@ DEFAULT_LEAD_ACCOUNT_ID = os.getenv("DEFAULT_LEAD_ACCOUNT_ID", "").strip()
 # Grupa, która ma zostać dodana jako deweloperzy do każdego nowo tworzonego projektu.
 # Puste = nie dodawaj żadnej grupy.
 DEVELOPER_GROUP_NAME = os.getenv("DEVELOPER_GROUP_NAME", "").strip()
+# Konkretni użytkownicy (accountId, po przecinku) dodawani do TEJ SAMEJ roli co
+# powyżej - niezależnie od grupy, można użyć jednego, drugiego, albo obu naraz.
+DEVELOPER_ACCOUNT_IDS = os.getenv("DEVELOPER_ACCOUNT_IDS", "").strip()
 # Nazwa roli projektowej, do której trafi ta grupa (w standardowej Jirze to "Developers",
 # ale nazwa roli może się różnić, jeśli ktoś ją zmienił/dodał własną).
 DEVELOPER_ROLE_NAME = os.getenv("DEVELOPER_ROLE_NAME", "Developers").strip()
 
-# accountId użytkownika, który ma zostać dodany jako administrator do każdego
-# nowo tworzonego projektu. Puste = nie dodawaj nikogo. Znajdź swój accountId
-# przez get_my_account_id.py.
-ADMIN_ACCOUNT_ID = os.getenv("ADMIN_ACCOUNT_ID", "").strip()
+# accountId użytkownika(ów), którzy mają zostać dodani jako administratorzy do
+# każdego nowo tworzonego projektu. Puste = nie dodawaj nikogo. Znajdź accountId
+# przez get_my_account_id.py (dla siebie) albo get_group_members.py (dla wielu).
+ADMIN_ACCOUNT_ID = os.getenv("ADMIN_ACCOUNT_ID", "").strip()  # jeden LUB kilka accountId po przecinku
 # Nazwa roli projektowej dla administratorów (w standardowej Jirze to "Administrators").
 ADMIN_ROLE_NAME = os.getenv("ADMIN_ROLE_NAME", "Administrators").strip()
+# Jeśli True, lead KAŻDEGO projektu (row.lead_account_id albo DEFAULT_LEAD_ACCOUNT_ID)
+# zostaje automatycznie dodany do roli administratora W TYM SAMYM projekcie —
+# niezależnie od globalnej listy ADMIN_ACCOUNT_ID (która jest ta sama dla
+# wszystkich projektów; lead różni się per projekt).
+ADD_LEAD_AS_ADMIN = os.getenv("ADD_LEAD_AS_ADMIN", "false").strip().lower() == "true"
 
 # Plik, w którym zapisywane jest mapowanie nazwa projektu -> wygenerowany klucz Jira,
 # żeby przy kolejnych uruchomieniach nazwa zawsze dostawała ten sam klucz.
@@ -161,6 +169,8 @@ class SheetRow:
     asana_project_link: str = ""  # opcjonalny bezpośredni link do projektu w Asanie —
     # jeśli podany, używany ZAMIAST dopasowania po nazwie (dużo pewniejsze:
     # omija literówki, duplikaty nazw, zmiany nazwy w Asanie).
+    sheet_row_number: int = 0  # numer wiersza W ARKUSZU (1-indeksowany, z nagłówkiem
+    # jako wiersz 1) — potrzebny do zapisania wygenerowanego jira_key z powrotem.
 
 
 def extract_asana_project_gid(url: str) -> str:
@@ -188,6 +198,8 @@ class ProjectToCreate:
     lead_account_id: str
     description: str
     matched_in_asana: bool
+    sheet_row_number: int = 0
+    key_was_generated: bool = False  # True = klucz NIE był podany w arkuszu, wygenerowany automatycznie
 
 
 # --------------------------------------------------------------------------- #
@@ -239,7 +251,7 @@ def get_asana_project_by_gid(gid: str) -> "AsanaProject | None":
 # Google Sheets
 # --------------------------------------------------------------------------- #
 
-SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]  # odczyt + zapis (zwrotny zapis jira_key)
 
 
 def _list_sheet_tab_names(service) -> list[str]:
@@ -259,7 +271,10 @@ def get_sheet_rows() -> list[SheetRow]:
     Oczekiwane nagłówki w pierwszym wierszu (wielkość liter bez znaczenia):
         project_name | jira_key | project_type_key | template_key | lead_account_id | description
 
-    Wymagana jest tylko kolumna "project_name". Wszystkie pozostałe są opcjonalne:
+    Wymagana jest kolumna "project_name" ALBO "asana_project_link" (przynajmniej
+    jedna z nich musi być wypełniona) — jeśli podano tylko link, nazwa projektu
+    zostanie pobrana automatycznie z Asany. Wszystkie pozostałe kolumny są
+    opcjonalne:
     - jira_key: jeśli podana, zostanie użyta wprost; jeśli pusta/brak kolumny —
       klucz zostanie wygenerowany automatycznie z nazwy projektu.
     - project_type_key / template_key: użyte zostaną wartości domyślne z .env,
@@ -304,10 +319,25 @@ def get_sheet_rows() -> list[SheetRow]:
         return row[idx].strip() if idx < len(row) else ""
 
     rows: list[SheetRow] = []
-    for raw_row in values[1:]:
+    for i, raw_row in enumerate(values[1:], start=2):  # wiersz 1 to nagłówek
         name = col(raw_row, "project_name")
+        asana_link = col(raw_row, "asana_project_link")
+
+        if not name and asana_link:
+            # Brak nazwy, ale jest link - pobierz nazwę bezpośrednio z Asany,
+            # żeby nie wymagać ręcznego wpisywania jej, skoro link i tak
+            # jednoznacznie wskazuje właściwy projekt.
+            gid = extract_asana_project_gid(asana_link)
+            if gid:
+                try:
+                    asana_project = get_asana_project_by_gid(gid)
+                    if asana_project:
+                        name = asana_project.name
+                except Exception as exc:  # noqa: BLE001
+                    print(f"  [OSTRZEŻENIE] Wiersz {i}: nie udało się pobrać nazwy projektu z linku ({exc}) — pomijam wiersz.")
+
         if not name:
-            continue  # pomijamy puste wiersze
+            continue  # pomijamy wiersze bez nazwy I bez działającego linku
         rows.append(
             SheetRow(
                 project_name=name,
@@ -318,9 +348,70 @@ def get_sheet_rows() -> list[SheetRow]:
                 description=col(raw_row, "description"),
                 board_template_id=col(raw_row, "board_template_id"),
                 asana_project_link=col(raw_row, "asana_project_link"),
+                sheet_row_number=i,
             )
         )
     return rows
+
+
+def _col_index_to_letter(idx: int) -> str:
+    """Zamienia indeks kolumny (0-indeksowany) na literę arkusza (0->A, 1->B, ..., 25->Z, 26->AA...)."""
+    idx += 1
+    letters = ""
+    while idx > 0:
+        idx, rem = divmod(idx - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
+def write_jira_keys_to_sheet(updates: dict[int, str]) -> None:
+    """Zapisuje wygenerowane klucze Jira z powrotem do arkusza (kolumna
+    'jira_key'), żeby były widoczne dla całego zespołu, nie tylko w lokalnym
+    project_key_cache.json. updates: {numer_wiersza_w_arkuszu: klucz}.
+
+    Wymaga:
+    - pełnego zakresu SHEETS_SCOPES (odczyt + zapis) — już ustawione powyżej,
+    - żeby konto serwisowe (GOOGLE_APPLICATION_CREDENTIALS) miało w arkuszu
+      uprawnienia EDYTORA, nie tylko przeglądającego (udostępnij arkusz na
+      adres e-mail konta serwisowego, tak jak przy odczycie, ale z dostępem
+      \"Editor\"),
+    - żeby kolumna 'jira_key' JUŻ ISTNIAŁA w nagłówku arkusza."""
+    if not updates:
+        return
+
+    creds = service_account.Credentials.from_service_account_file(
+        GOOGLE_APPLICATION_CREDENTIALS, scopes=SHEETS_SCOPES
+    )
+    service = build("sheets", "v4", credentials=creds)
+
+    tab_name = GOOGLE_SHEET_RANGE.split("!")[0]
+    header_result = (
+        service.spreadsheets().values().get(spreadsheetId=GOOGLE_SHEET_ID, range=f"{tab_name}!1:1").execute()
+    )
+    header = [h.strip().lower() for h in header_result.get("values", [[]])[0]]
+    if "jira_key" not in header:
+        print(
+            "  [OSTRZEŻENIE] Kolumna 'jira_key' nie istnieje w arkuszu — nie mogę "
+            "zapisać wygenerowanych kluczy z powrotem. Dodaj tę kolumnę w nagłówku."
+        )
+        return
+    col_letter = _col_index_to_letter(header.index("jira_key"))
+
+    data = [
+        {"range": f"{tab_name}!{col_letter}{row_num}", "values": [[key]]}
+        for row_num, key in updates.items()
+    ]
+    try:
+        service.spreadsheets().values().batchUpdate(
+            spreadsheetId=GOOGLE_SHEET_ID, body={"valueInputOption": "RAW", "data": data}
+        ).execute()
+        print(f"  Zapisano {len(updates)} wygenerowany(ch) klucz(y) z powrotem do arkusza.")
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"  [OSTRZEŻENIE] Nie udało się zapisać kluczy do arkusza: {exc}\n"
+            f"  (sprawdź, czy konto serwisowe ma uprawnienia Edytora do arkusza, "
+            f"nie tylko Przeglądającego)"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -469,18 +560,21 @@ def add_group_to_project_role(project_key: str, role_id: str, group_name: str) -
         raise RuntimeError(f"Błąd dodawania grupy '{group_name}' do roli: {_format_jira_error(resp)}")
 
 
-def add_user_to_project_role(project_key: str, role_id: str, account_id: str) -> None:
-    """Dodaje pojedynczego użytkownika (po accountId) do roli projektowej."""
+def add_users_to_project_role(project_key: str, role_id: str, account_ids: list[str]) -> None:
+    """Dodaje jednego LUB WIELU użytkowników (po accountId) do roli projektowej
+    jednym żądaniem — Jira natywnie przyjmuje listę w polu 'user'."""
+    if not account_ids:
+        return
     url = f"{JIRA_BASE_URL}/rest/api/3/project/{project_key}/role/{role_id}"
     resp = requests.post(
         url,
         auth=jira_auth(),
         headers={"Content-Type": "application/json"},
-        json={"user": [account_id]},
+        json={"user": account_ids},
         timeout=30,
     )
     if resp.status_code >= 300:
-        raise RuntimeError(f"Błąd dodawania użytkownika do roli: {_format_jira_error(resp)}")
+        raise RuntimeError(f"Błąd dodawania użytkownika(ów) do roli: {_format_jira_error(resp)}")
 
 
 def jira_project_exists(key: str) -> bool:
@@ -698,29 +792,36 @@ def apply_template_schemes(new_project_id: str, schemes: TemplateSchemes) -> lis
 # Budowanie listy projektów do utworzenia (arkusz = źródło prawdy)
 # --------------------------------------------------------------------------- #
 
-def build_projects_to_create(
-    sheet_rows: list[SheetRow], asana_projects: list[AsanaProject]
-) -> list[ProjectToCreate]:
-    asana_by_name = {normalize(p.name): p for p in asana_projects}
+def build_projects_to_create(sheet_rows: list[SheetRow]) -> list[ProjectToCreate]:
     cache = load_key_cache()
     reserved_keys = set(cache.values())
 
     projects: list[ProjectToCreate] = []
+    skipped_no_asana_access: list[str] = []
     for row in sheet_rows:
         asana_match = None
         gid = extract_asana_project_gid(row.asana_project_link)
         if gid:
-            # Link podany wprost - pobierz DOKŁADNIE ten projekt, bez zgadywania po nazwie.
             try:
                 asana_match = get_asana_project_by_gid(gid)
                 if not asana_match:
                     print(f"  [OSTRZEŻENIE] Link do Asany dla '{row.project_name}' wskazuje na "
-                          f"nieistniejący/niedostępny projekt (gid={gid}) — próbuję dopasować po nazwie.")
+                          f"nieistniejący/niedostępny projekt (gid={gid}) — POMIJAM CAŁY WIERSZ "
+                          f"(projekt NIE zostanie utworzony w Jirze).")
+                    skipped_no_asana_access.append(row.project_name)
+                    continue
             except Exception as exc:  # noqa: BLE001
                 print(f"  [OSTRZEŻENIE] Nie udało się pobrać projektu Asany po linku dla "
-                      f"'{row.project_name}': {exc} — próbuję dopasować po nazwie.")
-        if asana_match is None:
-            asana_match = asana_by_name.get(normalize(row.project_name))
+                      f"'{row.project_name}': {exc} — POMIJAM CAŁY WIERSZ "
+                      f"(projekt NIE zostanie utworzony w Jirze).")
+                skipped_no_asana_access.append(row.project_name)
+                continue
+        else:
+            print(f"  [OSTRZEŻENIE] Brak asana_project_link dla '{row.project_name}' — POMIJAM CAŁY "
+                  f"WIERSZ (projekt NIE zostanie utworzony w Jirze; dopasowanie po nazwie zostało "
+                  f"celowo wyłączone, bo bywa niejednoznaczne przy zduplikowanych nazwach projektów w Asanie).")
+            skipped_no_asana_access.append(row.project_name)
+            continue
 
         description = row.description or (asana_match.notes if asana_match else "")
         key = assign_jira_key(row, cache, reserved_keys)
@@ -735,8 +836,16 @@ def build_projects_to_create(
                 lead_account_id=lead_account_id,
                 description=description,
                 matched_in_asana=asana_match is not None,
+                sheet_row_number=row.sheet_row_number,
+                key_was_generated=not row.jira_key,  # w arkuszu było puste = wygenerowaliśmy
             )
         )
+
+    if skipped_no_asana_access:
+        print(f"\n[PODSUMOWANIE] Pominięto {len(skipped_no_asana_access)} wiersz(y) bez dostępu do "
+              f"Asany — te projekty NIE zostały utworzone w Jirze:")
+        for name in skipped_no_asana_access:
+            print(f"  - {name}")
 
     save_key_cache(cache)
     return projects
@@ -767,20 +876,30 @@ def main() -> None:
         print()
 
     developer_role_id: Optional[str] = None
-    if DEVELOPER_GROUP_NAME:
+    if DEVELOPER_GROUP_NAME or DEVELOPER_ACCOUNT_IDS:
         developer_role_id = get_role_id_by_name(DEVELOPER_ROLE_NAME)
         if developer_role_id:
-            print(f"Grupa '{DEVELOPER_GROUP_NAME}' będzie dodawana do roli '{DEVELOPER_ROLE_NAME}' (id {developer_role_id}) w każdym projekcie.\n")
+            if DEVELOPER_GROUP_NAME:
+                print(f"Grupa '{DEVELOPER_GROUP_NAME}' będzie dodawana do roli '{DEVELOPER_ROLE_NAME}' (id {developer_role_id}) w każdym projekcie.\n")
+            if DEVELOPER_ACCOUNT_IDS:
+                dev_count = len([a for a in DEVELOPER_ACCOUNT_IDS.split(",") if a.strip()])
+                label = f"{dev_count} użytkowników" if dev_count > 1 else "1 użytkownik"
+                print(f"{label} (DEVELOPER_ACCOUNT_IDS) będzie dodawanych do roli '{DEVELOPER_ROLE_NAME}' w każdym projekcie.\n")
         else:
-            print(f"UWAGA: nie znaleziono roli '{DEVELOPER_ROLE_NAME}' w Jirze — grupa NIE zostanie dodana do żadnego projektu.\n")
+            print(f"UWAGA: nie znaleziono roli '{DEVELOPER_ROLE_NAME}' w Jirze — nic NIE zostanie dodane do żadnego projektu.\n")
 
     admin_role_id: Optional[str] = None
-    if ADMIN_ACCOUNT_ID:
+    if ADMIN_ACCOUNT_ID or ADD_LEAD_AS_ADMIN:
         admin_role_id = get_role_id_by_name(ADMIN_ROLE_NAME)
         if admin_role_id:
-            print(f"Użytkownik {ADMIN_ACCOUNT_ID} będzie dodawany do roli '{ADMIN_ROLE_NAME}' (id {admin_role_id}) w każdym projekcie.\n")
+            if ADMIN_ACCOUNT_ID:
+                admin_count = len([a for a in ADMIN_ACCOUNT_ID.split(",") if a.strip()])
+                label = f"{admin_count} użytkowników" if admin_count > 1 else f"Użytkownik {ADMIN_ACCOUNT_ID}"
+                print(f"{label} będzie dodawany do roli '{ADMIN_ROLE_NAME}' (id {admin_role_id}) w każdym projekcie.\n")
+            if ADD_LEAD_AS_ADMIN:
+                print(f"Lead każdego projektu będzie dodatkowo dodawany do roli '{ADMIN_ROLE_NAME}' w SWOIM projekcie.\n")
         else:
-            print(f"UWAGA: nie znaleziono roli '{ADMIN_ROLE_NAME}' w Jirze — użytkownik NIE zostanie dodany do żadnego projektu.\n")
+            print(f"UWAGA: nie znaleziono roli '{ADMIN_ROLE_NAME}' w Jirze — nikt NIE zostanie dodany do żadnego projektu.\n")
 
     print("Pobieram wybrane projekty z arkusza Google...")
     sheet_rows = get_sheet_rows()
@@ -789,11 +908,7 @@ def main() -> None:
         print("Arkusz jest pusty lub brak kolumny 'project_name' — nic do zrobienia.")
         return
 
-    print("Pobieram projekty z Asany (do wzbogacenia opisów)...")
-    asana_projects = get_asana_projects()
-    print(f"  Znaleziono {len(asana_projects)} projekt(ów) w Asanie.")
-
-    projects = build_projects_to_create(sheet_rows, asana_projects)
+    projects = build_projects_to_create(sheet_rows)
 
     not_in_asana = [p for p in projects if not p.matched_in_asana]
     if not_in_asana:
@@ -803,9 +918,13 @@ def main() -> None:
             print(f"  - {p.name}")
 
     created, skipped, updated, errors, warnings = [], [], [], [], []
+    sheet_key_updates: dict[int, str] = {}  # numer_wiersza -> nowo wygenerowany klucz
 
     print(f"\nPrzetwarzam {len(projects)} projekt(ów)...")
     for p in projects:
+        if p.key_was_generated and p.sheet_row_number and not args.dry_run:
+            sheet_key_updates[p.sheet_row_number] = p.jira_key
+
         try:
             if not p.lead_account_id:
                 raise RuntimeError(
@@ -846,19 +965,32 @@ def main() -> None:
             print(f"  [UTWORZONO] {p.jira_key} — '{p.name}'")
 
             if developer_role_id:
-                try:
-                    add_group_to_project_role(p.jira_key, developer_role_id, DEVELOPER_GROUP_NAME)
-                    print(f"    Dodano grupę '{DEVELOPER_GROUP_NAME}' do roli '{DEVELOPER_ROLE_NAME}'.")
-                except Exception as exc:  # noqa: BLE001
-                    print(f"    [OSTRZEŻENIE] Nie udało się dodać grupy deweloperów: {exc}")
-                    warnings.append((p, f"grupa deweloperów: {exc}"))
+                if DEVELOPER_GROUP_NAME:
+                    try:
+                        add_group_to_project_role(p.jira_key, developer_role_id, DEVELOPER_GROUP_NAME)
+                        print(f"    Dodano grupę '{DEVELOPER_GROUP_NAME}' do roli '{DEVELOPER_ROLE_NAME}'.")
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"    [OSTRZEŻENIE] Nie udało się dodać grupy deweloperów: {exc}")
+                        warnings.append((p, f"grupa deweloperów: {exc}"))
+                if DEVELOPER_ACCOUNT_IDS:
+                    try:
+                        dev_account_ids = [a.strip() for a in DEVELOPER_ACCOUNT_IDS.split(",") if a.strip()]
+                        add_users_to_project_role(p.jira_key, developer_role_id, dev_account_ids)
+                        print(f"    Dodano {len(dev_account_ids)} użytkownika(ów) do roli '{DEVELOPER_ROLE_NAME}'.")
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"    [OSTRZEŻENIE] Nie udało się dodać użytkowników-deweloperów: {exc}")
+                        warnings.append((p, f"użytkownicy-deweloperzy: {exc}"))
 
             if admin_role_id:
                 try:
-                    add_user_to_project_role(p.jira_key, admin_role_id, ADMIN_ACCOUNT_ID)
-                    print(f"    Dodano użytkownika do roli '{ADMIN_ROLE_NAME}'.")
+                    admin_account_ids = [a.strip() for a in ADMIN_ACCOUNT_ID.split(",") if a.strip()]
+                    if ADD_LEAD_AS_ADMIN and p.lead_account_id and p.lead_account_id not in admin_account_ids:
+                        admin_account_ids.append(p.lead_account_id)
+                    add_users_to_project_role(p.jira_key, admin_role_id, admin_account_ids)
+                    label = f"{len(admin_account_ids)} użytkowników" if len(admin_account_ids) > 1 else "użytkownika"
+                    print(f"    Dodano {label} do roli '{ADMIN_ROLE_NAME}'.")
                 except Exception as exc:  # noqa: BLE001
-                    print(f"    [OSTRZEŻENIE] Nie udało się dodać administratora: {exc}")
+                    print(f"    [OSTRZEŻENIE] Nie udało się dodać administratora(ów): {exc}")
                     warnings.append((p, f"administrator: {exc}"))
 
             if template_schemes:
@@ -890,6 +1022,10 @@ def main() -> None:
             print(f"  - {p.jira_key} ('{p.name}'): {msg}")
     print(f"Bez dopasowania w Asanie: {len(not_in_asana)}")
     print(f"\nMapowanie nazwa -> klucz zapisane w: {PROJECT_KEY_CACHE_FILE}")
+
+    if sheet_key_updates:
+        print(f"\nZapisuję {len(sheet_key_updates)} wygenerowany(ch) klucz(y) z powrotem do arkusza...")
+        write_jira_keys_to_sheet(sheet_key_updates)
 
     if not args.dry_run:
         send_slack_summary(

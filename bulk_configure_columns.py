@@ -485,19 +485,34 @@ def norm_name(s: str) -> str:
 # Main
 # --------------------------------------------------------------------------- #
 
-def get_project_keys(args) -> list[str]:
+def get_project_pairs(args) -> list[tuple[str, str]]:
+    """Zwraca (project_key, board_template_id). board_template_id może być
+    pustym stringiem — oznacza to użycie domyślnego wzorca z .env
+    (JIRA_TEMPLATE_BOARD_ID, rozwiązywane przez resolve_template_board_id())."""
     if args.project_keys:
-        return [k.strip().upper() for k in args.project_keys.split(",") if k.strip()]
+        keys = [k.strip().upper() for k in args.project_keys.split(",") if k.strip()]
+        override = args.template_board_id or ""
+        return [(k, override) for k in keys]
+
     sheet_rows = core.get_sheet_rows()
     cache = core.load_key_cache()
     reserved = set(cache.values())
-    return [core.assign_jira_key(row, cache, reserved) for row in sheet_rows]
+    pairs = []
+    for row in sheet_rows:
+        key = core.assign_jira_key(row, cache, reserved)
+        pairs.append((key, (row.board_template_id or "").strip()))
+    return pairs
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Ustawia kolumny tablicy na wielu projektach na podstawie wzorca (standardowy, 11-kolumnowy układ).")
+    parser = argparse.ArgumentParser(description="Ustawia kolumny tablicy na wielu projektach — wzorzec per wiersz z kolumny board_template_id (puste = domyślny z .env).")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--project-keys", type=str, default=None)
+    parser.add_argument(
+        "--template-board-id", type=str, default=None,
+        help="Nadpisuje wzorzec dla projektów podanych przez --project-keys "
+             "(ignorowane przy odczycie z arkusza — tam decyduje kolumna board_template_id).",
+    )
     parser.add_argument("--interactive", action="store_true", help="Tryb widoczny + pauza na pierwszym projekcie.")
     parser.add_argument("--dry-run", action="store_true", help="Tylko pokaż plan, nie otwieraj przeglądarki.")
     parser.add_argument(
@@ -511,26 +526,34 @@ def main() -> None:
         print(f"Brak pliku {STATE_FILE}. Uruchom najpierw: python save_login_session.py")
         sys.exit(1)
 
-    print(f"Odczytuję docelowy układ kolumn z projektu wzorcowego '{TEMPLATE_PROJECT_KEY}'...")
-    template_board_id = resolve_template_board_id()
-    print(f"  Używam tablicy id {template_board_id}.")
-    target_columns = get_board_columns(template_board_id)
-    all_status_ids = [sid for c in target_columns for sid in c.statuses]
-    status_names = get_status_names(all_status_ids)
-
-    print("Docelowy układ kolumn:")
-    for c in target_columns:
-        names = [status_names.get(sid, sid) for sid in c.statuses]
-        print(f"  {c.name}: {', '.join(names)}")
-
-    project_keys = get_project_keys(args)
+    project_pairs = get_project_pairs(args)
     if args.limit:
-        project_keys = project_keys[: args.limit]
-    print(f"\nProjektów do przetworzenia: {len(project_keys)}")
+        project_pairs = project_pairs[: args.limit]
+    print(f"Projektów do przetworzenia: {len(project_pairs)}")
+
+    # Wzorce ładowane LENIWIE i CACHE'OWANE per board_template_id - różne
+    # projekty mogą używać różnych wzorców (kolumna board_template_id w arkuszu).
+    template_cache: dict[str, tuple] = {}  # board_template_id -> (columns, status_names)
+
+    def get_template_for(board_template_id: str) -> list:
+        resolved_id = int(board_template_id) if board_template_id else resolve_template_board_id()
+        cache_key = str(resolved_id)
+        if cache_key not in template_cache:
+            cols = get_board_columns(resolved_id)
+            ids = [sid for c in cols for sid in c.statuses]
+            names = get_status_names(ids)
+            template_cache[cache_key] = (cols, names)
+            print(f"\n[Wzorzec: tablica {resolved_id}] Docelowy układ kolumn:")
+            for c in cols:
+                nm = [names.get(sid, sid) for sid in c.statuses]
+                print(f"  {c.name}: {', '.join(nm)}")
+        return template_cache[cache_key][0]
 
     if args.dry_run:
-        for key in project_keys:
-            print(f"  [DRY-RUN] Ustawiłbym kolumny na tablicy projektu {key}.")
+        for key, board_template_id in project_pairs:
+            target_columns = get_template_for(board_template_id)
+            label = board_template_id or "(domyślny z .env)"
+            print(f"  [DRY-RUN] {key}: ustawiłbym kolumny wg wzorca {label} ({len(target_columns)} kolumn).")
         return
 
     report = []
@@ -539,8 +562,10 @@ def main() -> None:
         context = browser.new_context(storage_state=STATE_FILE)
         page = context.new_page()
 
-        for i, key in enumerate(project_keys):
-            print(f"\n[{i + 1}/{len(project_keys)}] {key}")
+        for i, (key, board_template_id) in enumerate(project_pairs):
+            print(f"\n[{i + 1}/{len(project_pairs)}] {key}")
+            target_columns = get_template_for(board_template_id)
+
             board_id = find_board_id(key)
             if not board_id:
                 print("  Brak tablicy — pomijam.")
@@ -608,11 +633,12 @@ def main() -> None:
     print("=" * 60)
     print("Skrypt utworzył/nazwał kolumny, ale NIE przypisuje statusów (robi się to")
     print("ręcznie — Board settings -> Columns, przeciągnij karty z 'Unmapped statuses').")
-    print("Docelowe mapowanie status -> kolumna (ze wzorca):")
-    for c in target_columns:
-        names = [status_names.get(sid, sid) for sid in c.statuses]
-        if names:
-            print(f"  {c.name}: {', '.join(names)}")
+    for board_template_id, (cols, names) in template_cache.items():
+        print(f"\nDocelowe mapowanie status -> kolumna (wzorzec: tablica {board_template_id}):")
+        for c in cols:
+            status_labels = [names.get(sid, sid) for sid in c.statuses]
+            if status_labels:
+                print(f"  {c.name}: {', '.join(status_labels)}")
 
 
 if __name__ == "__main__":

@@ -291,6 +291,10 @@ Asana → Jira (the reverse direction is a separate script,
   assigned in the given Jira project (e.g. not a member of it), the script
   automatically tries the lead of THAT SPECIFIC project instead of giving
   up.
+- **Formatting fallback** — if the HTML→ADF conversion produces a structure
+  Jira rejects as invalid (rare, but happens), the script automatically
+  retries with the description as plain text (no formatting) instead of
+  losing the whole task.
 
 ### How it avoids duplicates on repeated runs
 
@@ -409,24 +413,74 @@ DEBUG_SYNC=1 python asana_jira_sync.py --limit 1 --project-keys KEY
 
 ## 11a. Correct order of steps (IMPORTANT)
 
-Statuses are assigned to board columns **manually** (drag-and-drop
-automation turned out to be too unreliable in this Jira version — see
-`browser_automation/README.md`). This forces a specific order — task
-synchronization (`asana_jira_sync.py`) should NOT be run right after
-creating a project, because the board isn't ready yet:
+Assigning statuses to board columns is **fully automated**
+(`run_column_assignments.py` — see section 11b) via a discovered internal
+Jira endpoint, driven from Python through Playwright. This replaced an
+earlier drag-and-drop automation attempt (too unreliable in this Jira
+version) as well as the subsequent manual step. The order of steps still
+matters — each one assumes the previous one has already finished:
 
 1. `python jira_sync.py` — create the project(s).
 2. `python bulk_configure_columns.py` — create the columns (template
    per row: the default from `.env`, or from the `board_template_id`
    column if filled in — one run handles all projects regardless of which
    template they need).
-3. **You manually** drag statuses into the correct columns in Jira (a
-   cheat-sheet is printed at the end of step 2, separately for each
-   template used).
+3. `python run_column_assignments.py` — **automatically** assigns statuses
+   to the correct columns (see section 11b). Replaces the former manual step.
 4. Only now: `python asana_jira_sync.py` — task syncing makes sense, since
    tasks land on an already-ready, correctly configured board.
 5. Optionally, as ongoing work happens: `python jira_asana_sync.py` — the
    reverse direction, carrying changes from Jira to Asana (see section 12).
+
+## 11b. Automatically assigning statuses to columns (`run_column_assignments.py`)
+
+Jira has **no public, documented API** for writing the status-to-column
+mapping on a board — hence the earlier (unsuccessful) attempts at
+simulating drag-and-drop with a mouse. We did, however, find a working
+**internal** endpoint that Jira's own UI uses (discovered via DevTools ->
+Network while manually dragging a status):
+
+- **Read** — GraphQL, persisted query `ColumnsSettingsPageNewContentQuery`.
+- **Write** — `PUT /rest/greenhopper/1.0/rapidviewconfig/columns` (an old,
+  undocumented "GreenHopper" API — the predecessor of today's "Jira
+  Software" name).
+
+**Important caveat:** this is an UNOFFICIAL API. Atlassian doesn't
+guarantee its stability — it may change without notice on a Jira update
+(especially `atl-client-version` and `x-experimentalapi`, which are tied to
+a specific frontend build). If, after some future Jira update, the script
+starts returning a 400/415 error from GraphQL, you'll need to freshly
+capture those two values from Network (see the comments in
+`assign_statuses_to_columns.js`) and swap them in.
+
+These endpoints require a **browser session** (cookies, CSRF token), not a
+plain API token — that's why execution happens via Playwright with a saved
+login session (`auth_state.json`), rather than via `requests` with a token
+like the rest of the scripts.
+
+### Files for this mechanism
+
+| File | Role |
+|---|---|
+| `assign_statuses_to_columns.js` | JS library (`assignStatusesToColumns`, `assignStatusesToManyBoards` functions) — can also be pasted manually into the browser console, independent of Python |
+| `generate_column_assignments.py` | generates a list of {boardId, projectKey, mapping} for the sheet's projects (read-only, regular API) |
+| `run_column_assignments.py` | **main end-to-end script** — combines both of the above, runs via Playwright, no manual interaction needed |
+
+### Running it
+
+```bash
+python save_login_session.py                                   # if the session expired
+python run_column_assignments.py --limit 1 --project-keys KEY    # test on 1 project
+python run_column_assignments.py                                 # all projects
+```
+
+Results are saved to `column_assignment_report.json`.
+
+**Alternative without Playwright:** you can also paste
+`assign_statuses_to_columns.js` manually into the browser console (F12) and
+call the functions directly — handy for a quick, one-off test. To avoid
+re-pasting every time, save it as a DevTools Snippet (Sources -> Snippets —
+saved permanently in the browser, run with Ctrl+Enter).
 
 ## 12. Reverse sync direction (`jira_asana_sync.py`, Jira → Asana)
 

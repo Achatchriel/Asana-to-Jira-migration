@@ -41,7 +41,14 @@ def get_project_sections(project_gid: str) -> list[str]:
     url = f"{ASANA_API}/projects/{project_gid}/sections"
     resp = requests.get(url, headers=ASANA_HEADERS, params={"opt_fields": "name"}, timeout=30)
     resp.raise_for_status()
-    return [s["name"] for s in resp.json().get("data", [])]
+    # .strip() - niektóre sekcje w Asanie mają przypadkowe białe znaki
+    # (spacje, a nawet znak nowej linii) na początku/końcu nazwy - bez tego
+    # dwie WIZUALNIE identyczne nazwy sekcji ("Doku (Specialist)" i
+    # "\nDoku (Specialist)") są traktowane jako RÓŻNE klucze, więc wpis w
+    # section_status_map.json nigdy nie pasuje, bez względu na to, ile razy
+    # go poprawisz (odkryte na żywo - potwierdzone przez identyczny artefakt
+    # powtarzający się w kilku kolejnych uruchomieniach).
+    return [s["name"].strip() for s in resp.json().get("data", [])]
 
 
 def load_existing_map() -> dict:
@@ -110,7 +117,17 @@ def main() -> None:
         print(f"\nSekcje BEZ wpisu w section_status_map.json ({len(missing)}):\n")
         for name in missing:
             example_project = section_to_projects[name][0]
-            print(f'  "{name}: {example_project}": "",')
+            # WAŻNE: klucz w JSON-ie to GOŁA nazwa sekcji (bez ": ProjektName")
+            # - dokładnie tak, jak porównanie wyżej (unique_sections -
+            # already_mapped) już to sprawdza, i dokładnie tak, jak wygląda
+            # 98% istniejących kluczy w section_status_map.json. Przykładowy
+            # projekt wypisany jest OSOBNO, nad linią JSON (nie wewnątrz niej),
+            # żeby linię dało się bezpiecznie wkleić wprost do pliku bez
+            # psucia składni JSON-a - to właśnie doklejanie ": ProjektName" DO
+            # klucza wcześniej powodowało, że uzupełnione wpisy NIGDY nie
+            # znikały z tej listy (miały fragment, którego reszta mapy nie ma).
+            print(f"  # przykładowy projekt: {example_project}")
+            print(f'  "{name}": "",')
 
     if args.save:
         out = {

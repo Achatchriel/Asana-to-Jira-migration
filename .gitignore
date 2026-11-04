@@ -4,7 +4,7 @@
 !.env.example
 *.json
 !package.json
-strix-dashboard-*.json
+dashboard-*.json
 
 # Sesja logowania do przeglądarki (Playwright) - zawiera aktywne ciasteczka sesji
 auth_state.json
@@ -31,3 +31,29 @@ __pycache__/
 
 # Pliki wyjściowe
 getint_routing_checklist.xlsx
+
+# panel migracji (migration_app)
+migration_app/runs/
+migration_app/checks/
+migration_app/backups/
+
+# Dane robocze (eksporty, listy projektów, raporty, diagnostyka)
+*.csv
+*.xlsx
+*.xlsx#
+*.zip
+*.deb
+*.png
+*.txt
+!requirements.txt
+*.yaml
+!jira_schema.yaml
+diagnostics/
+locks/
+repair_reports/
+pipeline_summaries/
+pipeline_slack/
+mapy_*/
+section_status_profiles/
+venv/
+hs_err_pid*.log

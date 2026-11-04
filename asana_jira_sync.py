@@ -1,46 +1,64 @@
 #!/usr/bin/env python3
 """
-asana_jira_sync.py — ETAP 1 (z 3)
+asana_jira_sync.py - synchronizacja Asana -> Jira (krok 5 run_full_pipeline.py)
 
-Ten etap celowo obejmuje TYLKO:
-  - Jednokierunkową synchronizację Asana -> Jira (na razie bez powrotu).
-  - Podstawowe pola: tytuł, opis, przypisany, status (przez sekcję Asany),
-    termin.
-  - BEZ komentarzy i załączników (te dojdą w Etapie 2 i 3, po potwierdzeniu,
-    że ten rdzeń działa poprawnie u Ciebie).
+Co synchronizuje (dla każdego projektu z arkusza z wypełnionym jira_key):
+  - Zadania: tytuł, opis (HTML -> ADF), przypisany (przez user_map.json),
+    termin, status (sekcja Asany -> status Jiry przez section_status_map.json;
+    zadanie ukończone w Asanie -> zawsze "Fertig").
+  - Hierarchię:
+      * zwykłe zadanie -> Task, jego podzadania -> Sub-task,
+      * kandydat z epic_candidates.json (lub zgłoszenie, które już jest Epikiem)
+        -> Epic, jego podzadania -> Task pod Epikiem, a ich podzadania -> Sub-task,
+      * głębsze poziomy są spłaszczane pod najbliższy dopuszczalny poziom
+        (top_level_ancestor_key), bo Jira nie zagnieżdża Sub-tasków.
+  - Komentarze: jako konto API, z prefiksem [Asana - autor, data]
+    (Jira nie pozwala podszywać się pod innego autora).
+  - Załączniki: pobierane z Asany i wgrywane do Jiry.
 
-Dlaczego etapami: przy 550 projektach i braku możliwości przetestowania tego
-z mojej strony (brak dostępu sieciowego do api.asana.com / *.atlassian.net
-z mojego środowiska) lepiej najpierw zweryfikować rdzeń na 1 projekcie, niż
-od razu pisać całość na ślepo.
+Kierunek zwrotny (Jira -> Asana) robi osobny skrypt: jira_asana_sync.py.
 
-Mapowanie projektów: reużywa project_key_cache.json (ten sam plik, którego
-używa jira_sync.py) — każda para (nazwa projektu Asana -> klucz Jira) już
-tam jest, więc NIE trzeba konfigurować Item Routing ręcznie.
+Istniejące zgłoszenia: aktualizowane są tylko pola treści i status. Typ i
+rodzic są ustawiane wyłącznie przy tworzeniu - ich późniejsze zmiany robią
+narzędzia naprawcze (retrofit_epics.py, revert_false_epics.py,
+resolve_deep_chains.py), a refresh_state_flags.py odświeża potem flagi w stanie.
 
-Mapowanie zadań (żeby nie duplikować przy kolejnych uruchomieniach): osobny
-lokalny plik task_sync_state.json, budowany i utrzymywany przez ten skrypt:
+Dopasowanie projektów: po asana_project_link z arkusza. Wiersz bez linku jest
+POMIJANY (dopasowanie po nazwie celowo wyłączone - bywało niejednoznaczne
+przy zduplikowanych nazwach projektów w Asanie).
+
+Stan (task_sync_state.json) - mapa powiązań, dzięki której kolejne
+uruchomienia nie tworzą duplikatów; zapisywany atomowo po każdym zadaniu:
 {
-  "<klucz Jira projektu>": {
+  "<klucz projektu Jira>": {
     "<asana_task_gid>": {
       "jira_key": "PROJ-123",
-      "asana_modified_at": "2026-01-01T12:00:00.000Z"
+      "asana_modified_at": "...",
+      "is_epic": false, "is_subtask": true, "top_level_ancestor_key": "PROJ-100",
+      "synced_comment_gids": [...], "synced_attachment_gids": [...],
+      "deleted_in_jira": false            # opcjonalnie, patrz mark_deleted_as_skipped.py
     }
   }
 }
 
-Wymaga w .env (te same zmienne co jira_sync.py):
-  JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, ASANA_TOKEN, ASANA_WORKSPACE_GID
+Wymaga w .env: JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, ASANA_TOKEN,
+ASANA_WORKSPACE_GID oraz zmiennych Google Sheets używanych przez jira_sync.py.
 
 Użycie:
-  python asana_jira_sync.py --dry-run --limit 1 --project-keys KLUCZ
-  python asana_jira_sync.py --limit 1 --project-keys KLUCZ   # faktyczny zapis
-  python asana_jira_sync.py                                   # wszystkie z arkusza
+  python asana_jira_sync.py --dry-run --limit 1 --project-keys KLUCZ   # podgląd
+  python asana_jira_sync.py --project-keys KLUCZ1,KLUCZ2               # wybrane projekty
+  python asana_jira_sync.py --shard 1/3                                # 1. z 3 równoległych procesów
+  python asana_jira_sync.py                                            # wszystkie z arkusza
+
+Przy uruchomieniu przez run_full_pipeline.py zapisuje liczby i szczegóły
+błędów do pipeline_summaries/ (zbiorcze podsumowanie na Slacku wysyła
+orkiestrator). Uruchomiony ręcznie wysyła własne podsumowanie.
 """
 import argparse
 import fcntl
 import json
 import os
+import re
 import sys
 import time
 from html.parser import HTMLParser
@@ -54,6 +72,8 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=True)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import jira_sync as core  # reużywamy odczytu arkusza, cache'u kluczy, auth
 from notify import setup_file_logging, send_slack_summary
+from pipeline_summary import is_pipeline_child, record_error, record_warning, write_shard_summary
+from project_lock import project_lock
 
 JIRA_BASE_URL = os.environ["JIRA_BASE_URL"].rstrip("/")
 JIRA_EMAIL = os.environ["JIRA_EMAIL"]
@@ -66,6 +86,21 @@ ASANA_HEADERS = {"Authorization": f"Bearer {ASANA_TOKEN}"}
 ASANA_API = "https://app.asana.com/api/1.0"
 
 STATE_FILE = Path("task_sync_state.json")
+EPIC_CANDIDATES_FILE = Path("epic_candidates.json")
+
+
+def load_epic_candidates() -> dict:
+    """Wczytuje epic_candidates.json (produkowany przez
+    detect_epic_candidates.py) - {jira_key: [gid, ...]} zadań najwyższego
+    poziomu, które mają podzadania podzadań i dlatego powinny zostać
+    utworzone jako Epic. Plik jest opcjonalny - jeśli go nie ma, po prostu
+    nic nie jest traktowane jako kandydat (zachowanie bez zmian)."""
+    if not EPIC_CANDIDATES_FILE.exists():
+        return {}
+    try:
+        return json.loads(EPIC_CANDIDATES_FILE.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
 USER_MAP_FILE = Path("user_map.json")  # Asana user gid -> Jira accountId (ręcznie uzupełniany)
 SECTION_STATUS_MAP_FILE = Path("section_status_map.json")  # nazwa sekcji Asany -> nazwa statusu Jira
 WORKFLOW_GRAPH_CACHE_FILE = Path("workflow_graph_cache.json")  # trwały cache map workflow (patrz build_workflow_graph)
@@ -78,15 +113,20 @@ REQUEST_TIMEOUT = 30
 # tylko chwilową niedostępność zasobów po stronie serwera. Bez retry taki
 # błąd zabijał całe zadanie na stałe, mimo że ponowna próba chwilę później
 # zwykle się udaje.
-RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}  # 429 dodane - limit zapytań, warto ponowić
 MAX_RETRIES = 4
 RETRY_BASE_DELAY = 2  # sekundy; rośnie: 2, 4, 8, 16...
 
 
 def request_with_retry(method: str, url: str, **kwargs) -> requests.Response:
-    """Wrapper na requests.request() z automatycznym ponawianiem błędów 5xx.
-    Błędy 4xx (np. 400 walidacji) NIE są ponawiane - to prawdziwe błędy
-    żądania, ponowna próba i tak zwróci to samo."""
+    """Wrapper na requests.request() z automatycznym ponawianiem błędów 5xx
+    ORAZ 429 (limit zapytań przy dużym obciążeniu równoległych procesów).
+    Błędy 4xx inne niż 429 (np. 400 walidacji) NIE są ponawiane - to
+    prawdziwe błędy żądania, ponowna próba i tak zwróci to samo.
+
+    Dla 429: jeśli odpowiedź zawiera nagłówek 'Retry-After', czekamy
+    DOKŁADNIE tyle, ile Jira/Asana każe (to precyzyjna wskazówka od
+    serwera) - zamiast zgadywać przez nasz ogólny, rosnący czas."""
     last_exc = None
     for attempt in range(MAX_RETRIES + 1):
         try:
@@ -99,7 +139,13 @@ def request_with_retry(method: str, url: str, **kwargs) -> requests.Response:
             return resp
 
         if attempt < MAX_RETRIES:
-            delay = RETRY_BASE_DELAY * (2 ** attempt)
+            if resp is not None and resp.status_code == 429 and resp.headers.get("Retry-After"):
+                try:
+                    delay = float(resp.headers["Retry-After"])
+                except ValueError:
+                    delay = RETRY_BASE_DELAY * (2 ** attempt)
+            else:
+                delay = RETRY_BASE_DELAY * (2 ** attempt)
             reason = f"HTTP {resp.status_code}" if resp is not None else str(last_exc)
             print(f"      [PONAWIAM {attempt + 1}/{MAX_RETRIES}] {reason} — czekam {delay}s...")
             time.sleep(delay)
@@ -120,36 +166,88 @@ _required_fields_cache: dict[tuple[str, str], dict] = {}
 # Stan lokalny (mapowanie zadań)
 # --------------------------------------------------------------------------- #
 
+# Migawka stanu z chwili wczytania (load_state) - save_state porównuje z nią stan
+# w pamięci i zapisuje na dysk WYŁĄCZNIE wpisy zmienione przez TEN proces.
+_STATE_SNAPSHOT: "dict | None" = None
+
+
+def _deep_copy(data: dict) -> dict:
+    return json.loads(json.dumps(data))
+
+
 def load_state() -> dict:
-    if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    return {}
+    """Wczytuje stan. Blokada (flock, SHARED) na czas odczytu - chroni przed
+    odczytaniem pliku w trakcie zapisu przez inny równoległy proces (bez tego
+    load_state() mogło trafić na plik w trakcie nadpisywania przez
+    save_state() i dostać uszkodzony JSON). Zapamiętuje migawkę dla save_state."""
+    global _STATE_SNAPSHOT
+    if not STATE_FILE.exists():
+        _STATE_SNAPSHOT = {}
+        return {}
+    with open(STATE_FILE, "r", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_SH)
+        try:
+            content = f.read()
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+    data = json.loads(content) if content.strip() else {}
+    _STATE_SNAPSHOT = _deep_copy(data)
+    return data
 
 
 def save_state(state: dict) -> None:
-    """Zapisuje stan bezpiecznie przy RÓWNOLEGŁYCH uruchomieniach (np. kilka
-    instancji z różnymi --project-keys naraz):
-    1. Blokada pliku (fcntl.flock) na czas odczytu+zapisu — inne procesy
-       czekają, więc nie ma wyścigu przy jednoczesnym zapisie.
-    2. SCALENIE z tym, co jest AKTUALNIE na dysku (per klucz projektu Jira),
-       zamiast bezwarunkowego nadpisania całości — dzięki temu proces A nie
-       kasuje postępu procesu B, jeśli oba pracowały na RÓŻNYCH projektach.
+    """Zapisuje stan bezpiecznie przy RÓWNOLEGŁYCH procesach.
 
-    Bezpieczne dla równoległych instancji pracujących na RÓŻNYCH projektach.
-    NIE naprawia sytuacji, gdyby dwie instancje pracowały na TYM SAMYM
-    projekcie jednocześnie — tego po prostu nie rób."""
+    BŁĄD WCZEŚNIEJSZEJ WERSJI: scalała na poziomie CAŁYCH projektów, a każdy
+    proces przekazywał CAŁY swój stan - także cudze projekty w wersji z chwili
+    startu. Proces A przy zapisie swojego projektu nadpisywał więc starą kopią
+    projekt, nad którym pracował proces B: wpisy nowo utworzonych zgłoszeń
+    znikały ze stanu (zgłoszenia zostawały w Jirze), a następny przebieg
+    tworzył je drugi raz.
+
+    Teraz: zapisywane są tylko WPISY (projekt + gid zadania), które ten proces
+    zmienił, dodał albo usunął od wczytania stanu (load_state). Wszystko inne
+    na dysku zostaje dokładnie takie, jak zapisały je inne procesy. Projekty
+    nieobecne w przekazanym słowniku nie są ruszane (można przekazać podzbiór).
+
+    Dalej: blokada pliku na czas odczytu+zapisu i zapis atomowy (plik
+    tymczasowy + os.replace) - plik docelowy zawsze w całości stary albo nowy.
+    Dwa procesy na TYM SAMYM projekcie naraz nadal są błędem (chroni przed
+    tym project_lock)."""
+    global _STATE_SNAPSHOT
+    base = _STATE_SNAPSHOT if _STATE_SNAPSHOT is not None else {}
     STATE_FILE.touch(exist_ok=True)
-    with open(STATE_FILE, "r+", encoding="utf-8") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+    lock_path = STATE_FILE.with_suffix(".lock")
+    with open(lock_path, "w") as lock_f:
+        fcntl.flock(lock_f, fcntl.LOCK_EX)
         try:
-            content = f.read()
+            content = STATE_FILE.read_text(encoding="utf-8")
             on_disk = json.loads(content) if content.strip() else {}
-            on_disk.update(state)
-            f.seek(0)
-            f.truncate()
-            json.dump(on_disk, f, indent=2, ensure_ascii=False)
+            for project, entries in state.items():
+                if not isinstance(entries, dict):
+                    on_disk[project] = entries
+                    continue
+                old = base.get(project) or {}
+                target = on_disk.setdefault(project, {})
+                for gid, entry in entries.items():
+                    if old.get(gid) != entry:
+                        target[gid] = entry
+                for gid in old:
+                    if gid not in entries:
+                        target.pop(gid, None)  # usunięte świadomie przez ten proces
+
+            tmp_path = STATE_FILE.with_suffix(".json.tmp")
+            with open(tmp_path, "w", encoding="utf-8") as tmp_f:
+                json.dump(on_disk, tmp_f, indent=2, ensure_ascii=False)
+                tmp_f.flush()
+                os.fsync(tmp_f.fileno())  # wymuś zapis na dysk przed rename
+            os.replace(tmp_path, STATE_FILE)  # atomowe na poziomie systemu plików
+            # migawka = to, co ten proces właśnie zapisał (dla kolejnych zapisów)
+            for project, entries in state.items():
+                base[project] = _deep_copy(entries) if isinstance(entries, dict) else entries
+            _STATE_SNAPSHOT = base
         finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
+            fcntl.flock(lock_f, fcntl.LOCK_UN)
 
 
 def load_user_map() -> dict:
@@ -160,6 +258,44 @@ def load_user_map() -> dict:
     if USER_MAP_FILE.exists():
         return json.loads(USER_MAP_FILE.read_text(encoding="utf-8"))
     return {}
+
+
+# Zadania, które zespół ręcznie przeniósł do Jiry i oznaczył w Asanie dopiskiem
+# (np. "Agenda JF (migriert zu Jira)", także z literówką "mirgiert"). Dla nich
+# źródłem prawdy jest Jira: zadanie RAZEM Z PODDRZEWEM jest pomijane (ani
+# tworzone, ani aktualizowane). Wzorzec (regex, bez wielkości liter) w .env.
+MIGRATED_TITLE_RE = re.compile(os.getenv("MIGRATED_TO_JIRA_PATTERN", r"mi[rg]{1,2}r?iert\s+zu\s+jira"), re.IGNORECASE)
+
+
+def is_jira_master(title: str, entry: "dict | None") -> bool:
+    """True = zadanie prowadzone w Jirze: dopisek w tytule z Asany albo wpis w stanie
+    oznaczony przez handle_migrated_to_jira.py (dzieci takiego zadania nie mają dopisku)."""
+    return bool(MIGRATED_TITLE_RE.search(title or "")) or bool((entry or {}).get("jira_master"))
+
+
+COMPLETED_KEY = "__ukonczone__"
+PROFILE_KEY = "__szablon__"
+_PROJECT_OVERRIDES: dict = {}
+
+
+def project_section_overrides(project_key: str) -> dict:
+    """Mapa sekcji TYLKO dla jednego projektu: section_status_map.<KLUCZ>.json obok
+    głównej mapy. Jej wpisy mają pierwszeństwo przed section_status_map.json (która
+    zostaje nietknięta). Specjalny wpis "__ukonczone__" = status dla zadań
+    ukończonych w Asanie (domyślnie "Fertig"). Brak pliku = zachowanie jak dotąd."""
+    if project_key not in _PROJECT_OVERRIDES:
+        path = SECTION_STATUS_MAP_FILE.with_name(f"{SECTION_STATUS_MAP_FILE.stem}.{project_key}.json")
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        # Wspólny szablon dla grupy projektów: {"__szablon__": "discovery", ...własne wpisy}
+        # -> section_status_profiles/discovery.json, wpisy projektu mają pierwszeństwo.
+        profile = data.pop(PROFILE_KEY, None)
+        if profile:
+            ppath = SECTION_STATUS_MAP_FILE.parent / "section_status_profiles" / f"{profile}.json"
+            if not ppath.exists():
+                raise RuntimeError(f"{path.name}: szablon '{profile}' nie istnieje ({ppath})")
+            data = {**json.loads(ppath.read_text(encoding="utf-8")), **data}
+        _PROJECT_OVERRIDES[project_key] = data
+    return _PROJECT_OVERRIDES[project_key]
 
 
 def load_section_status_map() -> dict:
@@ -187,7 +323,7 @@ def find_asana_project_gid(project_name: str) -> Optional[str]:
     while True:
         if offset:
             params["offset"] = offset
-        resp = requests.get(url, headers=ASANA_HEADERS, params=params, timeout=REQUEST_TIMEOUT)
+        resp = request_with_retry("GET", url, headers=ASANA_HEADERS, params=params, timeout=REQUEST_TIMEOUT)
         resp.raise_for_status()
         payload = resp.json()
         for p in payload.get("data", []):
@@ -204,7 +340,7 @@ def get_asana_tasks(project_gid: str) -> list[dict]:
     url = f"{ASANA_API}/projects/{project_gid}/tasks"
     fields = [
         "name", "html_notes", "completed", "due_on", "assignee.gid", "assignee.email",
-        "modified_at", "memberships.section.name", "memberships.project.gid",
+        "modified_at", "memberships.section.name", "memberships.project.gid", "parent.gid",
     ]
     params = {"opt_fields": ",".join(fields), "limit": 100}
     tasks = []
@@ -212,13 +348,46 @@ def get_asana_tasks(project_gid: str) -> list[dict]:
     while True:
         if offset:
             params["offset"] = offset
-        resp = requests.get(url, headers=ASANA_HEADERS, params=params, timeout=REQUEST_TIMEOUT)
+        resp = request_with_retry("GET", url, headers=ASANA_HEADERS, params=params, timeout=REQUEST_TIMEOUT)
         resp.raise_for_status()
         payload = resp.json()
         tasks.extend(payload.get("data", []))
         offset = payload.get("next_page", {}).get("offset") if payload.get("next_page") else None
         if not offset:
             return tasks
+
+
+def order_parents_first(tasks: list[dict]) -> "tuple[list[dict], set]":
+    """Asana zwraca na liście zadań projektu także PODZADANIA dodane do
+    projektu, w dowolnej kolejności. Gdyby podzadanie było przetworzone
+    przed rodzicem, powstałoby jako samodzielny Task, a rodzic zastałby już
+    istniejący wpis i nie przepiąłby go pod siebie. Sortujemy stabilnie po
+    głębokości zagnieżdżenia w obrębie projektu (rodzic zawsze przed dzieckiem).
+    Zwraca (posortowana lista, zbiór gid zadań, których rodzic jest w projekcie)."""
+    in_project = {t["gid"] for t in tasks}
+    parent_of = {}
+    for t in tasks:
+        parent_gid = (t.get("parent") or {}).get("gid")
+        if parent_gid in in_project:
+            parent_of[t["gid"]] = parent_gid
+
+    def depth(gid: str) -> int:
+        d, seen = 0, {gid}
+        while gid in parent_of and parent_of[gid] not in seen:
+            gid = parent_of[gid]
+            seen.add(gid)
+            d += 1
+        return d
+
+    # Drugi klucz: zadanie z JAKIMKOLWIEK rodzicem (także spoza listy projektu) po
+    # zadaniach bez rodzica. Jego przodek może być w projekcie wyżej w drzewie
+    # (zadanie w kilku projektach Asany) - wtedy rekurencja przodka utworzy je we
+    # właściwym miejscu, zanim pętla główna dojdzie do niego jako do "sieroty".
+    def has_parent(t: dict) -> bool:
+        return bool((t.get("parent") or {}).get("gid"))
+
+    ordered = sorted(tasks, key=lambda t: (depth(t["gid"]), has_parent(t)))
+    return ordered, set(parent_of) | {t["gid"] for t in tasks if has_parent(t)}
 
 
 def get_task_section_name(task: dict, project_gid: str) -> Optional[str]:
@@ -235,8 +404,31 @@ def get_task_section_name(task: dict, project_gid: str) -> Optional[str]:
             continue
         section = m.get("section")
         if section and section.get("name"):
-            return section["name"]
+            return section["name"].strip()
     return None
+
+
+def get_asana_subtasks(task_gid: str) -> list[dict]:
+    """Pobiera WSZYSTKIE podzadania danego zadania Asany - osobny endpoint,
+    bo GET /projects/{gid}/tasks (get_asana_tasks) NIE zwraca podzadań w
+    ogóle, tylko zadania najwyższego poziomu (potwierdzone w dokumentacji
+    Asany - to był dokładnie zgłoszony problem: "dlaczego podzadania nie
+    są migrowane")."""
+    url = f"{ASANA_API}/tasks/{task_gid}/subtasks"
+    fields = ["name", "html_notes", "completed", "due_on", "assignee.gid", "assignee.email", "modified_at"]
+    params = {"opt_fields": ",".join(fields), "limit": 100}
+    subtasks = []
+    offset = None
+    while True:
+        if offset:
+            params["offset"] = offset
+        resp = request_with_retry("GET", url, headers=ASANA_HEADERS, params=params, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        payload = resp.json()
+        subtasks.extend(payload.get("data", []))
+        offset = payload.get("next_page", {}).get("offset") if payload.get("next_page") else None
+        if not offset:
+            return subtasks
 
 
 def get_asana_comments(task_gid: str) -> list[dict]:
@@ -244,7 +436,7 @@ def get_asana_comments(task_gid: str) -> list[dict]:
     'zmienił termin', 'przypisał zadanie' itp.)."""
     url = f"{ASANA_API}/tasks/{task_gid}/stories"
     params = {"opt_fields": "html_text,text,created_at,created_by.name,resource_subtype"}
-    resp = requests.get(url, headers=ASANA_HEADERS, params=params, timeout=REQUEST_TIMEOUT)
+    resp = request_with_retry("GET", url, headers=ASANA_HEADERS, params=params, timeout=REQUEST_TIMEOUT)
     resp.raise_for_status()
     stories = resp.json().get("data", [])
     return [s for s in stories if s.get("resource_subtype") == "comment_added"]
@@ -253,7 +445,7 @@ def get_asana_comments(task_gid: str) -> list[dict]:
 def get_asana_attachments(task_gid: str) -> list[dict]:
     url = f"{ASANA_API}/tasks/{task_gid}/attachments"
     params = {"opt_fields": "name,download_url"}
-    resp = requests.get(url, headers=ASANA_HEADERS, params=params, timeout=REQUEST_TIMEOUT)
+    resp = request_with_retry("GET", url, headers=ASANA_HEADERS, params=params, timeout=REQUEST_TIMEOUT)
     resp.raise_for_status()
     return resp.json().get("data", [])
 
@@ -364,7 +556,11 @@ class _HtmlToAdfParser(HTMLParser):
 
     def get_adf(self) -> dict:
         self._flush_paragraph()
-        return {"type": "doc", "version": 1, "content": self.doc or [{"type": "paragraph", "content": []}]}
+        # Puste akapity (bez treści) bywają odrzucane przez walidator ADF Jiry
+        # jako niepoprawna struktura - odfiltruj je, zamiast ryzykować błąd 400
+        # przy tworzeniu/aktualizacji zadania.
+        content = [node for node in self.doc if node.get("type") != "paragraph" or node.get("content")]
+        return {"type": "doc", "version": 1, "content": content or [{"type": "paragraph", "content": [{"type": "text", "text": " "}]}]}
 
 
 def html_to_adf(html: str) -> dict:
@@ -435,15 +631,20 @@ def adf_to_html(adf: dict) -> str:
     return f"<body>{body}</body>"
 
 
+_PROJECT_STATUSES_CACHE: dict = {}
+
+
 def get_status_id_by_name(project_key: str, status_name: str) -> Optional[str]:
     """Znajduje ID statusu o danej nazwie wśród statusów dostępnych w projekcie
     (case-insensitive). Zwraca None, jeśli nie znaleziono — wtedy status
     pomijamy zamiast zgadywać."""
-    url = f"{JIRA_BASE_URL}/rest/api/3/project/{project_key}/statuses"
-    resp = requests.get(url, auth=JIRA_AUTH, timeout=REQUEST_TIMEOUT)
-    resp.raise_for_status()
+    if project_key not in _PROJECT_STATUSES_CACHE:
+        url = f"{JIRA_BASE_URL}/rest/api/3/project/{project_key}/statuses"
+        resp = request_with_retry("GET", url, auth=JIRA_AUTH, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        _PROJECT_STATUSES_CACHE[project_key] = resp.json()  # statusy nie zmieniają się w trakcie przebiegu
     norm_target = status_name.strip().lower()
-    for issue_type in resp.json():
+    for issue_type in _PROJECT_STATUSES_CACHE[project_key]:
         for status in issue_type.get("statuses", []):
             if status["name"].strip().lower() == norm_target:
                 return status["id"]
@@ -485,8 +686,8 @@ def get_required_field_defaults(project_key: str, issue_type_name: str = "Task")
     skipped: list[str] = []
 
     for field_id, info in fields_meta.items():
-        if not info.get("required") or field_id in ("summary", "issuetype", "project"):
-            continue  # obsługiwane już wprost w create_jira_issue
+        if not info.get("required") or field_id in ("summary", "issuetype", "project", "parent", get_epic_name_field_id()):
+            continue  # obsługiwane już wprost w create_jira_issue ("parent" tylko dla podzadań, ale zawsze wymagany właśnie tam - nie generyczny brak wartości domyślnej; "Epic Name" ustawiane jawnie tylko dla Epików)
 
         if field_id == DEFAULT_TYPE_FIELD_ID:
             defaults[field_id] = {"value": DEFAULT_TYPE_FIELD_VALUE}
@@ -537,41 +738,248 @@ def _is_assignee_error(resp: requests.Response) -> bool:
 
 
 JIRA_SUMMARY_MAX_LEN = 255  # twardy limit pola 'summary' w Jirze
+# Twardy limit Jiry dla 'description' to 32767 znaków (w finalnym ADF).
+# Bezpieczny próg WYRAŹNIE niższy - konwersja HTML->ADF dokłada narzut
+# strukturalny (JSON dla każdego formatowania), więc surowy HTML bliski
+# 32767 może po konwersji PRZEKROCZYĆ prawdziwy limit.
+JIRA_DESCRIPTION_SAFE_LEN = 25000
 
 
 def _safe_summary_and_description(summary: str, description_html: str) -> tuple[str, str]:
     """Jeśli tytuł z Asany przekracza limit Jiry (255 znaków), skraca go
     bezpiecznie (z wielokropkiem) i dokłada PEŁNY, oryginalny tytuł na
-    początku opisu — żeby nic nie zginęło, tylko było przesunięte."""
+    początku opisu — żeby nic nie zginęło, tylko było przesunięte.
+
+    Dodatkowo: pole 'summary' w Jirze MUSI być jednoliniowe - Jira odrzuca
+    (400 'contains newline characters') tytuły z literalnym znakiem nowej
+    linii, co zdarza się w Asanie (np. ktoś przypadkiem wcisnął Enter przy
+    nazywaniu zadania - ten sam rodzaj problemu, co wcześniej znaleziony w
+    nazwach SEKCJI). Zamieniamy każdy znak nowej linii na spację (nie
+    wycinamy - zachowujemy czytelność), potem redukujemy wielokrotne spacje
+    do jednej.
+
+    Dodatkowo: pole 'description' w Jirze ma limit 32767 znaków (w
+    finalnym, zserializowanym ADF). Konwersja HTML->ADF zwykle ZWIĘKSZA
+    liczbę znaków względem surowego HTML (struktura JSON dla formatowania
+    dokłada narzut) - dlatego próg bezpieczeństwa tutaj jest wyraźnie
+    NIŻSZY niż 32767, żeby zostawić margines na ten narzut."""
+    summary = re.sub(r"\s*\n\s*", " ", summary).strip()
+
     if len(summary) <= JIRA_SUMMARY_MAX_LEN:
-        return summary, description_html
-    truncated = summary[: JIRA_SUMMARY_MAX_LEN - 1].rstrip() + "…"
-    prefix = f"<body><strong>Pełny tytuł:</strong> {summary}<br><br>"
-    if description_html and description_html.strip().startswith("<body>"):
-        merged = prefix + description_html[len("<body>"):]
+        merged = description_html
     else:
-        merged = prefix + (description_html or "") + "</body>"
-    print(f"      [INFO] Tytuł dłuższy niż {JIRA_SUMMARY_MAX_LEN} znaków — skrócony, pełna wersja w opisie.")
-    return truncated, merged
+        truncated_summary = summary[: JIRA_SUMMARY_MAX_LEN - 1].rstrip() + "…"
+        prefix = f"<body><strong>Pełny tytuł:</strong> {summary}<br><br>"
+        if description_html and description_html.strip().startswith("<body>"):
+            merged = prefix + description_html[len("<body>"):]
+        else:
+            merged = prefix + (description_html or "") + "</body>"
+        print(f"      [INFO] Tytuł dłuższy niż {JIRA_SUMMARY_MAX_LEN} znaków — skrócony, pełna wersja w opisie.")
+        summary = truncated_summary
+
+    if len(merged) > JIRA_DESCRIPTION_SAFE_LEN:
+        truncated_desc = merged[:JIRA_DESCRIPTION_SAFE_LEN]
+        suffix = "<br><br><strong>[OPIS UCIĘTY - przekroczył limit Jiry (32767 znaków). Pełna treść w oryginalnym zadaniu Asany.]</strong></body>"
+        if truncated_desc.rstrip().endswith("</body>"):
+            truncated_desc = truncated_desc.rstrip()[: -len("</body>")]
+        merged = truncated_desc + suffix
+        print(f"      [INFO] Opis dłuższy niż limit Jiry — ucięty do {JIRA_DESCRIPTION_SAFE_LEN} znaków.")
+
+    return summary, merged
+
+
+def _is_adf_error(resp: requests.Response, field_name: str = "description") -> bool:
+    """Sprawdza, czy błąd 400 dotyczy KONKRETNIE nieprawidłowej struktury ADF
+    w podanym polu (domyślnie 'description', ale też używane dla 'comment') -
+    nasz konwerter html_to_adf czasem generuje coś, czego walidator Jiry nie
+    akceptuje (np. pusty akapit, niepoprawne zagnieżdżenie znaczników).
+    Sprawdzamy szeroko - Jira zwraca RÓŻNE kształty błędu 400 dla tego samego
+    problemu:
+      1) {"errors": {"description": "opisowy tekst o Atlassian Document Format"}}
+      2) {"errorMessages": ["INVALID_INPUT"], "errors": {}} - errors PUSTE,
+         żadne pole nie wymienione (potwierdzony ręcznie przypadek:
+         update_jira_issue na polu description) - poprzednia wersja tej
+         funkcji sprawdzała TYLKO wariant 1, więc wariant 2 nigdy nie był
+         wykrywany, mimo że własna dokumentacja funkcji o nim wspominała."""
+    if resp.status_code != 400:
+        return False
+    try:
+        data = resp.json()
+    except Exception:  # noqa: BLE001
+        return False
+    if field_name in (data.get("errors") or {}):
+        return True
+    return "INVALID_INPUT" in (data.get("errorMessages") or [])
+
+
+def _strip_html_tags(html: str) -> str:
+    return re.sub(r"<[^>]+>", " ", html or "").strip()
+
+
+_SUBTASK_TYPE_CACHE: dict[str, str] = {}  # project_key -> nazwa typu podzadania (buforowane)
+
+
+def get_subtask_issue_type_name(project_key: str) -> str:
+    """Zwraca RZECZYWISTĄ nazwę typu zadania oznaczonego jako 'podzadanie'
+    w DANYM projekcie - NIE zawsze dosłowne 'Sub-task' (projekty
+    "team-managed" często używają 'Subtask' bez myślnika, a niektóre
+    organizacje zmieniają nazwę jeszcze inaczej). Sztywne założenie nazwy
+    powodowało błąd 'Specify a valid issue type' - potwierdzony ręcznie.
+    Buforowane per projekt, żeby nie pytać Jiry osobno dla każdego
+    podzadania."""
+    if project_key in _SUBTASK_TYPE_CACHE:
+        return _SUBTASK_TYPE_CACHE[project_key]
+
+    proj_resp = request_with_retry("GET", f"{JIRA_BASE_URL}/rest/api/3/project/{project_key}", auth=JIRA_AUTH, timeout=REQUEST_TIMEOUT)
+    proj_resp.raise_for_status()
+    numeric_id = proj_resp.json()["id"]
+
+    resp = request_with_retry(
+        "GET", f"{JIRA_BASE_URL}/rest/api/3/issuetype/project", auth=JIRA_AUTH,
+        params={"projectId": numeric_id, "level": -1}, timeout=REQUEST_TIMEOUT,
+    )
+    resp.raise_for_status()
+    types = resp.json()
+    name = types[0]["name"] if types else "Sub-task"  # fallback, gdyby projekt naprawdę nie miał żadnego
+    _SUBTASK_TYPE_CACHE[project_key] = name
+    return name
+
+
+_EPIC_NAME_FIELD_CACHE: Optional[str] = None
+
+
+def has_already_migrated_subtasks(parent_asana_gid: str, project_state: dict) -> bool:
+    """Sprawdza, czy podzadania danego zadania Asany są JUŻ zmigrowane do
+    Jiry (mają wpis w stanie z kluczem Jiry). Używane jako zabezpieczenie
+    przed konwersją Task->Epic dla zadań, których podzadania już istnieją
+    jako Jira Sub-task - taka konwersja zostawiłaby Epica z podpiętymi
+    Sub-taskami (struktura niedozwolona w Jirze). Takie przypadki naprawia
+    retrofit_epics.py, który konwertuje całą hierarchię naraz.
+
+    Czyta WYŁĄCZNIE ze stanu (bez zapytań do Asany/Jiry) - lista podzadań
+    jest już pobrana przez sync_subtasks, a tu potrzebujemy tylko wiedzieć,
+    czy KTÓREKOLWIEK z nich ma już klucz Jiry."""
+    try:
+        subtasks = get_asana_subtasks(parent_asana_gid)
+    except Exception:  # noqa: BLE001
+        return False  # nie udało się sprawdzić - nie blokujemy, niech normalna ścieżka zdecyduje
+    for sub in subtasks:
+        entry = project_state.get(sub["gid"])
+        if entry and entry.get("jira_key") and not entry.get("deleted_in_jira"):
+            return True
+    return False
+
+
+def get_epic_name_field_id() -> Optional[str]:
+    """Znajduje ID pola 'Epic Name' (custom field, różni się per instancja) -
+    wymagane przy tworzeniu Epika, ale Jira NIE pilnuje jego wymagalności
+    automatycznie przy tworzeniu przez API (znany, udokumentowany błąd),
+    więc musimy ustawić je jawnie. Buforowane, żeby nie pytać za każdym
+    razem."""
+    global _EPIC_NAME_FIELD_CACHE
+    if _EPIC_NAME_FIELD_CACHE:
+        return _EPIC_NAME_FIELD_CACHE
+    resp = request_with_retry("GET", f"{JIRA_BASE_URL}/rest/api/3/field", auth=JIRA_AUTH, timeout=REQUEST_TIMEOUT)
+    if resp.status_code != 200:
+        return None
+    for field in resp.json():
+        if field.get("name", "").strip().lower() == "epic name":
+            _EPIC_NAME_FIELD_CACHE = field["id"]
+            return field["id"]
+    return None
+
+
+def ensure_issue_is_epic(issue_key: str, summary: str, dry_run: bool) -> None:
+    """Konwertuje istniejące zadanie (Task) na Epic, jeśli jeszcze nim nie
+    jest. Wywoływane w ścieżce UPDATE gdy zadanie jest już w stanie (było
+    zmigrowane PRZED wprowadzeniem obsługi Epików), ale teraz jest w
+    epic_candidates.json - musi zostać Epikiem, zanim sync_subtasks spróbuje
+    tworzyć jego podzadania jako Task (bo Task nie może być rodzicem innego
+    Task - tylko Epic może). Bez tego konwersja dostawałaby błąd Jiry
+    "parent must be an Epic" przy tworzeniu podzadań. Reużywa tej samej
+    logiki i fallbacku co create_jira_issue dla nowych Epików."""
+    if dry_run:
+        print(f"      [DRY-RUN] Skonwertowałbym {issue_key} na Epic (wykryto jako kandydata).")
+        return
+    epic_name_field = get_epic_name_field_id()
+    fields: dict = {"issuetype": {"name": "Epic"}}
+    if epic_name_field:
+        fields[epic_name_field] = summary
+    resp = request_with_retry("PUT", f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}",
+                              auth=JIRA_AUTH, json={"fields": fields}, timeout=REQUEST_TIMEOUT)
+    if resp.status_code >= 300 and epic_name_field and epic_name_field in resp.text:
+        print(f"      [INFO] Pole 'Epic Name' nie jest skonfigurowane na ekranie edycji projektu — "
+              f"konwertuję {issue_key} na Epic bez niego.")
+        del fields[epic_name_field]
+        resp = request_with_retry("PUT", f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}",
+                                  auth=JIRA_AUTH, json={"fields": fields}, timeout=REQUEST_TIMEOUT)
+    if resp.status_code >= 300:
+        raise RuntimeError(
+            f"Nie udało się skonwertować {issue_key} na Epic: {resp.status_code} {resp.text[:200]}"
+        )
+    print(f"      {issue_key}: skonwertowano na Epic (był już zmigrowany jako Task — "
+          f"wykryty jako kandydat przez detect_epic_candidates.py).")
 
 
 def create_jira_issue(project_key: str, summary: str, description_html: str,
-                       assignee_account_id: Optional[str], due_on: Optional[str]) -> str:
+                       assignee_account_id: Optional[str], due_on: Optional[str],
+                       parent_key: Optional[str] = None, force_issue_type: Optional[str] = None) -> str:
+    """parent_key: jeśli podany, tworzy PODZADANIE (issuetype "Sub-task"),
+    powiązane z zadaniem o tym kluczu, zamiast zwykłego "Task" - CHYBA że
+    force_issue_type każe inaczej (np. "Task" z parent_key ustawionym na
+    Epika - nowoczesne pole "parent" łączy zarówno podzadanie z rodzicem,
+    jak i zwykłe zadanie z Epikiem, tym samym mechanizmem).
+    force_issue_type: wymusza konkretny typ (np. "Epic" dla zadań z
+    wykrytym głębszym zagnieżdżeniem - patrz detect_epic_candidates.py),
+    zamiast automatycznego wyboru Task/Sub-task."""
     summary, description_html = _safe_summary_and_description(summary, description_html)
+    if force_issue_type:
+        issue_type = force_issue_type
+    else:
+        issue_type = get_subtask_issue_type_name(project_key) if parent_key else "Task"
     url = f"{JIRA_BASE_URL}/rest/api/3/issue"
     fields = {
         "project": {"key": project_key},
         "summary": summary,
-        "issuetype": {"name": "Task"},
+        "issuetype": {"name": issue_type},
         "description": html_to_adf(description_html),
     }
+    if parent_key:
+        fields["parent"] = {"key": parent_key}
     if assignee_account_id:
         fields["assignee"] = {"accountId": assignee_account_id}
     if due_on:
         fields["duedate"] = due_on
-    fields.update(get_required_field_defaults(project_key, "Task"))
+    epic_name_field = None
+    if issue_type == "Epic":
+        epic_name_field = get_epic_name_field_id()
+        if epic_name_field:
+            fields[epic_name_field] = summary
+    fields.update(get_required_field_defaults(project_key, issue_type))
 
     resp = request_with_retry("POST", url, auth=JIRA_AUTH, json={"fields": fields}, timeout=REQUEST_TIMEOUT)
+
+    if resp.status_code >= 300 and epic_name_field and epic_name_field in resp.text:
+        # Pole "Epic Name" istnieje GLOBALNIE w tej instancji Jiry, ale nie
+        # jest skonfigurowane na ekranie edycji TEGO KONKRETNEGO projektu
+        # (luka w konfiguracji per-projekt, niezależna od typu projektu -
+        # potwierdzone ręcznie: dotyczy projektu company-managed, z Epikiem
+        # obecnym w jego schemacie typów zadań). Potwierdzony błąd: "Field
+        # 'customfield_XXXXX' cannot be set. It is not on the appropriate
+        # screen, or unknown." Zamiast tracić całe zadanie, ponawiamy BEZ
+        # tego pola.
+        print(f"      [INFO] Pole 'Epic Name' nie jest skonfigurowane na ekranie edycji projektu {project_key} — "
+              f"tworzę Epika bez niego.")
+        del fields[epic_name_field]
+        resp = request_with_retry("POST", url, auth=JIRA_AUTH, json={"fields": fields}, timeout=REQUEST_TIMEOUT)
+
+    if resp.status_code >= 300 and _is_adf_error(resp):
+        # Nasz konwerter HTML->ADF wygenerował coś, czego Jira nie akceptuje -
+        # spróbuj ponownie ZWYKŁYM tekstem (bez formatowania), zamiast tracić
+        # całe zadanie z powodu samego opisu.
+        print(f"      [INFO] Opis odrzucony jako nieprawidłowy ADF — ponawiam jako zwykły tekst (bez formatowania).")
+        fields["description"] = text_to_adf(_strip_html_tags(description_html))
+        resp = request_with_retry("POST", url, auth=JIRA_AUTH, json={"fields": fields}, timeout=REQUEST_TIMEOUT)
 
     if resp.status_code >= 300 and assignee_account_id and _is_assignee_error(resp):
         # Oryginalny assignee nie może być przypisany w tym projekcie (np. nie
@@ -605,6 +1013,11 @@ def update_jira_issue(issue_key: str, summary: str, description_html: str,
 
     resp = request_with_retry("PUT", url, auth=JIRA_AUTH, json={"fields": fields}, timeout=REQUEST_TIMEOUT)
 
+    if resp.status_code >= 300 and _is_adf_error(resp):
+        print(f"      [INFO] Opis odrzucony jako nieprawidłowy ADF — ponawiam jako zwykły tekst (bez formatowania).")
+        fields["description"] = text_to_adf(_strip_html_tags(description_html))
+        resp = request_with_retry("PUT", url, auth=JIRA_AUTH, json={"fields": fields}, timeout=REQUEST_TIMEOUT)
+
     if resp.status_code >= 300 and assignee_account_id and _is_assignee_error(resp):
         project_key = issue_key.split("-")[0]
         lead_id = get_project_lead_account_id(project_key)
@@ -620,7 +1033,7 @@ def update_jira_issue(issue_key: str, summary: str, description_html: str,
 
 def get_current_status_id(issue_key: str) -> Optional[str]:
     url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}"
-    resp = requests.get(url, auth=JIRA_AUTH, params={"fields": "status"}, timeout=REQUEST_TIMEOUT)
+    resp = request_with_retry("GET", url, auth=JIRA_AUTH, params={"fields": "status"}, timeout=REQUEST_TIMEOUT)
     resp.raise_for_status()
     return resp.json()["fields"]["status"]["id"]
 
@@ -755,7 +1168,7 @@ def _find_transition_path(graph: dict[str, list], start: str, target: str) -> Op
     return None
 
 
-def transition_jira_issue_to_status(issue_key: str, status_id: str) -> bool:
+def transition_jira_issue_to_status(issue_key: str, status_id: str, final_fields: Optional[dict] = None) -> bool:
     """Przechodzi zadanie do docelowego statusu PRECYZYJNĄ ścieżką (BFS po
     pełnym grafie workflow, patrz build_workflow_graph) — nie zgaduje po
     drodze, więc albo trafia dokładnie tam gdzie trzeba, albo w ogóle nie
@@ -772,10 +1185,17 @@ def transition_jira_issue_to_status(issue_key: str, status_id: str) -> bool:
         return False  # cel nieosiągalny z bieżącego statusu w tym workflow
 
     url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}/transitions"
-    for trans_id in path:
-        resp = request_with_retry(
-            "POST", url, auth=JIRA_AUTH, json={"transition": {"id": trans_id}}, timeout=REQUEST_TIMEOUT
-        )
+    for n, trans_id in enumerate(path, 1):
+        body = {"transition": {"id": trans_id}}
+        if final_fields and n == len(path):
+            body["fields"] = final_fields  # np. Resolution = Won't Do na przejściu do Closed
+        resp = request_with_retry("POST", url, auth=JIRA_AUTH, json=body, timeout=REQUEST_TIMEOUT)
+        if resp.status_code >= 300 and "fields" in body:
+            # pole spoza ekranu przejścia - przejście i tak ważniejsze niż pole
+            print(f"      [OSTRZEŻENIE] {issue_key}: Jira nie przyjęła pól {list(final_fields)} przy przejściu "
+                  f"({resp.status_code} {resp.text[:150]}) - przechodzę bez nich.")
+            resp = request_with_retry("POST", url, auth=JIRA_AUTH, json={"transition": {"id": trans_id}},
+                                      timeout=REQUEST_TIMEOUT)
         if resp.status_code >= 300:
             print(f"      [DEBUG] {issue_key}: Jira odrzuciła przejście {trans_id}: {resp.status_code} {resp.text}")
             return False  # zadanie zostaje na statusie osiągniętym do tego kroku - patrz niżej
@@ -798,7 +1218,45 @@ def post_jira_comment(issue_key: str, author_name: str, created_at: str, html_te
     prefix_paragraph = {"type": "paragraph", "content": [{"type": "text", "text": prefix, "marks": [{"type": "em"}]}]}
     body_adf["content"] = [prefix_paragraph] + (body_adf.get("content") or [])
 
+    # Ten sam limit i ta sama logika co przy opisie zadania (JIRA_DESCRIPTION_SAFE_LEN) -
+    # komentarze dzielą prawdopodobnie ten sam, wewnętrzny limit długości ADF co opisy.
+    # Sprawdzamy PO konwersji na ADF (nie na surowym HTML), bo to serializacja ADF jest
+    # tym, co faktycznie liczy się względem limitu Jiry.
+    serialized_len = len(json.dumps(body_adf, ensure_ascii=False))
+    if serialized_len > JIRA_DESCRIPTION_SAFE_LEN:
+        truncation_notice = {
+            "type": "paragraph",
+            "content": [{"type": "text", "text": "[KOMENTARZ UCIĘTY - przekroczył limit Jiry. Pełna treść w oryginalnym zadaniu Asany.]",
+                         "marks": [{"type": "strong"}]}],
+        }
+        # Ucinamy kolejne akapity/elementy treści, aż zmieścimy się w limicie -
+        # zachowujemy prefiks [Asana - autor] i tyle kolejnych elementów, ile się zmieści.
+        kept_content = [prefix_paragraph]
+        for element in (body_adf.get("content") or [])[1:]:
+            candidate = kept_content + [element, truncation_notice]
+            candidate_adf = {**body_adf, "content": candidate}
+            if len(json.dumps(candidate_adf, ensure_ascii=False)) > JIRA_DESCRIPTION_SAFE_LEN:
+                break
+            kept_content.append(element)
+        body_adf["content"] = kept_content + [truncation_notice]
+        print(f"      [INFO] Komentarz dłuższy niż limit Jiry — ucięty (było {serialized_len} znaków ADF).")
+
     resp = request_with_retry("POST", url, auth=JIRA_AUTH, json={"body": body_adf}, timeout=REQUEST_TIMEOUT)
+    if resp.status_code >= 300 and _is_adf_error(resp, field_name="comment"):
+        # Ten sam mechanizm awaryjny co przy opisach zadań: jeśli Jira odrzuca
+        # naszą wersję z formatowaniem (ADF), ponawiamy jako CZYSTY TEKST bez
+        # żadnego formatowania - dużo mniej podatny na strukturalne błędy
+        # walidacji, kosztem utraty samego formatowania (pogrubienia, linki
+        # itp. - sama TREŚĆ tekstowa zostaje zachowana).
+        print(f"      [INFO] Komentarz odrzucony jako nieprawidłowy ADF — ponawiam jako zwykły tekst (bez formatowania).")
+        plain_text = _strip_html_tags(html_text)
+        fallback_content = [prefix_paragraph]
+        if plain_text:  # pomijamy CAŁKOWICIE pusty akapit - to sam w sobie może
+            # być osobnym powodem odrzucenia ADF (patrz komentarz w _is_adf_error)
+            fallback_content.append({"type": "paragraph", "content": [{"type": "text", "text": plain_text}]})
+        fallback_adf = {"type": "doc", "version": 1, "content": fallback_content}
+        resp = request_with_retry("POST", url, auth=JIRA_AUTH, json={"body": fallback_adf}, timeout=REQUEST_TIMEOUT)
+
     if resp.status_code >= 300:
         raise RuntimeError(f"Błąd dodawania komentarza do {issue_key}: {resp.status_code} {resp.text}")
 
@@ -834,6 +1292,37 @@ def sync_comments(task_gid: str, jira_key: str, task_state: dict, dry_run: bool)
     return added
 
 
+ASANA_LINK_GLOBAL_ID = "asana:task:{gid}"
+_LINKS_ADDED = {"count": 0}
+
+
+def ensure_asana_link(task_gid: str, jira_key: str, title: str, task_state: dict, dry_run: bool) -> None:
+    """Link do zadania Asany w sekcji "Linki" zgłoszenia (remote link). Stały
+    globalId "asana:task:<gid>" -> ponowne wywołanie aktualizuje, nie dubluje.
+    Dzięki niemu powiązanie Asana <-> Jira da się odtworzyć z samej Jiry, gdyby
+    stan je zgubił (relink_state.py). Zakładany raz (flaga asana_link w stanie);
+    błąd nie przerywa synchronizacji - spróbuje ponownie przy następnym przebiegu."""
+    if task_state.get("asana_link") or dry_run:
+        return
+    body = {
+        "globalId": ASANA_LINK_GLOBAL_ID.format(gid=task_gid),
+        "application": {"type": "com.asana", "name": "Asana"},
+        "relationship": "Asana",
+        "object": {"url": f"https://app.asana.com/0/0/{task_gid}/f", "title": f"Asana: {title}"[:255],
+                   "icon": {"url16x16": "https://app.asana.com/favicon.ico", "title": "Asana"}},
+    }
+    try:
+        resp = request_with_retry("POST", f"{JIRA_BASE_URL}/rest/api/3/issue/{jira_key}/remotelink",
+                                  auth=JIRA_AUTH, json=body, timeout=REQUEST_TIMEOUT)
+        if resp.status_code < 300:
+            task_state["asana_link"] = True
+            _LINKS_ADDED["count"] += 1
+        else:
+            record_warning(jira_key.split("-")[0], f"{jira_key}: link do Asany", f"{resp.status_code} {resp.text[:150]}")
+    except Exception as exc:  # noqa: BLE001
+        record_warning(jira_key.split("-")[0], f"{jira_key}: link do Asany", exc)
+
+
 def sync_attachments(task_gid: str, jira_key: str, task_state: dict, dry_run: bool) -> int:
     """Wgrywa w Jirze załączniki z Asany, których jeszcze nie ma (śledzone po
     gid załącznika w task_state['synced_attachment_gids']). Zwraca liczbę
@@ -859,13 +1348,279 @@ def sync_attachments(task_gid: str, jira_key: str, task_state: dict, dry_run: bo
             added += 1
         except Exception as exc:  # noqa: BLE001
             print(f"      [OSTRZEŻENIE] Nie udało się przenieść załącznika '{a.get('name')}': {exc}")
+            record_warning(jira_key.split("-")[0], f"{jira_key}: załącznik '{a.get('name')}'", exc)
     if not dry_run:
         task_state["synced_attachment_gids"] = sorted(synced)
     return added
 
 
+# Zadania Asany, których podzadania zostały już zsynchronizowane w BIEŻĄCYM
+# przebiegu projektu (czyszczone na początku sync_project). Chroni przed
+# podwójnym przechodzeniem tego samego poddrzewa (rekurencja + druga wizyta
+# z pętli głównej dla podzadań dodanych też do projektu) i przed pętlami.
+_SUBTASKS_SYNCED_THIS_RUN: set = set()
+MAX_SUBTASK_DEPTH = 20
+# Status wynikający z WŁASNEJ sekcji Asany, dla zadań z listy projektu (gid -> id statusu
+# albo None). Ustawiane na początku sync_project. Podzadanie z tej listy ma w Asanie własną
+# sekcję, więc jego status ustawia pętla główna, a jego dzieci dziedziczą właśnie ten status.
+_OWN_SECTION_STATUS: dict = {}
+_OWN_SECTION_FIELDS: dict = {}  # gid -> pola przejścia (np. Resolution) z sekcji zadania
+
+
+def sync_subtasks(parent_asana_gid: str, parent_jira_key: str, jira_project_key: str,
+                  project_state: dict, user_map: dict, dry_run: bool, parent_is_epic: bool = False,
+                  depth: int = 0, inherited_status_id: Optional[str] = None,
+                  inherited_fields: Optional[dict] = None) -> dict:
+    """Synchronizuje WSZYSTKIE podzadania danego zadania Asany jako Jira
+    Sub-task, powiązane z parent_jira_key. Wpisy w project_state trzymane
+    pod WŁASNYM gid podzadania (ten sam słownik co zwykłe zadania) - dzięki
+    temu podzadania dostają dokładnie te same zabezpieczenia przed
+    duplikatami (idempotentność, śledzenie komentarzy/załączników), co
+    reszta synchronizacji.
+
+    parent_is_epic: gdy True, rodzic (parent_jira_key) jest Epikiem
+    (patrz detect_epic_candidates.py) - jego bezpośrednie dzieci muszą być
+    zwykłym "Task" (Jira nie pozwala podpiąć Sub-task bezpośrednio pod
+    Epika), powiązanym przez to samo pole "parent". CELOWO nie oznaczamy
+    takich wpisów jako "is_subtask" - to normalny Task, w pełni zdolny
+    mieć WŁASNE podzadania (poziom 3 w Asanie) - tworzy je rekurencja niżej.
+
+    Status podzadania ustalany WYŁĄCZNIE przez checkbox "ukończone" w
+    Asanie (Fertig/domyślny) - podzadania nie mają własnej przynależności
+    do sekcji/kolumny tablicy, więc mapowanie po sekcji (jak przy zadaniach
+    głównych) tu nie ma zastosowania.
+
+    REKURENCJA: po każdym podzadaniu schodzi do JEGO podzadań (dowolnie
+    głęboko). Wcześniej głębsze poziomy powstawały tylko wtedy, gdy pośrednie
+    podzadanie było dodane też do listy projektu - pozostałe poddrzewa od
+    poziomu 2 w dół były pomijane bez śladu. Rodzic w Jirze dla dzieci:
+      - podzadanie jest Taskiem (dziecko Epika) -> dzieci pod nim (Sub-task),
+      - podzadanie jest Sub-taskiem -> dzieci pod jego rodzicem w Jirze
+        (spłaszczenie - Jira nie zagnieżdża Sub-tasków).
+
+    STATUS podzadań (Asana nie przypisuje podzadań do sekcji):
+      - ukończone w Asanie -> Fertig,
+      - otwarte -> status zadania najwyższego poziomu (inherited_status_id, wynikający
+        z jego sekcji; pod ukończonym zadaniem -> Fertig), na każdym poziomie,
+      - podzadanie dodane też do listy projektu ma własną sekcję - jego status
+        ustawia pętla główna, a jego dzieci dziedziczą status z tej sekcji.
+    Ostatnio nadany status jest pamiętany w stanie (status_applied), więc zgłoszenie
+    jest przestawiane tylko przy zmianie - bez dodatkowych zapytań przy każdym przebiegu."""
+    if parent_asana_gid in _SUBTASKS_SYNCED_THIS_RUN or depth > MAX_SUBTASK_DEPTH:
+        return {"created": 0, "created_epics": 0, "created_tasks": 0, "created_subtasks": 0, "updated": 0,
+                "updated_epics": 0, "updated_tasks": 0, "updated_subtasks": 0, "comments": 0, "attachments": 0, "errors": 0,
+                "status_ok": 0, "status_failed": 0}
+    _SUBTASKS_SYNCED_THIS_RUN.add(parent_asana_gid)
+    stats = {"created": 0, "created_epics": 0, "created_tasks": 0, "created_subtasks": 0, "updated": 0, "updated_epics": 0, "updated_tasks": 0, "updated_subtasks": 0, "comments": 0, "attachments": 0, "errors": 0,
+             "status_ok": 0, "status_failed": 0}
+    fertig_id = resolve_target_status_id(jira_project_key, None, {}, set(), completed=True)
+    try:
+        subtasks = get_asana_subtasks(parent_asana_gid)
+    except Exception as exc:  # noqa: BLE001
+        print(f"      [OSTRZEŻENIE] Nie udało się pobrać podzadań dla {parent_jira_key}: {exc}")
+        record_warning(jira_project_key, f"{parent_jira_key}: pobieranie podzadań z Asany", exc)
+        return stats
+
+    for sub in subtasks:
+        sub_gid = sub["gid"]
+        sub_name = sub.get("name") or "(bez tytułu)"
+        sub_notes = sub.get("html_notes") or ""
+        sub_due = sub.get("due_on")
+        sub_modified = sub.get("modified_at")
+        sub_completed = sub.get("completed", False)
+
+        sub_assignee = sub.get("assignee") or {}
+        sub_asana_user_gid = sub_assignee.get("gid")
+        sub_jira_account_id = user_map.get(sub_asana_user_gid) if sub_asana_user_gid else None
+
+        existing = project_state.get(sub_gid)
+        if is_jira_master(sub_name, existing):
+            # prowadzone w Jirze - bez tworzenia, aktualizacji i schodzenia w poddrzewo
+            _SUBTASKS_SYNCED_THIS_RUN.add(sub_gid)
+            stats["skipped_jira_master"] = stats.get("skipped_jira_master", 0) + 1
+            continue
+
+        if existing and existing.get("deleted_in_jira"):
+            stats["errors"] += 0  # celowo NIE liczone jako błąd - to świadome pominięcie
+            continue
+
+        sub_key = None
+        try:
+            if existing:
+                sub_key = existing["jira_key"]
+                if not parent_is_epic:
+                    existing.setdefault("is_subtask", True)  # dogania stare wpisy sprzed tej poprawki
+                    existing.setdefault("top_level_ancestor_key", parent_jira_key)  # jw., dla spłaszczania głębszego zagnieżdżenia
+                if existing.get("asana_modified_at") != sub_modified:
+                    if dry_run:
+                        print(f"        [DRY-RUN] Zaktualizowałbym podzadanie {sub_key}: '{sub_name}'")
+                    else:
+                        update_jira_issue(sub_key, sub_name, sub_notes, sub_jira_account_id, sub_due)
+                        project_state[sub_gid]["asana_modified_at"] = sub_modified
+                    stats["updated"] += 1
+                    stats["updated_tasks" if parent_is_epic else "updated_subtasks"] += 1
+            else:
+                if dry_run:
+                    print(f"        [DRY-RUN] Utworzyłbym podzadanie w {parent_jira_key}: '{sub_name}'")
+                else:
+                    force_type = "Task" if parent_is_epic else None
+                    sub_key = create_jira_issue(jira_project_key, sub_name, sub_notes, sub_jira_account_id, sub_due, parent_key=parent_jira_key, force_issue_type=force_type)
+                    if parent_is_epic:
+                        project_state[sub_gid] = {"jira_key": sub_key, "asana_modified_at": sub_modified}
+                    else:
+                        project_state[sub_gid] = {
+                            "jira_key": sub_key, "asana_modified_at": sub_modified, "is_subtask": True,
+                            "top_level_ancestor_key": parent_jira_key,
+                        }
+                    print(f"        Utworzono {'zadanie (pod Epikiem)' if parent_is_epic else 'podzadanie'} {sub_key}: '{sub_name}' (rodzic: {parent_jira_key})")
+                stats["created"] += 1
+                stats["created_tasks" if parent_is_epic else "created_subtasks"] += 1
+
+            if sub_key:
+                sub_task_state = project_state.setdefault(sub_gid, {"jira_key": sub_key, "asana_modified_at": sub_modified})
+                stats["comments"] += sync_comments(sub_gid, sub_key, sub_task_state, dry_run)
+                stats["attachments"] += sync_attachments(sub_gid, sub_key, sub_task_state, dry_run)
+                ensure_asana_link(sub_gid, sub_key, sub_name, sub_task_state, dry_run)
+                if sub_gid not in _OWN_SECTION_STATUS:  # z własną sekcją -> ustawia pętla główna
+                    target = fertig_id if sub_completed else inherited_status_id
+                    if target and not dry_run and sub_task_state.get("status_applied") != target:
+                        if transition_jira_issue_to_status(sub_key, target, None if sub_completed else inherited_fields):
+                            sub_task_state["status_applied"] = target
+                            stats["status_ok"] += 1
+                        else:
+                            stats["status_failed"] += 1
+                            record_warning(jira_project_key, f"{sub_key} '{sub_name}'",
+                                           "nie udało się ustawić statusu odziedziczonego po zadaniu głównym")
+        except Exception as exc:  # noqa: BLE001
+            print(f"        [BŁĄD] podzadanie '{sub_name}': {exc}")
+            record_error(jira_project_key, f"podzadanie '{sub_name}' (rodzic {parent_jira_key})", exc)
+            stats["errors"] += 1
+
+        # Zejście poziom niżej (patrz REKURENCJA w docstringu). Bez sub_key
+        # (dry-run nowego zadania, błąd tworzenia) nie ma pod czym podpiąć dzieci.
+        if sub_key:
+            entry = project_state.get(sub_gid, {})
+            sub_is_subtask = entry.get("is_subtask", not parent_is_epic)
+            child_parent = (entry.get("top_level_ancestor_key") or parent_jira_key) if sub_is_subtask else sub_key
+            if sub_gid in _OWN_SECTION_STATUS:
+                child_status = _OWN_SECTION_STATUS[sub_gid]
+                child_fields = _OWN_SECTION_FIELDS.get(sub_gid)
+            else:
+                child_status = fertig_id if sub_completed else inherited_status_id
+                child_fields = None if sub_completed else inherited_fields
+            deeper = sync_subtasks(sub_gid, child_parent, jira_project_key, project_state, user_map,
+                                   dry_run, parent_is_epic=False, depth=depth + 1, inherited_status_id=child_status,
+                                   inherited_fields=child_fields)
+            for k, v in deeper.items():
+                if isinstance(v, int):
+                    stats[k] = stats.get(k, 0) + v
+
+    return stats
+
+
+def section_rule(project_key: str, section_name: Optional[str], section_status_map: dict) -> dict:
+    """Wpis mapy dla sekcji w postaci jednolitej. Wartość w mapie może być:
+      - "Status"                 - jak dotąd,
+      - ["Status1", "Status2"]   - pierwszy dla Asana->Jira, wszystkie dla kierunku zwrotnego,
+      - {"status": "Status",     - rozszerzony wpis (mapy projektów, np. projekty "Discovery"):
+         "labels": ["discovery-ready"],  etykiety zależne od sekcji (zdejmowane po wyjściu z sekcji)
+         "components": ["Lexware"],      komponenty zależne od sekcji (tworzone w projekcie, jeśli brak)
+         "resolution": "Won't Do",       Rozwiązanie ustawiane przy przejściu do statusu
+         "nad_ukonczonym": true,         sekcja ma pierwszeństwo przed odhaczeniem w Asanie
+         "pomin": true}                  zadania z tej sekcji (z poddrzewem) NIE są migrowane
+    """
+    overrides = project_section_overrides(project_key)
+    raw = None
+    if section_name:
+        raw = overrides[section_name] if section_name in overrides else section_status_map.get(section_name)
+    rule = {"status": None, "labels": [], "components": [], "resolution": None, "over_completed": False, "skip": False}
+    if isinstance(raw, dict):
+        rule.update(status=raw.get("status"), labels=list(raw.get("labels") or []),
+                    components=list(raw.get("components") or []),
+                    resolution=raw.get("resolution"), over_completed=bool(raw.get("nad_ukonczonym")),
+                    skip=bool(raw.get("pomin")))
+    elif isinstance(raw, list):
+        rule["status"] = raw[0] if raw else None
+    elif raw:
+        rule["status"] = raw
+    return rule
+
+
+def managed_section_labels(project_key: str, section_status_map: dict, kind: str = "labels") -> set:
+    """Etykiety (albo komponenty, kind="components"), którymi zarządza mapa sekcji projektu -
+    tylko te synchronizacja dodaje i zdejmuje."""
+    values = set()
+    for raw in list(project_section_overrides(project_key).values()) + list(section_status_map.values()):
+        if isinstance(raw, dict):
+            values.update(raw.get(kind) or [])
+    return values
+
+
+_PROJECT_COMPONENTS: dict = {}
+
+
+def ensure_components(project_key: str, names: set) -> None:
+    """Tworzy w projekcie brakujące komponenty o podanych nazwach (raz na przebieg)."""
+    if project_key not in _PROJECT_COMPONENTS:
+        r = request_with_retry("GET", f"{JIRA_BASE_URL}/rest/api/3/project/{project_key}/components",
+                               auth=JIRA_AUTH, timeout=REQUEST_TIMEOUT)
+        _PROJECT_COMPONENTS[project_key] = {c["name"] for c in (r.json() if r is not None and r.status_code == 200 else [])}
+    for name in sorted(names - _PROJECT_COMPONENTS[project_key]):
+        r = request_with_retry("POST", f"{JIRA_BASE_URL}/rest/api/3/component", auth=JIRA_AUTH,
+                               json={"project": project_key, "name": name}, timeout=REQUEST_TIMEOUT)
+        if r is not None and r.status_code < 300:
+            _PROJECT_COMPONENTS[project_key].add(name)
+            print(f"    Utworzono komponent '{name}' w {project_key}.")
+        else:
+            print(f"    [OSTRZEŻENIE] Nie udało się utworzyć komponentu '{name}' w {project_key}: "
+                  f"{getattr(r, 'status_code', '?')} {getattr(r, 'text', '')[:120]}")
+
+
+def section_final_fields(project_key: str, section_name: Optional[str], section_status_map: dict,
+                         completed: bool = False) -> Optional[dict]:
+    """Pola do ustawienia na ostatnim kroku przejścia (np. Resolution = Won't Do)."""
+    rule = section_rule(project_key, section_name, section_status_map)
+    if completed and not rule["over_completed"]:
+        return None
+    return {"resolution": {"name": rule["resolution"]}} if rule["resolution"] else None
+
+
+def apply_section_labels(issue_key: str, project_key: str, section_name: Optional[str],
+                         section_status_map: dict, completed: bool = False) -> None:
+    """Dodaje etykiety przypisane do sekcji i zdejmuje etykiety innych sekcji (tylko zarządzane
+    przez mapę - pozostałe etykiety zgłoszenia zostają). Nic nie robi, gdy mapa nie ma etykiet."""
+    managed = managed_section_labels(project_key, section_status_map)
+    managed_comp = managed_section_labels(project_key, section_status_map, "components")
+    if not managed and not managed_comp:
+        return
+    rule = section_rule(project_key, section_name, section_status_map)
+    active = not completed or rule["over_completed"]
+    wanted = set(rule["labels"]) if active else set()
+    wanted_comp = set(rule["components"]) if active else set()
+    if wanted_comp:
+        ensure_components(project_key, wanted_comp)
+    r = request_with_retry("GET", f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}", auth=JIRA_AUTH,
+                           params={"fields": "labels,components"}, timeout=REQUEST_TIMEOUT)
+    if r is None or r.status_code != 200:
+        return
+    fields = r.json()["fields"]
+    update = {}
+    current = set(fields.get("labels") or [])
+    new = (current - managed) | wanted
+    if managed and new != current:
+        update["labels"] = sorted(new)
+    current_comp = {c["name"] for c in fields.get("components") or []}
+    new_comp = (current_comp - managed_comp) | (wanted_comp & _PROJECT_COMPONENTS.get(project_key, wanted_comp))
+    if managed_comp and new_comp != current_comp:
+        update["components"] = [{"name": n} for n in sorted(new_comp)]
+    if update:
+        request_with_retry("PUT", f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}", auth=JIRA_AUTH,
+                           params={"notifyUsers": "false"}, json={"fields": update}, timeout=REQUEST_TIMEOUT)
+
+
 def resolve_target_status_id(project_key: str, section_name: Optional[str],
-                              section_status_map: dict, unmapped_sections: set) -> Optional[str]:
+                              section_status_map: dict, unmapped_sections: set,
+                              completed: bool = False) -> Optional[str]:
     """Zamienia nazwę sekcji Asany na ID statusu Jira, przez tabelę
     section_status_map (NIE przez bezpośrednie dopasowanie nazwy sekcji do
     nazwy statusu — te zwykle się nie pokrywają, sekcje bywają etapami/
@@ -875,14 +1630,38 @@ def resolve_target_status_id(project_key: str, section_name: Optional[str],
 
     Wartość w section_status_map może być JEDNYM statusem (string) ALBO
     LISTĄ statusów - jeśli lista, w kierunku Asana->Jira bierzemy PIERWSZY
-    (kierunek zwrotny w jira_asana_sync.py używa WSZYSTKICH jako kandydatów)."""
+    (kierunek zwrotny w jira_asana_sync.py używa WSZYSTKICH jako kandydatów).
+
+    completed=True (checkbox "ukończone" w Asanie) ZAWSZE nadpisuje mapowanie
+    sekcji, wymuszając status "Fertig" — niezależnie od tego, w jakiej
+    sekcji/kolumnie zadanie fizycznie leży. Bez tego zadania odhaczone jako
+    zrobione, ale nigdy nie przeciągnięte do kolumny "Done" (częsty przypadek
+    w praktyce), lądowały w Jirze jako aktywne, pod jakimkolwiek statusem
+    odpowiadał ich starej sekcji (np. Misc, New In)."""
+    overrides = project_section_overrides(project_key)
+    if completed and section_rule(project_key, section_name, section_status_map)["over_completed"]:
+        completed = False  # np. "Verworfen": odrzucone zadanie, nawet odhaczone, ma być Closed, nie Done
+    if completed:
+        done_name = overrides.get(COMPLETED_KEY) or "Fertig"
+        status_id = get_status_id_by_name(project_key, done_name)
+        if status_id:
+            return status_id
+        print(
+            f"    [OSTRZEŻENIE] Zadanie ukończone w Asanie, ale status '{done_name}' nie istnieje "
+            f"w projekcie {project_key} - używam mapowania sekcji jako zapasowego."
+        )
+        # Brak statusu "Fertig" w tym projekcie - spadamy do normalnej
+        # logiki opartej o sekcję, zamiast zwracać błąd.
+
     if not section_name:
         return None
-    raw_value = section_status_map.get(section_name)
+    raw_value = overrides[section_name] if section_name in overrides else section_status_map.get(section_name)
     if not raw_value:
         unmapped_sections.add(section_name)
         return None
-    target_status_name = raw_value[0] if isinstance(raw_value, list) else raw_value
+    if section_rule(project_key, section_name, section_status_map)["skip"]:
+        return None
+    target_status_name = section_rule(project_key, section_name, section_status_map)["status"]
     if not target_status_name:
         unmapped_sections.add(section_name)
         return None
@@ -903,21 +1682,37 @@ def sync_project(asana_project_name: str, jira_key: str, state: dict,
                   user_map: dict, section_status_map: dict, dry_run: bool,
                   asana_project_link: str = "") -> dict:
     project_state = state.setdefault(jira_key, {})
+    epic_candidate_gids = set(load_epic_candidates().get(jira_key, []))
+    _SUBTASKS_SYNCED_THIS_RUN.clear()
 
     asana_gid = core.extract_asana_project_gid(asana_project_link) if asana_project_link else None
     if not asana_gid:
+        record_warning(jira_key, asana_project_name, "brak asana_project_link w arkuszu - projekt pominięty")
         print(f"  [OSTRZEŻENIE] Brak asana_project_link dla '{jira_key}' ('{asana_project_name}') — "
               f"pomijam (dopasowanie po nazwie zostało celowo wyłączone, bo bywa niejednoznaczne "
               f"przy zduplikowanych nazwach projektów w Asanie). Uzupełnij link w arkuszu.")
         return {"created": 0, "updated": 0, "skipped": 0, "errors": 0, "comments": 0, "attachments": 0, "status_ok": 0, "status_failed": 0, "unmapped_sections": set()}
 
-    tasks = get_asana_tasks(asana_gid)
-    print(f"  Zadań w Asanie: {len(tasks)}")
+    tasks, nested_in_project = order_parents_first(get_asana_tasks(asana_gid))
+    print(f"  Zadań w Asanie: {len(tasks)}"
+          + (f" (w tym {len(nested_in_project)} podzadań dodanych też do projektu)" if nested_in_project else ""))
 
-    stats = {"created": 0, "updated": 0, "skipped": 0, "errors": 0, "comments": 0, "attachments": 0, "status_ok": 0, "status_failed": 0}
+    stats = {"created": 0, "created_epics": 0, "created_tasks": 0, "created_subtasks": 0, "updated": 0, "updated_epics": 0, "updated_tasks": 0, "updated_subtasks": 0, "skipped": 0, "skipped_unchanged": 0, "skipped_deleted": 0, "skipped_epic_retrofit": 0, "skipped_nested": 0, "skipped_jira_master": 0, "errors": 0, "comments": 0, "attachments": 0, "status_ok": 0, "status_failed": 0}
     unmapped_sections: set = set()
+    jira_master_gids: set = set()
+    _OWN_SECTION_STATUS.clear()
+    _OWN_SECTION_FIELDS.clear()
+    for t in tasks:
+        _sec = get_task_section_name(t, asana_gid)
+        _OWN_SECTION_STATUS[t["gid"]] = resolve_target_status_id(
+            jira_key, _sec, section_status_map, unmapped_sections, completed=t.get("completed", False))
+        _OWN_SECTION_FIELDS[t["gid"]] = section_final_fields(jira_key, _sec, section_status_map,
+                                                             t.get("completed", False))
 
-    for task in tasks:
+    for task_no, task in enumerate(tasks, 1):
+        if task_no % 100 == 0:
+            # postęp: większość pracy przy istniejących zadaniach (linki, statusy, podzadania) nie wypisuje nic
+            print(f"    ...przetworzono {task_no}/{len(tasks)} zadań", flush=True)
         gid = task["gid"]
         name = task.get("name") or "(bez tytułu)"
         notes = task.get("html_notes") or ""
@@ -934,6 +1729,30 @@ def sync_project(asana_project_name: str, jira_key: str, state: dict,
 
         existing = project_state.get(gid)
 
+        parent_gid = (task.get("parent") or {}).get("gid")
+        if parent_gid not in jira_master_gids and section_rule(
+                jira_key, get_task_section_name(task, asana_gid), section_status_map)["skip"] and not existing:
+            jira_master_gids.add(gid)          # poddrzewo też pomijane
+            _SUBTASKS_SYNCED_THIS_RUN.add(gid)
+            stats["skipped"] += 1
+            stats["skipped_section"] = stats.get("skipped_section", 0) + 1
+            continue
+        if is_jira_master(name, existing) or parent_gid in jira_master_gids:
+            jira_master_gids.add(gid)
+            _SUBTASKS_SYNCED_THIS_RUN.add(gid)  # bez schodzenia w poddrzewo
+            stats["skipped"] += 1
+            stats["skipped_jira_master"] += 1
+            continue
+
+        if existing and existing.get("deleted_in_jira"):
+            # Zadanie zostało RĘCZNIE usunięte w Jirze (oznaczone przez
+            # mark_deleted_as_skipped.py) - traktujemy to jako świadomą,
+            # celową decyzję. Pomijamy CAŁKOWICIE: bez próby aktualizacji
+            # (dawało błąd 404 w kółko), bez ponownego tworzenia.
+            stats["skipped"] += 1
+            stats["skipped_deleted"] += 1
+            continue
+
         try:
             if existing:
                 target_key = existing["jira_key"]
@@ -942,11 +1761,37 @@ def sync_project(asana_project_name: str, jira_key: str, state: dict,
                     if dry_run:
                         print(f"    [DRY-RUN] Zaktualizowałbym {target_key}: '{name}'")
                     else:
-                        update_jira_issue(target_key, name, notes, jira_account_id, due_on)
-                        project_state[gid]["asana_modified_at"] = modified_at
+                        try:
+                            update_jira_issue(target_key, name, notes, jira_account_id, due_on)
+                            project_state[gid]["asana_modified_at"] = modified_at
+                        except Exception as upd_exc:
+                            if "404" in str(upd_exc):
+                                # Zadanie usunięte z Jiry - oznaczamy automatycznie, żeby
+                                # nie wracało przy kolejnych przebiegach (ani jako zwykłe
+                                # zadanie, ani jako Epic-kandydat). Bez tej flagi skrypt
+                                # próbowałby aktualizacji / konwersji na Epic w każdym
+                                # kolejnym przebiegu i za każdym razem dostawał 404.
+                                project_state[gid]["deleted_in_jira"] = True
+                                print(f"    [INFO] {target_key} ('{name}'): usunięte z Jiry — "
+                                      f"oznaczam jako deleted_in_jira, nie będzie odtwarzane.")
+                                stats["skipped"] += 1
+                                stats["skipped_deleted"] += 1
+                                continue
+                            raise
                     stats["updated"] += 1
+                    if existing.get("is_epic"):
+                        stats["updated_epics"] += 1
+                    elif existing.get("is_subtask"):
+                        stats["updated_subtasks"] += 1
+                    else:
+                        stats["updated_tasks"] += 1
                 else:
                     stats["skipped"] += 1
+                    stats["skipped_unchanged"] += 1
+                    if gid in nested_in_project:
+                        # podzadanie widoczne też na liście projektu - zwykle obsłużone
+                        # chwilę wcześniej razem z rodzicem (sync_subtasks)
+                        stats["skipped_nested"] += 1
 
                 # Status - ZAWSZE sprawdzany, niezależnie od tego, czy modified_at
                 # się zmienił: przeniesienie zadania między sekcjami w Asanie nie
@@ -954,7 +1799,7 @@ def sync_project(asana_project_name: str, jira_key: str, state: dict,
                 # gubiło zmiany statusu (to był dokładnie zgłoszony problem).
                 if not dry_run:
                     section_name = get_task_section_name(task, asana_gid)
-                    status_id = resolve_target_status_id(jira_key, section_name, section_status_map, unmapped_sections)
+                    status_id = resolve_target_status_id(jira_key, section_name, section_status_map, unmapped_sections, completed=task.get("completed", False))
                     if os.getenv("DEBUG_SYNC"):
                         current_status_now = get_current_status_id(target_key)
                         print(
@@ -962,7 +1807,10 @@ def sync_project(asana_project_name: str, jira_key: str, state: dict,
                             f"docelowy status_id={status_id!r}, obecny status_id={current_status_now!r}"
                         )
                     if status_id:
-                        moved = transition_jira_issue_to_status(target_key, status_id)
+                        moved = transition_jira_issue_to_status(
+                            target_key, status_id,
+                            section_final_fields(jira_key, section_name, section_status_map, task.get("completed", False)))
+                        apply_section_labels(target_key, jira_key, section_name, section_status_map, task.get("completed", False))
                         if not moved:
                             print(
                                 f"      [OSTRZEŻENIE] {target_key}: nie udało się przejść do statusu "
@@ -970,6 +1818,8 @@ def sync_project(asana_project_name: str, jira_key: str, state: dict,
                                 f"statusu w tym workflow, albo Jira odrzuciła przejście - np. walidator "
                                 f"pola wymagany przy tym przejściu)."
                             )
+                            record_warning(jira_key, f"{target_key} '{name}'",
+                                           f"nie udało się ustawić statusu dla sekcji '{section_name}'")
                             stats["status_failed"] += 1
                         else:
                             stats["status_ok"] += 1
@@ -979,23 +1829,34 @@ def sync_project(asana_project_name: str, jira_key: str, state: dict,
                     print(f"    [DRY-RUN] Utworzyłbym w {jira_key}: '{name}'")
                     target_key = None  # nic nie utworzone naprawdę - komentarzy/załączników nie sprawdzamy niżej
                 else:
-                    target_key = create_jira_issue(jira_key, name, notes, jira_account_id, due_on)
+                    force_type = "Epic" if gid in epic_candidate_gids else None
+                    target_key = create_jira_issue(jira_key, name, notes, jira_account_id, due_on, force_issue_type=force_type)
+                    project_state.setdefault(gid, {})["is_epic"] = (force_type == "Epic")  # pamiętamy dla kolejnych przebiegów
                     section_name = get_task_section_name(task, asana_gid)
-                    status_id = resolve_target_status_id(jira_key, section_name, section_status_map, unmapped_sections)
+                    status_id = resolve_target_status_id(jira_key, section_name, section_status_map, unmapped_sections, completed=task.get("completed", False))
                     if status_id:
-                        moved = transition_jira_issue_to_status(target_key, status_id)
+                        moved = transition_jira_issue_to_status(
+                            target_key, status_id,
+                            section_final_fields(jira_key, section_name, section_status_map, task.get("completed", False)))
+                        apply_section_labels(target_key, jira_key, section_name, section_status_map, task.get("completed", False))
                         if not moved:
                             print(
                                 f"      [OSTRZEŻENIE] {target_key}: nie udało się przejść do statusu "
                                 f"odpowiadającego sekcji '{section_name}' (cel nieosiągalny z bieżącego "
                                 f"statusu w tym workflow, albo Jira odrzuciła przejście)."
                             )
+                            record_warning(jira_key, f"{target_key} '{name}'",
+                                           f"nie udało się ustawić statusu dla sekcji '{section_name}'")
                             stats["status_failed"] += 1
                         else:
                             stats["status_ok"] += 1
-                    project_state[gid] = {"jira_key": target_key, "asana_modified_at": modified_at}
+                    # is_epic zachowane w nowym wpisie - wcześniej było tu nadpisywane, przez co
+                    # ten sam przebieg niepotrzebnie próbował ponownie konwertować Epika.
+                    project_state[gid] = {"jira_key": target_key, "asana_modified_at": modified_at,
+                                          "is_epic": force_type == "Epic"}
                     print(f"    Utworzono {target_key}: '{name}'")
                 stats["created"] += 1
+                stats["created_epics" if gid in epic_candidate_gids else "created_tasks"] += 1
 
             # Komentarze i załączniki - ZAWSZE sprawdzane (niezależnie od tego,
             # czy pola zadania się zmieniły), bo nowy komentarz/załącznik nie
@@ -1005,11 +1866,110 @@ def sync_project(asana_project_name: str, jira_key: str, state: dict,
                 task_state = project_state.setdefault(gid, {"jira_key": target_key, "asana_modified_at": modified_at})
                 added_comments = sync_comments(gid, target_key, task_state, dry_run)
                 added_attachments = sync_attachments(gid, target_key, task_state, dry_run)
+                ensure_asana_link(gid, target_key, name, task_state, dry_run)
                 stats["comments"] += added_comments
                 stats["attachments"] += added_attachments
 
+                # Podzadania - ZAWSZE sprawdzane, tak samo jak komentarze/
+                # załączniki (nowe/zmienione podzadanie nie zawsze zmienia
+                # modified_at samego zadania nadrzędnego).
+                # SPŁASZCZANIE: jeśli TO zadanie samo jest podzadaniem
+                # (oznaczone "is_subtask"), Jira nie pozwoli przypiąć JEGO
+                # własnych podzadań pod NIM (nie obsługuje zagnieżdżania
+                # podzadań w podzadaniach - potwierdzony ręcznie błąd:
+                # "Parent ... can not be sub-task"). Zamiast całkowicie
+                # pomijać te głębiej zagnieżdżone zadania (utrata danych),
+                # przypinamy je pod PRAWDZIWYM przodkiem najwyższego poziomu
+                # (zapisanym przy tworzeniu TEGO podzadania) - traci się
+                # informację "to było zagnieżdżone głębiej", ale treść
+                # (tytuł, opis, komentarze, załączniki) przetrwa jako
+                # prawdziwe, śledzalne zadanie w Jirze.
+                if task_state.get("is_subtask"):
+                    flatten_parent_key = task_state.get("top_level_ancestor_key", target_key)
+                    # Normalna sytuacja przy głębszym zagnieżdżeniu w Asanie - tylko licznik w podsumowaniu
+                    # (wcześniej linia przy każdym przebiegu dla każdego takiego zadania zasłaniała ważne komunikaty).
+                    stats["flattened_parents"] = stats.get("flattened_parents", 0) + 1
+                    sub_stats = sync_subtasks(gid, flatten_parent_key, jira_key, project_state, user_map, dry_run,
+                                              inherited_status_id=_OWN_SECTION_STATUS.get(gid),
+                                              inherited_fields=_OWN_SECTION_FIELDS.get(gid))
+                    stats["created"] += sub_stats["created"]
+                    stats["created_tasks"] += sub_stats["created_tasks"]
+                    stats["created_subtasks"] += sub_stats["created_subtasks"]
+                    stats["updated"] += sub_stats["updated"]
+                    stats["updated_tasks"] += sub_stats["updated_tasks"]
+                    stats["updated_subtasks"] += sub_stats["updated_subtasks"]
+                    stats["status_ok"] += sub_stats.get("status_ok", 0)
+                    stats["status_failed"] += sub_stats.get("status_failed", 0)
+                    stats["skipped_jira_master"] += sub_stats.get("skipped_jira_master", 0)
+                    stats["comments"] += sub_stats["comments"]
+                    stats["attachments"] += sub_stats["attachments"]
+                    stats["errors"] += sub_stats["errors"]
+                else:
+                    # Jeśli zadanie jest kandydatem na Epic (ma podzadania podzadań)
+                    # ale nie jest jeszcze oznaczone jako Epic w stanie - zostało
+                    # zmigrowane PRZED wprowadzeniem obsługi Epików (np. taski już
+                    # zmigrowane, subtaski jeszcze nie). Konwertujemy je teraz, żeby
+                    # sync_subtasks mógł tworzyć jego dzieci jako Task (nie Sub-task)
+                    # - bez tej konwersji Jira odrzuciłaby tworzenie Task z rodzicem
+                    # będącym innym Taskiem (tylko Epic może być rodzicem Taska).
+                    is_epic_candidate = gid in epic_candidate_gids
+                    if is_epic_candidate and not task_state.get("is_epic"):
+                        if has_already_migrated_subtasks(gid, project_state):
+                            # Podzadania tego zadania SĄ JUŻ zmigrowane jako Jira
+                            # Sub-task. Konwersja rodzica na Epic zostawiłaby je
+                            # podpięte pod Epikiem - strukturę, której Jira nie
+                            # dopuszcza (Sub-task nie może wisieć bezpośrednio pod
+                            # Epikiem). Sama zmiana typu zwykle zostaje odrzucona,
+                            # a w gorszym razie przechodzi i osierocałaby podzadania.
+                            # Taki przypadek naprawia retrofit_epics.py, który
+                            # konwertuje CAŁĄ hierarchię naraz (Task->Epic,
+                            # Sub-task->Task, przepięcie wnuków), łącznie z Bulk Move
+                            # dla legacy typów podzadań.
+                            print(f"    [POMINIĘTO] '{name}' ({target_key}) jest kandydatem na Epic, "
+                                  f"ale ma JUŻ ZMIGROWANE podzadania — nie konwertuję, żeby nie "
+                                  f"zostawić Epika z podpiętymi Sub-taskami. Uruchom dla tego "
+                                  f"projektu: python retrofit_epics.py --project-keys {jira_key}")
+                            stats["skipped"] += 1
+                            stats["skipped_epic_retrofit"] += 1
+                            is_epic_candidate = False  # dalej traktuj jak zwykłe zadanie
+                        else:
+                            try:
+                                ensure_issue_is_epic(target_key, name, dry_run)
+                                task_state["is_epic"] = True
+                            except Exception as epic_exc:
+                                if "404" in str(epic_exc):
+                                    project_state[gid]["deleted_in_jira"] = True
+                                    print(f"    [INFO] {target_key} ('{name}'): usunięte z Jiry "
+                                          f"(wykryte przy próbie konwersji na Epic) — oznaczam jako "
+                                          f"deleted_in_jira, nie będzie odtwarzane.")
+                                    stats["skipped"] += 1
+                                    stats["skipped_deleted"] += 1
+                                    continue
+                                raise
+                    # Epik to kandydat z epic_candidates.json ALBO zgłoszenie, które JUŻ jest
+                    # Epikiem w Jirze (flaga is_epic, odświeżana przez refresh_state_flags.py).
+                    # Bez drugiego warunku nowe podzadanie Epika spoza listy kandydatów
+                    # powstawałoby jako Sub-task bezpośrednio pod Epikiem - Jira to odrzuca.
+                    parent_is_epic = is_epic_candidate or bool(task_state.get("is_epic"))
+                    sub_stats = sync_subtasks(gid, target_key, jira_key, project_state, user_map, dry_run, parent_is_epic=parent_is_epic,
+                                              inherited_status_id=_OWN_SECTION_STATUS.get(gid),
+                                              inherited_fields=_OWN_SECTION_FIELDS.get(gid))
+                    stats["created"] += sub_stats["created"]
+                    stats["created_tasks"] += sub_stats["created_tasks"]
+                    stats["created_subtasks"] += sub_stats["created_subtasks"]
+                    stats["updated"] += sub_stats["updated"]
+                    stats["updated_tasks"] += sub_stats["updated_tasks"]
+                    stats["updated_subtasks"] += sub_stats["updated_subtasks"]
+                    stats["status_ok"] += sub_stats.get("status_ok", 0)
+                    stats["status_failed"] += sub_stats.get("status_failed", 0)
+                    stats["skipped_jira_master"] += sub_stats.get("skipped_jira_master", 0)
+                    stats["comments"] += sub_stats["comments"]
+                    stats["attachments"] += sub_stats["attachments"]
+                    stats["errors"] += sub_stats["errors"]
+
         except Exception as exc:  # noqa: BLE001
             print(f"    [BŁĄD] '{name}': {exc}")
+            record_error(jira_key, f"zadanie '{name}'", exc)
             stats["errors"] += 1
 
         if not dry_run:
@@ -1029,11 +1989,38 @@ def sync_project(asana_project_name: str, jira_key: str, state: dict,
 # Main
 # --------------------------------------------------------------------------- #
 
+SYNC_EXCLUDE_FILE = Path(__file__).resolve().parent / "sync_exclude.txt"
+
+
+def load_sync_exclude() -> set:
+    """Klucze projektów wyłączonych z synchronizacji (oba kierunki) - np. na czas
+    naprawy stanu. Plik sync_exclude.txt: jeden klucz w linii, '#' = komentarz.
+    Projekt zostaje w arkuszu, więc narzędzia diagnostyczne i naprawcze dalej go widzą."""
+    if not SYNC_EXCLUDE_FILE.exists():
+        return set()
+    keys = set()
+    for line in SYNC_EXCLUDE_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            keys.add(line.upper())
+    return keys
+
+
+def drop_excluded(pairs: list, key_index: int) -> list:
+    excluded = load_sync_exclude() | core.load_protected_projects()
+    skipped = sorted({p[key_index].upper() for p in pairs if p[key_index].upper() in excluded})
+    if skipped:
+        print(f"[WYKLUCZONE] Pomijam projekty z {SYNC_EXCLUDE_FILE.name}: {', '.join(skipped)} "
+              f"(usuń je z pliku, żeby znów synchronizować).")
+    return [p for p in pairs if p[key_index].upper() not in excluded]
+
+
 def get_project_pairs(args) -> list[tuple[str, str, str]]:
-    """Zwraca listę (nazwa_projektu_Asana, klucz_Jira, link_do_Asany) —
-    z project_key_cache.json, tak jak jira_sync.py, więc żadne dodatkowe
-    mapowanie nie jest potrzebne. link_do_Asany może być pustym stringiem
-    (wtedy sync_project() dopasowuje po nazwie, tak jak dotąd)."""
+    """Zwraca listę (nazwa_projektu_Asana, klucz_Jira, link_do_Asany) z
+    arkusza. Klucz Jiry z kolumny jira_key, a gdy jej brak - z
+    project_key_cache.json (tak jak jira_sync.py). link_do_Asany może być
+    pusty - wtedy sync_project() POMIJA projekt z ostrzeżeniem (dopasowanie
+    po nazwie jest celowo wyłączone)."""
     sheet_rows = core.get_sheet_rows()
     cache = core.load_key_cache()
     pairs = []
@@ -1047,20 +2034,34 @@ def get_project_pairs(args) -> list[tuple[str, str, str]]:
         wanted = {k.strip().upper() for k in args.project_keys.split(",") if k.strip()}
         pairs = [p for p in pairs if p[1].upper() in wanted]
 
-    return pairs
+    return drop_excluded(pairs, 1)
 
 
 def main() -> None:
+    try:
+        sys.stdout.reconfigure(line_buffering=True)  # wypisywanie na bieżąco, także przy przechwyconym wyjściu
+    except (AttributeError, ValueError):
+        pass
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--project-keys", type=str, default=None)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--shard", type=str, default=None,
+        help="Podział pracy między kilka RÓWNOLEGLE uruchomionych procesów, bez ręcznego "
+             "kopiowania kluczy — format 'K/N' (np. '1/3'). Patrz jira_sync.py --help po "
+             "pełne wyjaśnienie. Ignorowane razem z --project-keys (tam i tak wybierasz "
+             "konkretne klucze ręcznie).",
+    )
     args = parser.parse_args()
 
     if not args.dry_run:
         setup_file_logging("asana_jira_sync")
 
     pairs = get_project_pairs(args)
+    if args.shard:
+        pairs = core.apply_shard(pairs, args.shard)
+        print(f"--shard {args.shard}: ten proces obsłuży {len(pairs)} projekt(ów).")
     if args.limit:
         pairs = pairs[: args.limit]
 
@@ -1084,23 +2085,50 @@ def main() -> None:
             "python list_asana_sections.py \"Nazwa projektu\"\n"
         )
 
-    totals = {"created": 0, "updated": 0, "skipped": 0, "errors": 0, "comments": 0, "attachments": 0, "status_ok": 0, "status_failed": 0}
+    totals = {"created": 0, "created_epics": 0, "created_tasks": 0, "created_subtasks": 0, "updated": 0, "updated_epics": 0, "updated_tasks": 0, "updated_subtasks": 0, "skipped": 0, "skipped_unchanged": 0, "skipped_deleted": 0, "skipped_epic_retrofit": 0, "skipped_nested": 0, "skipped_jira_master": 0, "errors": 0, "comments": 0, "attachments": 0, "status_ok": 0, "status_failed": 0, "flattened_parents": 0, "skipped_section": 0}
     all_unmapped_sections: set = set()
     for i, (asana_name, jira_key, asana_link) in enumerate(pairs):
         print(f"\n[{i + 1}/{len(pairs)}] {asana_name} -> {jira_key}")
-        stats = sync_project(asana_name, jira_key, state, user_map, section_status_map, args.dry_run, asana_link)
-        for k in totals:
-            totals[k] += stats.get(k, 0)
-        all_unmapped_sections |= stats.get("unmapped_sections", set())
 
-        if not args.dry_run:
-            save_state(state)  # zapisuj po każdym projekcie, nie tylko na końcu
+        with project_lock(jira_key) as acquired:
+            if not acquired:
+                print(f"  [POMINIĘTO] {jira_key} jest właśnie przetwarzany przez inny proces "
+                      f"(prawdopodobnie równoległe uruchomienie) — pomijam, żeby uniknąć "
+                      f"duplikatów zadań. Uruchom ponownie później, żeby dokończyć ten projekt.")
+                totals["skipped"] += 1
+                continue
+
+            stats = sync_project(asana_name, jira_key, state, user_map, section_status_map, args.dry_run, asana_link)
+            for k in totals:
+                totals[k] += stats.get(k, 0)
+            all_unmapped_sections |= stats.get("unmapped_sections", set())
+
+            if not args.dry_run:
+                save_state(state)  # zapisuj po każdym projekcie, nie tylko na końcu
 
     print("\n" + "=" * 60)
     print("PODSUMOWANIE")
-    print(f"  Utworzono:      {totals['created']}")
-    print(f"  Zaktualizowano: {totals['updated']}")
-    print(f"  Pominięto:      {totals['skipped']} (bez zmian od ostatniego syncu)")
+    print(f"  Utworzono:      {totals['created']} (Epiki: {totals['created_epics']}, "
+          f"Taski: {totals['created_tasks']}, Sub-taski: {totals['created_subtasks']})")
+    print(f"  Zaktualizowano: {totals['updated']} (Epiki: {totals['updated_epics']}, "
+          f"Taski: {totals['updated_tasks']}, Sub-taski: {totals['updated_subtasks']})")
+    print(f"  Linki do Asany dodane: {_LINKS_ADDED['count']}")
+    print(f"  Pominięto:      {totals['skipped']}")
+    print(f"    bez zmian od ostatniego syncu:          {totals['skipped_unchanged']}")
+    if totals["skipped_nested"]:
+        print(f"      w tym podzadania obecne też na liście projektu (obsłużone razem z rodzicem): "
+              f"{totals['skipped_nested']}")
+    print(f"    usunięte w Jirze (deleted_in_jira):     {totals['skipped_deleted']}")
+    print(f"    kandydaci na Epic do retrofit_epics.py: {totals['skipped_epic_retrofit']}")
+    print(f"    prowadzone w Jirze ('migriert zu Jira'):   {totals['skipped_jira_master']}")
+    if totals.get("skipped_section"):
+        print(f"    z sekcji oznaczonych do pominięcia ('pomin'): {totals['skipped_section']}")
+    if totals.get("flattened_parents"):
+        print(f"  Zadań-podzadań z własnymi podzadaniami (spłaszczone pod przodka): {totals['flattened_parents']}")
+    if totals["skipped_deleted"]:
+        print("    UWAGA: zadania oznaczone jako usunięte w Jirze nie będą odtwarzane. Jeśli projekt")
+        print("    w Jirze utworzono od nowa, a stan został stary, wyczyść wpisy projektu")
+        print("    (clean_stale_task_state.py) - inaczej te zadania nigdy nie powstaną.")
     print(f"  Błędy:          {totals['errors']}")
     print(f"  Komentarzy:     {totals['comments']}")
     print(f"  Załączników:    {totals['attachments']}")
@@ -1111,10 +2139,40 @@ def main() -> None:
         for name in sorted(all_unmapped_sections):
             print(f'  "{name}"')
 
-    if not args.dry_run:
+    for section in sorted(all_unmapped_sections):
+        record_warning("-", f"sekcja '{section}'", "brak wpisu w section_status_map.json - zadania zostały w statusie domyślnym")
+    write_shard_summary("asana_jira_sync", args.shard, {
+        "utworzone": totals["created"],
+        "utworzone epiki": totals["created_epics"],
+        "utworzone taski": totals["created_tasks"],
+        "utworzone sub-taski": totals["created_subtasks"],
+        "zaktualizowane": totals["updated"],
+        "zaktualizowane epiki": totals["updated_epics"],
+        "zaktualizowane taski": totals["updated_tasks"],
+        "zaktualizowane sub-taski": totals["updated_subtasks"],
+        "komentarze": totals["comments"],
+        "załączniki": totals["attachments"],
+        "linki do asany": _LINKS_ADDED["count"],
+        "pominięte": totals["skipped"],
+        "pominięte bez zmian": totals["skipped_unchanged"],
+        "w tym podzadania z listy projektu": totals["skipped_nested"],
+        "pominięte usunięte w jirze": totals["skipped_deleted"],
+        "pominięte do retrofit": totals["skipped_epic_retrofit"],
+        "pominięte prowadzone w jirze": totals["skipped_jira_master"],
+        "statusy_ok": totals["status_ok"],
+        "statusy_błąd": totals["status_failed"],
+        "błędy": totals["errors"],
+        "projekty": len(pairs),
+        "sekcje_bez_mapowania": len(all_unmapped_sections),
+    })
+
+    if not args.dry_run and not is_pipeline_child():
         send_slack_summary(
             f"*asana_jira_sync.py* zakończony.\n"
-            f"Utworzone: {totals['created']} | Zaktualizowane: {totals['updated']} | "
+            f"Utworzone: {totals['created']} (Epiki: {totals['created_epics']}, Taski: {totals['created_tasks']}, "
+            f"Sub-taski: {totals['created_subtasks']}) | Zaktualizowane: {totals['updated']} "
+            f"(Epiki: {totals['updated_epics']}, Taski: {totals['updated_tasks']}, "
+            f"Sub-taski: {totals['updated_subtasks']}) | "
             f"Komentarze: {totals['comments']} | Załączniki: {totals['attachments']} | "
             f"Błędy: {totals['errors']}"
         )

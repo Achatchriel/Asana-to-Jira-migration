@@ -64,6 +64,7 @@ from playwright.sync_api import sync_playwright, Page, TimeoutError as Playwrigh
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # ta ścieżka ma pierwszeństwo
 import jira_sync as core  # reużywamy odczytu arkusza i generowania kluczy; wczytuje .env sam
+from pipeline_summary import record_error, record_warning, write_shard_summary
 
 
 def _find_env_file() -> "Path | None":
@@ -110,7 +111,14 @@ SELECTORS = {
     "status_card": '[data-testid="status.card.data.test.id"]',
 }
 
-TIMEOUT_MS = 15_000
+# Domyślnie 30 s (wcześniej 15 s - za mało dla ciężkiej strony ustawień kolumn,
+# zwłaszcza przy kilku procesach równolegle). Nadpisanie: BULK_COLUMNS_TIMEOUT_MS w .env.
+TIMEOUT_MS = int(os.getenv("BULK_COLUMNS_TIMEOUT_MS", "30000"))
+
+
+class SessionExpiredError(RuntimeError):
+    """Sesja przeglądarki (auth_state.json) wygasła - Jira przekierowała na
+    logowanie. Nie ma sensu próbować kolejnych projektów."""
 
 
 # --------------------------------------------------------------------------- #
@@ -124,11 +132,28 @@ class TargetColumn:
 
 
 def find_board_id(project_key: str) -> "int | None":
+    """ID tablicy projektu. API zwraca też tablice INNYCH projektów, które
+    tylko obejmują ten projekt filtrem - wtedy adres projects/KLUCZ/boards/ID
+    nie istnieje, Jira przekierowuje i czekanie na kolumny kończy się
+    timeoutem. Dlatego najpierw tablica, której lokalizacją jest TEN projekt."""
     url = f"{JIRA_BASE_URL}/rest/agile/1.0/board"
     resp = requests.get(url, auth=AUTH, params={"projectKeyOrId": project_key}, timeout=30)
     resp.raise_for_status()
     values = resp.json().get("values", [])
-    return values[0]["id"] if values else None
+    if not values:
+        return None
+    own = [b for b in values if (b.get("location") or {}).get("projectKey", "").upper() == project_key.upper()]
+    return (own or values)[0]["id"]
+
+
+def get_project_style(project_key: str) -> str:
+    """'classic' (company-managed) albo 'next-gen' (team-managed). Strona
+    ustawień kolumn i jej elementy istnieją tylko dla company-managed - adres
+    w open_columns_config jest zaszyty jako /jira/software/c/... ."""
+    resp = requests.get(f"{JIRA_BASE_URL}/rest/api/3/project/{project_key}", auth=AUTH, timeout=30)
+    if resp.status_code != 200:
+        return "unknown"
+    return resp.json().get("style", "unknown")
 
 
 def list_boards_for_project(project_key: str) -> list[dict]:
@@ -194,8 +219,20 @@ def get_status_names(status_ids: list[str]) -> dict[str, str]:
 def open_columns_config(page: Page, project_key: str, board_id: int, wait_for_columns: bool = True) -> None:
     url = f"{JIRA_BASE_URL}/jira/software/c/projects/{project_key}/boards/{board_id}/settings/columns"
     page.goto(url, timeout=TIMEOUT_MS)
+    check_page_state(page)
     if wait_for_columns:
-        page.wait_for_selector(SELECTORS["column"], timeout=TIMEOUT_MS)
+        try:
+            page.wait_for_selector(SELECTORS["column"], timeout=TIMEOUT_MS)
+        except PlaywrightTimeoutError:
+            # Przekierowanie na logowanie może nastąpić PO goto (skrypt Jiry
+            # sprawdza sesję po załadowaniu) - sprawdzamy ponownie, żeby zamiast
+            # ogólnego timeoutu podać konkretny powód.
+            check_page_state(page)
+            if "/settings/columns" not in page.url:
+                raise PlaywrightTimeoutError(
+                    f"Jira przekierowała z ustawień kolumn na {page.url} "
+                    f"(tablica {board_id} nie istnieje w tym projekcie albo brak uprawnień)")
+            raise
         # Panel "Unmapped statuses" donosi swoją zawartość ASYNCHRONICZNIE, już
         # PO wyrenderowaniu kolumn — bez tego oczekiwania skrypt zaczynał szukać
         # statusów zanim się pojawiły, co dawało fałszywe "nie znaleziono"
@@ -205,6 +242,15 @@ def open_columns_config(page: Page, project_key: str, board_id: int, wait_for_co
         except PlaywrightTimeoutError:
             pass  # być może tablica faktycznie nie ma żadnych nieprzypisanych statusów
         page.wait_for_timeout(500)  # dodatkowy margines na pełne wyrenderowanie listy
+
+
+def check_page_state(page: Page) -> None:
+    """Rzuca SessionExpiredError, gdy Jira przekierowała na logowanie."""
+    current = page.url.lower()
+    if "id.atlassian.com" in current or "/login" in current:
+        raise SessionExpiredError(
+            "Sesja przeglądarki wygasła (przekierowanie na logowanie). Uruchom: "
+            "python browser_automation/save_login_session.py i spróbuj ponownie.")
 
 
 def get_current_column_names(page: Page) -> list[str]:
@@ -349,6 +395,9 @@ def move_status_to_column_by_keyboard(page: Page, status_id: str, target_column_
     return True
 
 
+AUTO_MANAGED_COLUMN_NAMES = {"backlog"}  # nie próbuj tworzyć tych ręcznie ani zmieniać ich pozycji
+
+
 def apply_target_columns(page: Page, target_columns: list[TargetColumn], board_id: int, delete_old_columns: bool = True) -> None:
     """
     Idempotentnie doprowadza tablicę do stanu wzorca:
@@ -362,8 +411,6 @@ def apply_target_columns(page: Page, target_columns: list[TargetColumn], board_i
        indeksie), bo automatycznie zarządzane kolumny mogą stać w innym
        miejscu niż w oryginalnym układzie wzorca.
     """
-    AUTO_MANAGED_COLUMN_NAMES = {"backlog"}  # nie próbuj tworzyć tych ręcznie
-
     def norm(s: str) -> str:
         # innerText odczytuje tekst PO zastosowaniu CSS text-transform (kolumny
         # są wyświetlane WIELKIMI LITERAMI niezależnie od zapisu w danych Jiry),
@@ -452,6 +499,63 @@ def apply_target_columns(page: Page, target_columns: list[TargetColumn], board_i
     else:
         print("    Wszystkie kolumny wzorca już istnieją — nic do utworzenia.")
 
+    # 3) SPRAWDŹ I NAPRAW KOLEJNOŚĆ. Kroki 1-2 wyżej tworzą TYLKO brakujące
+    #    kolumny (w kolejności wzorca) - kolumny, które JUŻ ISTNIAŁY pod
+    #    właściwą nazwą (np. z wcześniejszego, przerwanego przebiegu) są
+    #    pomijane i zostają na SWOIM dotychczasowym miejscu, nawet jeśli to
+    #    miejsce nie zgadza się z wzorcem. Ten krok to naprawia: jeśli
+    #    kolejność kolumn "zwykłych" (bez Backlog i niezniszczalnej "Done")
+    #    nie zgadza się z wzorcem, usuwa je WSZYSTKIE i tworzy od nowa, w
+    #    poprawnej kolejności - bezpieczniejsze i prostsze niż zawodne
+    #    przeciąganie istniejących kolumn (ten sam wniosek, co przy statusach
+    #    wyżej: drag-and-drop okazał się niewystarczająco niezawodny).
+    ensure_column_order(page, target_columns, undeletable_title)
+
+
+def ensure_column_order(page, target_columns: list["TargetColumn"], undeletable_title: "str | None") -> None:
+    def norm(s: str) -> str:
+        return s.strip().upper()
+
+    excluded = {norm(x) for x in AUTO_MANAGED_COLUMN_NAMES}
+    if undeletable_title:
+        excluded.add(norm(undeletable_title))
+
+    current_titles = page.locator(SELECTORS["column_title"]).all_inner_texts()
+    current_manageable = [t for t in current_titles if norm(t) not in excluded]
+    target_manageable_names = [t.name for t in target_columns if norm(t.name) not in excluded]
+
+    if [norm(t) for t in current_manageable] == [norm(t) for t in target_manageable_names]:
+        print("    Kolejność kolumn już zgadza się z wzorcem - nic do zmiany.")
+        return
+
+    print(f"    Kolejność kolumn NIE zgadza się z wzorcem (jest: {current_manageable}, "
+          f"powinno być: {target_manageable_names}) - usuwam i tworzę od nowa w poprawnej kolejności...")
+
+    # Usuń WSZYSTKIE kolumny "zwykłe" (pomijając Backlog i niezniszczalną "Done").
+    max_attempts = len(current_manageable) + 3
+    for _ in range(max_attempts):
+        titles_now = page.locator(SELECTORS["column_title"]).all_inner_texts()
+        idx_to_delete = next((i for i, t in enumerate(titles_now) if norm(t) not in excluded), None)
+        if idx_to_delete is None:
+            break
+        delete_column(page, idx_to_delete)
+        page.wait_for_timeout(300)
+
+    # Utwórz je od nowa, W KOLEJNOŚCI WZORCA.
+    for i, name in enumerate(target_manageable_names):
+        page.mouse.wheel(3000, 0)
+        page.wait_for_timeout(300)
+        add_button = page.locator(SELECTORS["add_column_button"])
+        add_button.scroll_into_view_if_needed(timeout=TIMEOUT_MS)
+        page.wait_for_timeout(200)
+        add_button.click(timeout=TIMEOUT_MS)
+        page.wait_for_timeout(400)
+        name_input = page.locator(":focus")
+        name_input.fill(name)
+        name_input.press("Enter")
+        page.wait_for_timeout(400)
+        print(f"    Utworzono w poprawnej kolejności {i + 1}/{len(target_manageable_names)}: '{name}'")
+
     # UWAGA: przenoszenie statusów do kolumn zostało WYŁĄCZONE (ponownie).
     # Mechanizm drag-and-drop (klawiaturowy, z weryfikacją pozycji i przez
     # REST) okazał się w tej instancji Jiry niewystarczająco niezawodny mimo
@@ -499,7 +603,8 @@ def get_project_pairs(args) -> list[tuple[str, str]]:
     reserved = set(cache.values())
     pairs = []
     for row in sheet_rows:
-        key = core.assign_jira_key(row, cache, reserved)
+        gid = core.extract_asana_project_gid(row.asana_project_link)
+        key = core.assign_jira_key(row, gid, cache, reserved)
         pairs.append((key, (row.board_template_id or "").strip()))
     return pairs
 
@@ -515,10 +620,13 @@ def main() -> None:
     )
     parser.add_argument("--interactive", action="store_true", help="Tryb widoczny + pauza na pierwszym projekcie.")
     parser.add_argument("--dry-run", action="store_true", help="Tylko pokaż plan, nie otwieraj przeglądarki.")
-    parser.add_argument(
-        "--keep-old-columns", action="store_true",
+    parser.add_argument("--keep-old-columns", action="store_true",
         help="NIE usuwaj starych/domyślnych kolumn — tylko dołóż nowe obok nich "
-             "(bezpieczniejszy tryb, jeśli usuwanie okaże się niedziałające).",
+             "(bezpieczniejszy tryb, jeśli usuwanie okaże się niedziałające).")
+    parser.add_argument(
+        "--shard", type=str, default=None,
+        help="Podział pracy między kilka RÓWNOLEGLE uruchomionych procesów — format 'K/N' "
+             "(patrz jira_sync.py --help po pełne wyjaśnienie).",
     )
     args = parser.parse_args()
 
@@ -527,6 +635,9 @@ def main() -> None:
         sys.exit(1)
 
     project_pairs = get_project_pairs(args)
+    if args.shard:
+        project_pairs = core.apply_shard(project_pairs, args.shard)
+        print(f"--shard {args.shard}: ten proces obsłuży {len(project_pairs)} projekt(ów).")
     if args.limit:
         project_pairs = project_pairs[: args.limit]
     print(f"Projektów do przetworzenia: {len(project_pairs)}")
@@ -557,6 +668,7 @@ def main() -> None:
         return
 
     report = []
+    session_expired = False
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=not args.interactive)
         context = browser.new_context(storage_state=STATE_FILE)
@@ -566,9 +678,17 @@ def main() -> None:
             print(f"\n[{i + 1}/{len(project_pairs)}] {key}")
             target_columns = get_template_for(board_template_id)
 
+            style = get_project_style(key)
+            if style == "next-gen":
+                print("  Projekt team-managed - ustawienia kolumn wyglądają tam inaczej, pomijam.")
+                record_warning(key, "", "projekt team-managed - kolumny trzeba ustawić ręcznie")
+                report.append({"project": key, "status": "team_managed"})
+                continue
+
             board_id = find_board_id(key)
             if not board_id:
                 print("  Brak tablicy — pomijam.")
+                record_warning(key, "", "brak tablicy w projekcie")
                 report.append({"project": key, "status": "brak_tablicy"})
                 continue
 
@@ -596,16 +716,25 @@ def main() -> None:
                     report.append({"project": key, "status": "ok"})
                 else:
                     print("  NIEZGODNOŚĆ — wymaga ręcznego sprawdzenia.")
+                    record_warning(key, f"tablica {board_id}", "układ kolumn po zmianach niezgodny ze wzorcem")
                     report.append({"project": key, "status": "niezgodnosc"})
 
+            except SessionExpiredError as exc:
+                print(f"\n  [STOP] {exc}")
+                record_error(key, "", str(exc))
+                report.append({"project": key, "status": "sesja_wygasla", "error": str(exc)})
+                session_expired = True
+                break
             except PlaywrightTimeoutError as exc:
                 screenshot_path = f"error_{key}.png"
+                first_line = str(exc).splitlines()[0]
                 try:
                     page.screenshot(path=screenshot_path, full_page=True)
-                    print(f"  BŁĄD (timeout): {exc}\n  Zrzut ekranu zapisany do {screenshot_path}")
+                    print(f"  BŁĄD (timeout): {exc}\n  Adres strony: {page.url}\n  Zrzut ekranu zapisany do {screenshot_path}")
                 except Exception:  # noqa: BLE001
                     print(f"  BŁĄD (timeout): {exc}")
-                report.append({"project": key, "status": "blad", "error": str(exc)})
+                record_error(key, f"tablica {board_id}", f"{first_line} (zrzut: {screenshot_path})")
+                report.append({"project": key, "status": "blad", "error": str(exc), "url": page.url})
             except Exception as exc:  # noqa: BLE001
                 screenshot_path = f"error_{key}.png"
                 try:
@@ -613,32 +742,47 @@ def main() -> None:
                     print(f"  BŁĄD: {exc}\n  Zrzut ekranu zapisany do {screenshot_path}")
                 except Exception:  # noqa: BLE001
                     print(f"  BŁĄD: {exc}")
+                record_error(key, f"tablica {board_id}", f"{str(exc).splitlines()[0]} (zrzut: {screenshot_path})")
                 report.append({"project": key, "status": "blad", "error": str(exc)})
 
         browser.close()
 
     Path(REPORT_FILE).write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    ok = sum(1 for r in report if r["status"] == "ok")
-    print("\n" + "=" * 60)
-    print("PODSUMOWANIE")
-    print(f"  OK:            {ok}")
-    print(f"  Niezgodność:   {sum(1 for r in report if r['status'] == 'niezgodnosc')}")
-    print(f"  Błędy:         {sum(1 for r in report if r['status'] == 'blad')}")
-    print(f"  Brak tablicy:  {sum(1 for r in report if r['status'] == 'brak_tablicy')}")
-    print(f"\nSzczegóły w {REPORT_FILE}")
+    def count(status: str) -> int:
+        return sum(1 for r in report if r["status"] == status)
 
     print("\n" + "=" * 60)
-    print("KROK RĘCZNY: przypisz statusy do kolumn w Jira")
-    print("=" * 60)
-    print("Skrypt utworzył/nazwał kolumny, ale NIE przypisuje statusów (robi się to")
-    print("ręcznie — Board settings -> Columns, przeciągnij karty z 'Unmapped statuses').")
+    print("PODSUMOWANIE")
+    print(f"  OK:              {count('ok')}")
+    print(f"  Niezgodność:     {count('niezgodnosc')}")
+    print(f"  Błędy:           {count('blad')}")
+    print(f"  Brak tablicy:    {count('brak_tablicy')}")
+    print(f"  Team-managed:    {count('team_managed')}")
+    if session_expired:
+        not_done = len(project_pairs) - len(report)
+        print(f"  PRZERWANO: sesja wygasła, {not_done} projekt(ów) nieprzetworzonych.")
+    print(f"\nSzczegóły w {REPORT_FILE}")
+
+    write_shard_summary("bulk_configure_columns", args.shard, {
+        "ok": count("ok"),
+        "niezgodność": count("niezgodnosc"),
+        "błędy": count("blad"),
+        "brak tablicy": count("brak_tablicy"),
+        "team-managed": count("team_managed"),
+    })
+
+    print("\nNastępny krok: przypisanie statusów do kolumn robi automatycznie")
+    print("browser_automation/run_column_assignments.py (krok 3 run_full_pipeline.py).")
     for board_template_id, (cols, names) in template_cache.items():
         print(f"\nDocelowe mapowanie status -> kolumna (wzorzec: tablica {board_template_id}):")
         for c in cols:
             status_labels = [names.get(sid, sid) for sid in c.statuses]
             if status_labels:
                 print(f"  {c.name}: {', '.join(status_labels)}")
+
+    if session_expired:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

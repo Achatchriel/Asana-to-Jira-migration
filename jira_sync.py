@@ -58,6 +58,8 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 from notify import setup_file_logging, send_slack_summary
+from pipeline_summary import is_pipeline_child, record_error, record_warning, write_shard_summary
+from project_lock import project_lock
 
 
 # --------------------------------------------------------------------------- #
@@ -263,6 +265,71 @@ def _list_sheet_tab_names(service) -> list[str]:
         return []
 
 
+def validate_no_conflicting_jira_keys(sheet_rows: list[SheetRow]) -> None:
+    """Sprawdza, czy w arkuszu nie ma DWÓCH różnych wierszy z TYM SAMYM
+    jira_key, ale RÓŻNYMI asana_project_link - to prowadzi do wymieszania
+    zadań z dwóch różnych, niepowiązanych projektów Asany w jednym
+    projekcie Jiry (potwierdzony ręcznie przypadek: HBGRMU - dwa etapy
+    tego samego klienta, "Miniaudit" i "Umsetzung", przez pomyłkę
+    dostały ten sam klucz Jiry w arkuszu, zamiast osobnych kluczy).
+
+    Zatrzymuje CAŁY skrypt (SystemExit), jeśli znajdzie taki konflikt -
+    to świadomie twarda blokada, nie tylko ostrzeżenie, bo wymieszanie
+    dwóch różnych zaangażowań w jednym projekcie Jiry jest trudne do
+    cofnięcia po fakcie (patrz: trace_task_origins.py, który budowaliśmy,
+    żeby to później ręcznie rozplątać)."""
+    links_by_key: dict[str, set[str]] = {}
+    for row in sheet_rows:
+        if not row.jira_key or not row.asana_project_link:
+            continue
+        links_by_key.setdefault(row.jira_key, set()).add(row.asana_project_link)
+
+    conflicts = {key: links for key, links in links_by_key.items() if len(links) > 1}
+    if not conflicts:
+        return
+
+    print("\n" + "=" * 60)
+    print("[BŁĄD] Wykryto konflikt kluczy Jiry w arkuszu - PRZERYWAM.")
+    print("=" * 60)
+    for key, links in conflicts.items():
+        print(f"\n  Klucz Jiry '{key}' ma {len(links)} RÓŻNE linki do Asany w arkuszu:")
+        for link in sorted(links):
+            print(f"    {link}")
+    print("\nTo prawdopodobnie pomyłka w arkuszu (dwa różne projekty/etapy Asany")
+    print("przez przypadek dostały ten sam klucz Jiry) - kontynuowanie zmieszałoby")
+    print("ich zadania w JEDNYM projekcie Jiry. Popraw arkusz (osobny klucz Jiry")
+    print("dla każdego wiersza) i uruchom ponownie.")
+    raise SystemExit(1)
+
+
+PROTECTED_FILE = Path(__file__).resolve().parent / "protected_projects.txt"
+_PROTECTED_REPORTED: list = []
+
+
+def load_protected_projects() -> set:
+    """Projekty CAŁKOWICIE wyłączone: synchronizacja (oba kierunki), pipeline i wszystkie
+    narzędzia naprawcze/zmieniające dane - także przy podaniu klucza wprost. Inaczej niż
+    sync_exclude.txt (tylko synchronizacja, na czas naprawy). Plik protected_projects.txt:
+    jeden klucz w linii, '#' = komentarz. get_sheet_rows() ukrywa te projekty z arkusza."""
+    if not PROTECTED_FILE.exists():
+        return set()
+    keys = set()
+    for line in PROTECTED_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            keys.add(line.upper())
+    return keys
+
+
+def refuse_if_protected(keys, tool: str) -> list:
+    """Filtr dla narzędzi z kluczami podanymi wprost: chronione są pomijane z komunikatem."""
+    protected = load_protected_projects()
+    blocked = [k for k in keys if k.upper() in protected]
+    if blocked:
+        print(f"[CHRONIONE] {tool}: pomijam {', '.join(blocked)} ({PROTECTED_FILE.name}).")
+    return [k for k in keys if k.upper() not in protected]
+
+
 def get_sheet_rows() -> list[SheetRow]:
     """
     Pobiera wiersze z arkusza Google — to jest lista WYBRANYCH projektów z Asany,
@@ -351,6 +418,15 @@ def get_sheet_rows() -> list[SheetRow]:
                 sheet_row_number=i,
             )
         )
+    protected = load_protected_projects()
+    if protected:
+        hidden = sorted({r.jira_key.upper() for r in rows if r.jira_key and r.jira_key.upper() in protected})
+        if hidden and not _PROTECTED_REPORTED:
+            _PROTECTED_REPORTED.append(True)
+            shown = ", ".join(hidden) if len(hidden) <= 15 else f"{', '.join(hidden[:10])} ... (razem {len(hidden)})"
+            print(f"[CHRONIONE] Pomijam projekty z {PROTECTED_FILE.name}: {shown} "
+                  f"(wyłączone z synchronizacji i wszystkich narzędzi zmieniających dane).")
+        rows = [r for r in rows if not (r.jira_key and r.jira_key.upper() in protected)]
     return rows
 
 
@@ -368,6 +444,11 @@ def write_jira_keys_to_sheet(updates: dict[int, str]) -> None:
     """Zapisuje wygenerowane klucze Jira z powrotem do arkusza (kolumna
     'jira_key'), żeby były widoczne dla całego zespołu, nie tylko w lokalnym
     project_key_cache.json. updates: {numer_wiersza_w_arkuszu: klucz}.
+
+    DODATKOWO: jeśli w nagłówku arkusza istnieje kolumna 'jira_link', zapisuje
+    tam też gotowy, klikalny link do projektu (.../browse/KLUCZ) - to celowo
+    OPCJONALNE: jeśli kolumny nie ma, klucze i tak są zapisywane normalnie,
+    po prostu bez linków.
 
     Wymaga:
     - pełnego zakresu SHEETS_SCOPES (odczyt + zapis) — już ustawione powyżej,
@@ -401,6 +482,19 @@ def write_jira_keys_to_sheet(updates: dict[int, str]) -> None:
         {"range": f"{tab_name}!{col_letter}{row_num}", "values": [[key]]}
         for row_num, key in updates.items()
     ]
+
+    if "jira_link" in header:
+        link_col_letter = _col_index_to_letter(header.index("jira_link"))
+        data.extend(
+            {"range": f"{tab_name}!{link_col_letter}{row_num}", "values": [[f"{JIRA_BASE_URL}/browse/{key}"]]}
+            for row_num, key in updates.items()
+        )
+    else:
+        print(
+            "  (Wskazówka: dodaj kolumnę 'jira_link' w nagłówku arkusza, żeby "
+            "skrypt zapisywał tam też gotowe, klikalne linki do projektów.)"
+        )
+
     try:
         service.spreadsheets().values().batchUpdate(
             spreadsheetId=GOOGLE_SHEET_ID, body={"valueInputOption": "RAW", "data": data}
@@ -487,13 +581,38 @@ def normalize(name: str) -> str:
     return " ".join(name.strip().lower().split())
 
 
+def apply_shard(items: list, shard_arg: "str | None") -> list:
+    """Dzieli listę na N rozłącznych części, do uruchamiania kilku
+    równoległych procesów BEZ ręcznego kopiowania kluczy - każdy proces
+    dostaje tylko swój NUMER shardu, format 'K/N' (np. '1/3' = pierwszy
+    z trzech równoległych procesów, weźmie co 3-ci element zaczynając od
+    indeksu 0). Deterministyczne - ten sam arkusz zawsze dzieli się
+    identycznie, więc różne procesy z różnymi K nigdy się nie pokrywają."""
+    if not shard_arg:
+        return items
+    try:
+        k_str, n_str = shard_arg.split("/")
+        k, n = int(k_str), int(n_str)
+    except ValueError:
+        raise SystemExit(f"Nieprawidłowy --shard '{shard_arg}' — oczekiwany format 'K/N', np. '1/3'.")
+    if not (1 <= k <= n):
+        raise SystemExit(f"Nieprawidłowy --shard '{shard_arg}' — K musi być między 1 a N (masz K={k}, N={n}).")
+    return [item for i, item in enumerate(items) if i % n == (k - 1)]
+
+
 def assign_jira_key(
-    row: SheetRow, cache: dict[str, str], reserved_keys: set[str]
+    row: SheetRow, gid: str, cache: dict[str, str], reserved_keys: set[str]
 ) -> str:
     """
     Zwraca klucz Jira dla danego wiersza:
     1. jeśli podano ręcznie w arkuszu (jira_key) — użyj go (szanujemy wybór użytkownika),
-    2. jeśli nazwa jest już w cache — użyj zapamiętanego klucza (idempotentność),
+    2. jeśli TEN SAM projekt Asany (po GID, NIE po nazwie!) jest już w cache —
+       użyj zapamiętanego klucza (idempotentność). WAŻNE: kluczowanie po GID,
+       nie po nazwie - dwa RÓŻNE projekty Asany mogą mieć IDENTYCZNĄ nazwę
+       (potwierdzony ręcznie przypadek: HBGRMU, dwa etapy "Miniaudit" i
+       "Umsetzung" tego samego klienta, ta sama nazwa w arkuszu, różne
+       linki) - kluczowanie po nazwie błędnie przypisywało im TEN SAM
+       klucz Jiry, mieszając ich zadania w jednym projekcie.
     3. w przeciwnym razie wygeneruj nowy klucz, unikalny zarówno w obrębie tego
        przebiegu/cache, JAK I względem projektów FAKTYCZNIE ISTNIEJĄCYCH w Jira
        (sprawdzane na żywo przez REST API) — bo wygenerowany klucz mógłby
@@ -505,9 +624,8 @@ def assign_jira_key(
         reserved_keys.add(row.jira_key)
         return row.jira_key
 
-    norm_name = normalize(row.project_name)
-    if norm_name in cache:
-        key = cache[norm_name]
+    if gid in cache:
+        key = cache[gid]
         reserved_keys.add(key)
         return key
 
@@ -520,7 +638,7 @@ def assign_jira_key(
             # go ponownie dla innego wiersza w tym samym przebiegu, i idź dalej.
             reserved_keys.add(candidate)
             continue
-        cache[norm_name] = candidate
+        cache[gid] = candidate
         reserved_keys.add(candidate)
         return candidate
 
@@ -714,7 +832,15 @@ def _get_scheme_id_via_project_association(
     for value in resp.json().get("values", []):
         project_ids = [str(pid) for pid in value.get("projectIds", [])]
         if str(project_id) in project_ids:
-            return str(value[scheme_key]["id"])
+            scheme_obj = value.get(scheme_key)
+            # Jira czasem zwraca wpis PASUJĄCY po projectIds, ale BEZ obiektu
+            # schematu w środku - to oznacza, że projekt używa DOMYŚLNEGO
+            # schematu (brak własnego, jawnego przypisania), nie błąd.
+            # Potwierdzone ręcznie: fieldconfigurationscheme/project dla
+            # projektu 'ROM' zwracał taki właśnie "pusty" wpis.
+            if scheme_obj and scheme_obj.get("id"):
+                return str(scheme_obj["id"])
+            return None
     return None  # projekt korzysta ze schematu domyślnego (bez własnego ID)
 
 
@@ -824,7 +950,7 @@ def build_projects_to_create(sheet_rows: list[SheetRow]) -> list[ProjectToCreate
             continue
 
         description = row.description or (asana_match.notes if asana_match else "")
-        key = assign_jira_key(row, cache, reserved_keys)
+        key = assign_jira_key(row, gid, cache, reserved_keys)
         lead_account_id = row.lead_account_id or DEFAULT_LEAD_ACCOUNT_ID
 
         projects.append(
@@ -863,6 +989,16 @@ def main() -> None:
         "--dry-run", action="store_true",
         help="Tylko pokaż, co zostałoby utworzone, bez wysyłania zapytań tworzących projekty.",
     )
+    parser.add_argument(
+        "--shard", type=str, default=None,
+        help="Podział pracy między kilka RÓWNOLEGLE uruchomionych procesów, bez ręcznego "
+             "kopiowania kluczy — format 'K/N' (np. '1/3'). Każdy proces dostaje INNY numer K "
+             "przy tym samym N: python jira_sync.py --shard 1/3 (terminal 1), --shard 2/3 "
+             "(terminal 2), --shard 3/3 (terminal 3) — razem obejmują CAŁY arkusz, bez luk "
+             "i bez nakładania się. Blokada per projekt (project_lock.py) i tak chroni przed "
+             "duplikatami nawet bez tej flagi, ale --shard unika zbędnego 'ścigania się' o "
+             "każdy wiersz i przyspiesza pracę.",
+    )
     args = parser.parse_args()
 
     if not args.dry_run:
@@ -875,18 +1011,27 @@ def main() -> None:
         template_schemes = get_template_schemes(JIRA_TEMPLATE_PROJECT_KEY)
         print()
 
-    developer_role_id: Optional[str] = None
+    developer_role_ids: list[tuple[str, str]] = []  # [(nazwa_roli, id_roli), ...]
     if DEVELOPER_GROUP_NAME or DEVELOPER_ACCOUNT_IDS:
-        developer_role_id = get_role_id_by_name(DEVELOPER_ROLE_NAME)
-        if developer_role_id:
+        role_names = [r.strip() for r in DEVELOPER_ROLE_NAME.split(",") if r.strip()]
+        not_found = []
+        for role_name in role_names:
+            role_id = get_role_id_by_name(role_name)
+            if role_id:
+                developer_role_ids.append((role_name, role_id))
+            else:
+                not_found.append(role_name)
+        if developer_role_ids:
+            found_names = ", ".join(f"'{n}'" for n, _ in developer_role_ids)
             if DEVELOPER_GROUP_NAME:
-                print(f"Grupa '{DEVELOPER_GROUP_NAME}' będzie dodawana do roli '{DEVELOPER_ROLE_NAME}' (id {developer_role_id}) w każdym projekcie.\n")
+                print(f"Grupa '{DEVELOPER_GROUP_NAME}' będzie dodawana do roli/ról {found_names} w każdym projekcie.\n")
             if DEVELOPER_ACCOUNT_IDS:
                 dev_count = len([a for a in DEVELOPER_ACCOUNT_IDS.split(",") if a.strip()])
                 label = f"{dev_count} użytkowników" if dev_count > 1 else "1 użytkownik"
-                print(f"{label} (DEVELOPER_ACCOUNT_IDS) będzie dodawanych do roli '{DEVELOPER_ROLE_NAME}' w każdym projekcie.\n")
-        else:
-            print(f"UWAGA: nie znaleziono roli '{DEVELOPER_ROLE_NAME}' w Jirze — nic NIE zostanie dodane do żadnego projektu.\n")
+                print(f"{label} (DEVELOPER_ACCOUNT_IDS) będzie dodawanych do roli/ról {found_names} w każdym projekcie.\n")
+        if not_found:
+            missing_names = ", ".join(f"'{n}'" for n in not_found)
+            print(f"UWAGA: nie znaleziono roli/ról {missing_names} w Jirze — pominięte (reszta z listy, jeśli znaleziona, nadal zadziała).\n")
 
     admin_role_id: Optional[str] = None
     if ADMIN_ACCOUNT_ID or ADD_LEAD_AS_ADMIN:
@@ -908,6 +1053,12 @@ def main() -> None:
         print("Arkusz jest pusty lub brak kolumny 'project_name' — nic do zrobienia.")
         return
 
+    validate_no_conflicting_jira_keys(sheet_rows)
+
+    if args.shard:
+        sheet_rows = apply_shard(sheet_rows, args.shard)
+        print(f"  --shard {args.shard}: ten proces obsłuży {len(sheet_rows)} z nich.")
+
     projects = build_projects_to_create(sheet_rows)
 
     not_in_asana = [p for p in projects if not p.matched_in_asana]
@@ -925,86 +1076,94 @@ def main() -> None:
         if p.key_was_generated and p.sheet_row_number and not args.dry_run:
             sheet_key_updates[p.sheet_row_number] = p.jira_key
 
-        try:
-            if not p.lead_account_id:
-                raise RuntimeError(
-                    "brak project lead — uzupełnij kolumnę 'lead_account_id' dla tego "
-                    "wiersza w arkuszu, albo ustaw DEFAULT_LEAD_ACCOUNT_ID w .env "
-                    "(uruchom get_my_account_id.py, żeby znaleźć accountId)"
-                )
+        with project_lock(p.jira_key) as acquired:
+            if not acquired:
+                print(f"  [POMINIĘTO] {p.jira_key} ('{p.name}') — przetwarzany właśnie przez inny proces.")
+                skipped.append(p)
+                continue
 
-            if jira_project_exists(p.jira_key):
-                if p.description:
-                    try:
-                        current_desc = get_jira_project_description(p.jira_key)
-                        if current_desc.strip() != p.description.strip():
-                            if args.dry_run:
-                                print(f"  [DRY-RUN] Zaktualizowałbym opis projektu {p.jira_key}.")
+            try:
+                # Lead jest potrzebny tylko do ZAŁOŻENIA projektu - istniejące projekty
+                # (np. dodane do arkusza z gotowym kluczem) nie wymagają go w arkuszu.
+                if jira_project_exists(p.jira_key):
+                    if p.description:
+                        try:
+                            current_desc = get_jira_project_description(p.jira_key)
+                            if current_desc.strip() != p.description.strip():
+                                if args.dry_run:
+                                    print(f"  [DRY-RUN] Zaktualizowałbym opis projektu {p.jira_key}.")
+                                else:
+                                    update_jira_project_description(p.jira_key, p.description)
+                                    updated.append(p)
+                                    print(f"  [ZAKTUALIZOWANO OPIS] {p.jira_key} ('{p.name}')")
                             else:
-                                update_jira_project_description(p.jira_key, p.description)
-                                updated.append(p)
-                                print(f"  [ZAKTUALIZOWANO OPIS] {p.jira_key} ('{p.name}')")
-                        else:
+                                skipped.append(p)
+                                print(f"  [POMINIĘTO] {p.jira_key} ('{p.name}') — projekt już istnieje, opis bez zmian.")
+                        except Exception as exc:  # noqa: BLE001
                             skipped.append(p)
-                            print(f"  [POMINIĘTO] {p.jira_key} ('{p.name}') — projekt już istnieje, opis bez zmian.")
-                    except Exception as exc:  # noqa: BLE001
+                            print(f"  [OSTRZEŻENIE] {p.jira_key} — nie udało się sprawdzić/zaktualizować opisu: {exc}")
+                    else:
                         skipped.append(p)
-                        print(f"  [OSTRZEŻENIE] {p.jira_key} — nie udało się sprawdzić/zaktualizować opisu: {exc}")
-                else:
-                    skipped.append(p)
-                    print(f"  [POMINIĘTO] {p.jira_key} ('{p.name}') — projekt już istnieje w Jira.")
-                continue
+                        print(f"  [POMINIĘTO] {p.jira_key} ('{p.name}') — projekt już istnieje w Jira.")
+                    continue
 
-            if args.dry_run:
-                extra = " (+ konfiguracja z projektu wzorcowego)" if template_schemes else ""
-                print(f"  [DRY-RUN] Utworzyłbym projekt {p.jira_key} ('{p.name}'){extra}.")
-                continue
+                if not p.lead_account_id:
+                    raise RuntimeError(
+                        "brak project lead — uzupełnij kolumnę 'lead_account_id' dla tego "
+                        "wiersza w arkuszu, albo ustaw DEFAULT_LEAD_ACCOUNT_ID w .env "
+                        "(uruchom get_my_account_id.py, żeby znaleźć accountId)"
+                    )
 
-            result = create_jira_project(p, template_schemes)
-            created.append(p)
-            print(f"  [UTWORZONO] {p.jira_key} — '{p.name}'")
+                if args.dry_run:
+                    extra = " (+ konfiguracja z projektu wzorcowego)" if template_schemes else ""
+                    print(f"  [DRY-RUN] Utworzyłbym projekt {p.jira_key} ('{p.name}'){extra}.")
+                    continue
 
-            if developer_role_id:
-                if DEVELOPER_GROUP_NAME:
+                result = create_jira_project(p, template_schemes)
+                created.append(p)
+                print(f"  [UTWORZONO] {p.jira_key} — '{p.name}'")
+
+                for role_name, role_id in developer_role_ids:
+                    if DEVELOPER_GROUP_NAME:
+                        try:
+                            add_group_to_project_role(p.jira_key, role_id, DEVELOPER_GROUP_NAME)
+                            print(f"    Dodano grupę '{DEVELOPER_GROUP_NAME}' do roli '{role_name}'.")
+                        except Exception as exc:  # noqa: BLE001
+                            print(f"    [OSTRZEŻENIE] Nie udało się dodać grupy deweloperów do roli '{role_name}': {exc}")
+                            warnings.append((p, f"grupa deweloperów ({role_name}): {exc}"))
+                    if DEVELOPER_ACCOUNT_IDS:
+                        try:
+                            dev_account_ids = [a.strip() for a in DEVELOPER_ACCOUNT_IDS.split(",") if a.strip()]
+                            add_users_to_project_role(p.jira_key, role_id, dev_account_ids)
+                            print(f"    Dodano {len(dev_account_ids)} użytkownika(ów) do roli '{role_name}'.")
+                        except Exception as exc:  # noqa: BLE001
+                            print(f"    [OSTRZEŻENIE] Nie udało się dodać użytkowników-deweloperów do roli '{role_name}': {exc}")
+                            warnings.append((p, f"użytkownicy-deweloperzy ({role_name}): {exc}"))
+
+                if admin_role_id:
                     try:
-                        add_group_to_project_role(p.jira_key, developer_role_id, DEVELOPER_GROUP_NAME)
-                        print(f"    Dodano grupę '{DEVELOPER_GROUP_NAME}' do roli '{DEVELOPER_ROLE_NAME}'.")
+                        admin_account_ids = [a.strip() for a in ADMIN_ACCOUNT_ID.split(",") if a.strip()]
+                        if ADD_LEAD_AS_ADMIN and p.lead_account_id and p.lead_account_id not in admin_account_ids:
+                            admin_account_ids.append(p.lead_account_id)
+                        add_users_to_project_role(p.jira_key, admin_role_id, admin_account_ids)
+                        label = f"{len(admin_account_ids)} użytkowników" if len(admin_account_ids) > 1 else "użytkownika"
+                        print(f"    Dodano {label} do roli '{ADMIN_ROLE_NAME}'.")
                     except Exception as exc:  # noqa: BLE001
-                        print(f"    [OSTRZEŻENIE] Nie udało się dodać grupy deweloperów: {exc}")
-                        warnings.append((p, f"grupa deweloperów: {exc}"))
-                if DEVELOPER_ACCOUNT_IDS:
-                    try:
-                        dev_account_ids = [a.strip() for a in DEVELOPER_ACCOUNT_IDS.split(",") if a.strip()]
-                        add_users_to_project_role(p.jira_key, developer_role_id, dev_account_ids)
-                        print(f"    Dodano {len(dev_account_ids)} użytkownika(ów) do roli '{DEVELOPER_ROLE_NAME}'.")
-                    except Exception as exc:  # noqa: BLE001
-                        print(f"    [OSTRZEŻENIE] Nie udało się dodać użytkowników-deweloperów: {exc}")
-                        warnings.append((p, f"użytkownicy-deweloperzy: {exc}"))
+                        print(f"    [OSTRZEŻENIE] Nie udało się dodać administratora(ów): {exc}")
+                        warnings.append((p, f"administrator: {exc}"))
 
-            if admin_role_id:
-                try:
-                    admin_account_ids = [a.strip() for a in ADMIN_ACCOUNT_ID.split(",") if a.strip()]
-                    if ADD_LEAD_AS_ADMIN and p.lead_account_id and p.lead_account_id not in admin_account_ids:
-                        admin_account_ids.append(p.lead_account_id)
-                    add_users_to_project_role(p.jira_key, admin_role_id, admin_account_ids)
-                    label = f"{len(admin_account_ids)} użytkowników" if len(admin_account_ids) > 1 else "użytkownika"
-                    print(f"    Dodano {label} do roli '{ADMIN_ROLE_NAME}'.")
-                except Exception as exc:  # noqa: BLE001
-                    print(f"    [OSTRZEŻENIE] Nie udało się dodać administratora(ów): {exc}")
-                    warnings.append((p, f"administrator: {exc}"))
+                if template_schemes:
+                    scheme_errors = apply_template_schemes(str(result["id"]), template_schemes)
+                    if scheme_errors:
+                        for err in scheme_errors:
+                            print(f"    [OSTRZEŻENIE] Nie udało się skopiować: {err}")
+                            warnings.append((p, err))
+                    else:
+                        print(f"    Skopiowano konfigurację z projektu wzorcowego '{JIRA_TEMPLATE_PROJECT_KEY}'.")
 
-            if template_schemes:
-                scheme_errors = apply_template_schemes(str(result["id"]), template_schemes)
-                if scheme_errors:
-                    for err in scheme_errors:
-                        print(f"    [OSTRZEŻENIE] Nie udało się skopiować: {err}")
-                        warnings.append((p, err))
-                else:
-                    print(f"    Skopiowano konfigurację z projektu wzorcowego '{JIRA_TEMPLATE_PROJECT_KEY}'.")
-
-        except Exception as exc:  # noqa: BLE001
-            errors.append((p, str(exc)))
-            print(f"  [BŁĄD] {p.jira_key} ('{p.name}'): {exc}")
+            except Exception as exc:  # noqa: BLE001
+                errors.append((p, str(exc)))
+                print(f"  [BŁĄD] {p.jira_key} ('{p.name}'): {exc}")
 
     # ------------------------------------------------------------------- #
     # Podsumowanie
@@ -1027,7 +1186,20 @@ def main() -> None:
         print(f"\nZapisuję {len(sheet_key_updates)} wygenerowany(ch) klucz(y) z powrotem do arkusza...")
         write_jira_keys_to_sheet(sheet_key_updates)
 
-    if not args.dry_run:
+    for p, msg in errors:
+        record_error(p.jira_key, p.name, msg)
+    for p, msg in warnings:
+        record_warning(p.jira_key, p.name, msg)
+    write_shard_summary("jira_sync", args.shard, {
+        "utworzone": len(created),
+        "zaktualizowany_opis": len(updated),
+        "pominięte": len(skipped),
+        "błędy": len(errors),
+        "ostrzeżenia": len(warnings),
+        "bez_dopasowania_w_asanie": len(not_in_asana),
+    })
+
+    if not args.dry_run and not is_pipeline_child():
         send_slack_summary(
             f"*jira_sync.py* zakończony.\n"
             f"Utworzone: {len(created)} | Zaktualizowany opis: {len(updated)} | "
@@ -1035,7 +1207,12 @@ def main() -> None:
         )
 
     if errors:
-        sys.exit(1)
+        # Kod 2 (nie 1!) - CZĘŚCIOWE niepowodzenie: część projektów powstała
+        # poprawnie, tylko niektóre zawiodły. run_full_pipeline.py rozróżnia
+        # to od kodu 1 (całkowita porażka, np. brak .env) - przy kodzie 2
+        # pipeline kontynuuje dla projektów, które się udały, zamiast
+        # blokować wszystko przez pojedyncze problematyczne wiersze.
+        sys.exit(2)
 
 
 if __name__ == "__main__":

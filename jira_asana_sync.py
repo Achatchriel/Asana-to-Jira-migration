@@ -56,7 +56,10 @@ from asana_jira_sync import (  # reużywamy konwersji, stanu i konfiguracji - be
     JIRA_BASE_URL,
     REQUEST_TIMEOUT,
     adf_to_html,
+    drop_excluded,
     load_section_status_map,
+    project_section_overrides,
+    COMPLETED_KEY,
     load_state,
     load_user_map,
     request_with_retry,
@@ -67,8 +70,8 @@ from notify import setup_file_logging, send_slack_summary
 
 def get_jira_issue(issue_key: str) -> Optional[dict]:
     url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}"
-    params = {"fields": "summary,description,duedate,assignee,updated,comment,status"}
-    resp = requests.get(url, auth=JIRA_AUTH, params=params, timeout=REQUEST_TIMEOUT)
+    params = {"fields": "summary,description,duedate,assignee,updated,comment,status,issuetype"}
+    resp = request_with_retry("GET", url, auth=JIRA_AUTH, params=params, timeout=REQUEST_TIMEOUT)
     if resp.status_code == 404:
         return None
     resp.raise_for_status()
@@ -107,7 +110,7 @@ def get_asana_sections(project_gid: str) -> list[dict]:
     if project_gid in _asana_sections_cache:
         return _asana_sections_cache[project_gid]
     url = f"{ASANA_API}/projects/{project_gid}/sections"
-    resp = requests.get(url, headers=ASANA_HEADERS, params={"opt_fields": "name"}, timeout=REQUEST_TIMEOUT)
+    resp = request_with_retry("GET", url, headers=ASANA_HEADERS, params={"opt_fields": "name"}, timeout=REQUEST_TIMEOUT)
     resp.raise_for_status()
     sections = resp.json().get("data", [])
     _asana_sections_cache[project_gid] = sections
@@ -119,8 +122,8 @@ def get_current_asana_section(task_gid: str, project_gid: str) -> Optional[dict]
     (ten sam problem wieloprojektowości co w asana_jira_sync.py - filtrujemy
     po project_gid, nie bierzemy pierwszego z brzegu membershipu)."""
     url = f"{ASANA_API}/tasks/{task_gid}"
-    resp = requests.get(
-        url, headers=ASANA_HEADERS,
+    resp = request_with_retry(
+        "GET", url, headers=ASANA_HEADERS,
         params={"opt_fields": "memberships.section.name,memberships.project.gid"},
         timeout=REQUEST_TIMEOUT,
     )
@@ -158,7 +161,7 @@ def resolve_target_section(project_gid: str, candidate_names: list) -> "tuple[di
 
 def get_jira_new_comments(issue_key: str, since_comment_ids: set) -> list[dict]:
     url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}/comment"
-    resp = requests.get(url, auth=JIRA_AUTH, timeout=REQUEST_TIMEOUT)
+    resp = request_with_retry("GET", url, auth=JIRA_AUTH, timeout=REQUEST_TIMEOUT)
     resp.raise_for_status()
     comments = resp.json().get("comments", [])
     return [c for c in comments if c["id"] not in since_comment_ids]
@@ -264,7 +267,12 @@ def sync_project_back(jira_key: str, state: dict, user_map_reversed: dict, dry_r
 
             # Status -> sekcja (opcjonalne, tylko jeśli mamy GID projektu Asany
             # i tabelę odwróconą - patrz build_reversed_section_map na górze pliku).
-            if asana_project_gid and reversed_section_map:
+            # ŚWIADOMIE POMIJANE dla PODZADAŃ - podzadania w Asanie nie mają
+            # własnej przynależności do sekcji tablicy (tylko ich rodzic ją
+            # ma), więc próba "przeniesienia do sekcji" mogłaby się nie udać
+            # albo (gorzej) wyrwać podzadanie z jego zagnieżdżonej struktury.
+            is_subtask = (fields.get("issuetype") or {}).get("subtask", False)
+            if asana_project_gid and reversed_section_map and not is_subtask:
                 status_name = (fields.get("status") or {}).get("name", "")
                 candidate_names = reversed_section_map.get(status_name.strip().lower(), [])
                 if os.getenv("DEBUG_SYNC"):
@@ -326,7 +334,7 @@ def sync_project_back(jira_key: str, state: dict, user_map_reversed: dict, dry_r
                     stats["attachments"] += 1
                     continue
                 try:
-                    file_resp = requests.get(att["content"], auth=JIRA_AUTH, timeout=REQUEST_TIMEOUT)
+                    file_resp = request_with_retry("GET", att["content"], auth=JIRA_AUTH, timeout=REQUEST_TIMEOUT)
                     file_resp.raise_for_status()
                     upload_asana_attachment(asana_gid, att.get("filename") or "attachment", file_resp.content)
                     synced_attachment_ids.add(att["id"])
@@ -357,16 +365,16 @@ def get_project_pairs(args) -> list[tuple[str, str, str]]:
     ustalić GID projektu Asany (do synchronizacji statusu -> sekcja)."""
     if args.project_keys:
         keys = [k.strip().upper() for k in args.project_keys.split(",") if k.strip()]
-        return [(k, "", "") for k in keys]
+        return drop_excluded([(k, "", "") for k in keys], 0)
     sheet_rows = core.get_sheet_rows()
     cache = core.load_key_cache()
     pairs = []
     for row in sheet_rows:
-        norm_name = core.normalize(row.project_name)
-        key = row.jira_key or cache.get(norm_name)
+        gid = core.extract_asana_project_gid(row.asana_project_link)
+        key = row.jira_key or cache.get(gid)
         if key:
             pairs.append((key, row.project_name, row.asana_project_link))
-    return pairs
+    return drop_excluded(pairs, 0)
 
 
 def main() -> None:
@@ -410,7 +418,10 @@ def main() -> None:
                 print("  [OSTRZEŻENIE] Brak asana_project_link — status NIE zostanie zsynchronizowany dla "
                       "tego projektu (dopasowanie po nazwie celowo wyłączone). Uzupełnij link w arkuszu.")
 
-        stats = sync_project_back(jira_key, state, user_map_reversed, args.dry_run, asana_project_gid, reversed_section_map)
+        overrides = {k: v for k, v in project_section_overrides(jira_key).items() if k != COMPLETED_KEY}
+        project_reversed = (build_reversed_section_map({**section_status_map, **overrides})
+                            if overrides else reversed_section_map)
+        stats = sync_project_back(jira_key, state, user_map_reversed, args.dry_run, asana_project_gid, project_reversed)
         for k in totals:
             totals[k] += stats.get(k, 0)
         if not args.dry_run:

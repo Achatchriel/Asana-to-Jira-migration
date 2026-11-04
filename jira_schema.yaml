@@ -1,0 +1,197 @@
+# =============================================================================
+# Deklaratywny schemat konfiguracji Jiry
+# =============================================================================
+# Buduje: custom fields -> statusy -> workflow -> workflow scheme ->
+#         ekrany -> screen scheme -> issue type screen scheme -> podpięcie do projektu
+#
+# Uruchomienie:
+#   python build_jira_schema.py --schema jira_schema.yaml --dry-run
+#   python build_jira_schema.py --schema jira_schema.yaml
+#
+# Skrypt jest IDEMPOTENTNY - istniejące elementy (po nazwie) są ponownie
+# używane, nie duplikowane. Mapowanie nazwa -> ID zapisywane w
+# jira_schema_state.json.
+# =============================================================================
+
+# Prefiks dodawany do nazw tworzonych elementów (workflow, ekranów, schematów).
+# Zapobiega kolizjom z istniejącymi obiektami w instancji Jiry.
+# Custom fields NIE dostają prefiksu - ich nazwy są widoczne dla użytkowników.
+prefix: "FIRMA"
+
+# -----------------------------------------------------------------------------
+# CUSTOM FIELDS
+# -----------------------------------------------------------------------------
+# type: jedna z wartości poniżej (najczęstsze):
+#   textfield        - jedna linia tekstu
+#   textarea         - wiele linii (obsługuje ADF)
+#   select           - lista jednokrotnego wyboru (wymaga options)
+#   multiselect      - lista wielokrotnego wyboru (wymaga options)
+#   datepicker       - data
+#   datetime         - data + godzina
+#   float            - liczba
+#   userpicker       - pojedynczy użytkownik
+#   multiuserpicker  - wielu użytkowników
+#   labels           - etykiety
+#   url              - link
+custom_fields:
+  - name: "Klient"
+    type: select
+    description: "Klient, dla którego realizowany jest projekt"
+    options:
+      - "Apu Kuntur"
+      - "Luisa Cerano"
+      - "Nayoki"
+
+  - name: "Numer umowy"
+    type: textfield
+    description: "Numer umowy handlowej"
+
+  - name: "Data odbioru"
+    type: datepicker
+    description: "Planowana data odbioru przez klienta"
+
+  - name: "Szacowane godziny"
+    type: float
+    description: "Szacowana pracochłonność w godzinach"
+
+# -----------------------------------------------------------------------------
+# STATUSY
+# -----------------------------------------------------------------------------
+# category: TODO | IN_PROGRESS | DONE
+# Jeśli status o danej nazwie JUŻ ISTNIEJE w instancji - zostanie użyty
+# ponownie (Jira nie pozwala na duplikaty nazw statusów globalnie).
+statuses:
+  - name: "Backlog"
+    category: TODO
+  - name: "W analizie"
+    category: IN_PROGRESS
+  - name: "W realizacji"
+    category: IN_PROGRESS
+  - name: "Do testów"
+    category: IN_PROGRESS
+  - name: "Fertig"
+    category: DONE
+
+# -----------------------------------------------------------------------------
+# WORKFLOW
+# -----------------------------------------------------------------------------
+# Pierwszy status na liście 'statuses' workflow jest statusem początkowym.
+# transitions: from może być listą statusów albo "ANY" (przejście globalne).
+workflow:
+  name: "Workflow projektowy"
+  description: "Standardowy workflow dla projektów klienckich"
+  statuses:
+    - "Backlog"
+    - "W analizie"
+    - "W realizacji"
+    - "Do testów"
+    - "Fertig"
+  transitions:
+    - name: "Rozpocznij analizę"
+      from: ["Backlog"]
+      to: "W analizie"
+    - name: "Rozpocznij realizację"
+      from: ["W analizie", "Do testów"]
+      to: "W realizacji"
+    - name: "Przekaż do testów"
+      from: ["W realizacji"]
+      to: "Do testów"
+    - name: "Zakończ"
+      from: ["Do testów", "W realizacji"]
+      to: "Fertig"
+    - name: "Wróć do backlogu"
+      from: "ANY"
+      to: "Backlog"
+
+# -----------------------------------------------------------------------------
+# EKRANY
+# -----------------------------------------------------------------------------
+# fields: nazwy pól systemowych (Summary, Description, Assignee, Priority,
+#         Labels, Due Date, Reporter, Attachment, Components, Fix Versions)
+#         LUB nazwy custom fields zdefiniowanych wyżej.
+screens:
+  - name: "Ekran tworzenia"
+    description: "Pola widoczne przy tworzeniu zadania"
+    tabs:
+      - name: "Podstawowe"
+        fields:
+          - "Summary"
+          - "Description"
+          - "Assignee"
+          - "Priority"
+          - "Due Date"
+      - name: "Klient"
+        fields:
+          - "Klient"
+          - "Numer umowy"
+          - "Data odbioru"
+
+  - name: "Ekran edycji"
+    description: "Pola widoczne przy edycji zadania"
+    tabs:
+      - name: "Podstawowe"
+        fields:
+          - "Summary"
+          - "Description"
+          - "Assignee"
+          - "Priority"
+          - "Labels"
+          - "Due Date"
+      - name: "Klient"
+        fields:
+          - "Klient"
+          - "Numer umowy"
+          - "Data odbioru"
+          - "Szacowane godziny"
+
+  - name: "Ekran podglądu"
+    description: "Pola widoczne przy przeglądaniu zadania"
+    tabs:
+      - name: "Podstawowe"
+        fields:
+          - "Summary"
+          - "Description"
+          - "Assignee"
+          - "Priority"
+          - "Labels"
+          - "Due Date"
+          - "Klient"
+          - "Numer umowy"
+          - "Data odbioru"
+          - "Szacowane godziny"
+
+# -----------------------------------------------------------------------------
+# SCREEN SCHEME - mapuje operacje na ekrany
+# -----------------------------------------------------------------------------
+screen_scheme:
+  name: "Schemat ekranów projektowy"
+  description: "Mapowanie operacji na ekrany"
+  create: "Ekran tworzenia"
+  edit: "Ekran edycji"
+  view: "Ekran podglądu"
+  default: "Ekran podglądu"   # wymagane przez Jirę
+
+# -----------------------------------------------------------------------------
+# ISSUE TYPE SCREEN SCHEME - mapuje typy zadań na screen scheme
+# -----------------------------------------------------------------------------
+issue_type_screen_scheme:
+  name: "Schemat ekranów wg typu zadania"
+  description: "Domyślny schemat dla wszystkich typów"
+  default_screen_scheme: "Schemat ekranów projektowy"
+
+# -----------------------------------------------------------------------------
+# WORKFLOW SCHEME
+# -----------------------------------------------------------------------------
+workflow_scheme:
+  name: "Schemat workflow projektowy"
+  description: "Domyślny workflow dla wszystkich typów zadań"
+  default_workflow: "Workflow projektowy"
+
+# -----------------------------------------------------------------------------
+# PODPIĘCIE DO PROJEKTÓW (opcjonalne)
+# -----------------------------------------------------------------------------
+# Lista kluczy projektów, do których podpiąć utworzone schematy.
+# Pusta lista = tylko utwórz schematy, nie podpinaj nigdzie.
+# UWAGA: podpięcie workflow scheme do projektu z istniejącymi zadaniami
+# uruchamia migrację statusów (operacja asynchroniczna).
+apply_to_projects: []

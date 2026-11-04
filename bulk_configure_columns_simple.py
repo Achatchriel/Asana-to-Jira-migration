@@ -70,7 +70,8 @@ def get_project_pairs(args) -> list[tuple[str, str]]:
         board_template_id = (row.board_template_id or "").strip()
         if not board_template_id:
             continue  # ten wiersz używa standardowego wzorca - nie nasza sprawa
-        key = core.assign_jira_key(row, cache, reserved)
+        gid = core.extract_asana_project_gid(row.asana_project_link)
+        key = core.assign_jira_key(row, gid, cache, reserved)
         pairs.append((key, board_template_id))
     return pairs
 

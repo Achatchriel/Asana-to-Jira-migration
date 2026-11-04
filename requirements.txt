@@ -1,0 +1,8 @@
+playwright>=1.44
+# Poniższe są też potrzebne, bo bulk_configure_columns.py importuje jira_sync.py
+# (z katalogu wyżej), a ten korzysta z requests, python-dotenv i bibliotek Google:
+requests>=2.31
+python-dotenv>=1.0
+google-auth>=2.29
+google-auth-httplib2>=0.2
+google-api-python-client>=2.126

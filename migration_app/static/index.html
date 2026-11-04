@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Panel migracji</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="nav">
+    <div class="brand">
+      <span class="brand-mark">⇄</span>
+      <div><strong>Migracja</strong><small>Asana → Jira</small></div>
+    </div>
+    <nav id="nav">
+      <a data-view="overview">Przegląd</a>
+      <a data-view="projects">Projekty</a>
+      <a data-view="tools">Narzędzia</a>
+      <a data-view="check">Statusy i osoby</a>
+      <a data-view="runs">Uruchomienia <span id="running-badge" class="badge hidden"></span></a>
+      <a data-view="config">Konfiguracja</a>
+      <a data-view="reports">Raporty</a>
+    </nav>
+    <div class="selection" id="selection-box">
+      <small>Wybrane projekty</small>
+      <div id="selection-list" class="selection-list">brak</div>
+      <button class="link" id="selection-clear" hidden>wyczyść</button>
+    </div>
+  </aside>
+  <main id="main"></main>
+</div>
+
+<dialog id="confirm">
+  <form method="dialog">
+    <h3>To uruchomienie zmieni dane</h3>
+    <p id="confirm-text"></p>
+    <pre id="confirm-cmd" class="cmd"></pre>
+    <label class="check"><input type="checkbox" id="confirm-ack"> Rozumiem, uruchom bez podglądu</label>
+    <div class="row end">
+      <button value="cancel" class="ghost">Anuluj</button>
+      <button value="ok" id="confirm-ok" class="danger" disabled>Uruchom</button>
+    </div>
+  </form>
+</dialog>
+<div id="toast" class="toast hidden"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

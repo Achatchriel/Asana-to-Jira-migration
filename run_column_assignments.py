@@ -34,13 +34,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from generate_column_assignments import get_mapping_for_template, get_project_pairs
 from bulk_configure_columns import JIRA_BASE_URL, STATE_FILE, find_board_id
+import jira_sync as core  # dla apply_shard
 
-REPORT_FILE = "column_assignment_report.json"
+REPORT_FILE = "column_assignment_report_{shard}.json"
 JS_LIBRARY_PATH = Path(__file__).resolve().parent / "assign_statuses_to_columns.js"
 
 
 def build_configs(args) -> list[dict]:
     project_pairs = get_project_pairs(args)
+    if args.shard:
+        project_pairs = core.apply_shard(project_pairs, args.shard)
+        print(f"--shard {args.shard}: ten proces obsłuży {len(project_pairs)} projekt(ów).")
     if args.limit:
         project_pairs = project_pairs[: args.limit]
 
@@ -63,6 +67,11 @@ def main() -> None:
     parser.add_argument("--project-keys", type=str, default=None)
     parser.add_argument("--template-board-id", type=str, default=None)
     parser.add_argument("--delay-ms", type=int, default=800, help="Przerwa między projektami (ms).")
+    parser.add_argument(
+        "--shard", type=str, default=None,
+        help="Podział pracy między kilka RÓWNOLEGLE uruchomionych procesów — format 'K/N' "
+             "(patrz jira_sync.py --help po pełne wyjaśnienie).",
+    )
     args = parser.parse_args()
 
     if not Path(STATE_FILE).exists():
@@ -96,7 +105,8 @@ def main() -> None:
 
         browser.close()
 
-    Path(REPORT_FILE).write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    report_path = REPORT_FILE.format(shard=args.shard.replace("/", "-") if args.shard else "all")
+    Path(report_path).write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
 
     ok = sum(1 for r in report if r["status"] == "ok")
     failed = [r for r in report if r["status"] != "ok"]
@@ -107,7 +117,7 @@ def main() -> None:
     if failed:
         for f in failed:
             print(f"    - {f.get('projectKey', f.get('boardId'))}: {f.get('error')}")
-    print(f"\nSzczegóły w {REPORT_FILE}")
+    print(f"\nSzczegóły w {report_path}")
 
 
 if __name__ == "__main__":

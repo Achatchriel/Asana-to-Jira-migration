@@ -1,632 +1,662 @@
-# Migracja i synchronizacja: Asana → Jira (sterowana arkuszem Google)
+# Migration and sync: Asana → Jira (driven by a Google Sheet)
 
-Pakiet narzędzi do przeniesienia wybranych projektów z Asany do Jiry i utrzymania
-ich w synchronizacji. **Pracuje się w nim przez panel webowy** (`migration_app/`):
-lokalną aplikację w przeglądarce, z której uruchamiasz wszystkie kroki migracji,
-sprawdzasz statusy i osoby, edytujesz konfigurację i przeglądasz raporty. Pod
-spodem panel wywołuje zwykłe skrypty Pythona, opisane szczegółowo w części II.
+**English** · [Polski](README.pl.md)
 
-**Arkusz Google jest źródłem prawdy** o tym, które projekty mają powstać w Jirze:
-narzędzia tworzą i synchronizują tylko projekty z wierszy arkusza.
+A toolkit for moving selected projects from Asana to Jira and keeping them in sync.
+**You work with it through the web panel** (`migration_app/`): a local app in the
+browser from which you run every migration step, check statuses and people, edit
+the configuration and browse reports. Under the hood the panel calls ordinary
+Python scripts, documented in detail in part II.
 
-- **Część I — panel:** instalacja jednym poleceniem, zakładka Start (nowa migracja
-  krok po kroku), mapowanie osób i statusów, widoki panelu i typowa praca.
-- **Część II — skrypty:** dokumentacja każdego narzędzia, opcje, pliki stanu,
-  procedury naprawcze i rozwiązywanie problemów.
+**The Google Sheet is the source of truth** for which projects should exist in
+Jira: the tools create and sync only the projects in the sheet's rows.
+
+- **Part I — the panel:** one-command install, the Start tab (a new migration step by
+  step), people and status mapping, copying projects, the panel views and everyday work.
+- **Part II — the scripts:** documentation of every tool, options, state files,
+  repair procedures and troubleshooting.
+
+> The panel and the scripts are in Polish. Script messages quoted in this README
+> are kept in the original wording (with a translation where helpful) so you can
+> search for them in the console output.
 
 ---
 
-# Część I. Panel
+# Part I. The panel
 
-## Szybki start
+## Quick start
 
-**Potrzebujesz:** Linuksa albo macOS z Pythonem 3.10+, konta **administratora Jiry**
-(Cloud) z [tokenem API](https://id.atlassian.com/manage-profile/security/api-tokens),
-[tokenu Asany](https://app.asana.com/0/my-apps), **konta serwisowego Google** (klucz
-JSON) i **arkusza Google** z listą projektów do migracji (sekcja 7 w części II -
-wystarczy kolumna `asana_project_link`, zalecane także `project_name` i `jira_key`).
+**You need:** Linux or macOS with Python 3.10+, a **Jira administrator** account (Cloud)
+with an [API token](https://id.atlassian.com/manage-profile/security/api-tokens), an
+[Asana token](https://app.asana.com/0/my-apps), a **Google service account** (JSON key)
+and a **Google Sheet** listing the projects to migrate (section 7 in part II - the
+`asana_project_link` column is enough, `project_name` and `jira_key` are recommended).
 
 ```bash
-git clone <adres repozytorium> jiraSync
+git clone <repository URL> jiraSync
 cd jiraSync
 ./start.sh                 # http://127.0.0.1:8765
 ```
 
-`start.sh` przy pierwszym uruchomieniu tworzy `.venv`, instaluje zależności
-(`requirements.txt`, ponownie tylko po jego zmianie) i przeglądarkę dla Playwright
-(ok. 300 MB, raz na komputer), a potem uruchamia panel i otwiera go w przeglądarce.
-Opcje: `./start.sh --port 9000` (inny port), `NO_BROWSER=1 ./start.sh` (bez otwierania
-przeglądarki), `PYTHON=python3.12 ./start.sh` (inny interpreter). Serwer nasłuchuje
-wyłącznie na `127.0.0.1`. Zatrzymanie: `Ctrl+C`.
+On first run `start.sh` creates `.venv`, installs the dependencies (`requirements.txt`,
+again only when it changes) and the browser for Playwright (about 300 MB, once per
+machine), then starts the panel and opens it in your browser. Options:
+`./start.sh --port 9000` (another port), `NO_BROWSER=1 ./start.sh` (don't open a browser),
+`PYTHON=python3.12 ./start.sh` (another interpreter). The server listens on `127.0.0.1`
+only. Stop it with `Ctrl+C`.
 
-Panel działa od pustego folderu: `.env` powstaje z `.env.example` przy pierwszym
-zapisie konfiguracji, a mapy i listy - z szablonów. Dalej prowadzi zakładka **Start**.
+The panel works from an empty folder: `.env` is created from `.env.example` on the first
+configuration save, maps and lists from templates. From there the **Start** tab guides you.
 
-## Zakładka Start: nowa migracja krok po kroku
+## The Start tab: a new migration step by step
 
-Każdy krok ma stan wykrywany automatycznie (z plików i wyników testów), więc widać,
-co jest gotowe. Kolejność ma znaczenie - każdy krok korzysta z poprzednich.
+Each step's state is detected automatically (from files and test results), so you can see
+what is ready. The order matters - each step builds on the previous ones.
 
-| # | Krok | Co robi | Wynik |
+| # | Step | What it does | Result |
 |---|---|---|---|
-| 1 | **Konfiguracja** | formularz najważniejszych zmiennych; wklejony klucz konta serwisowego Google; panel pokazuje adres, któremu trzeba udostępnić arkusz | `.env`, `service_account.json` |
-| 2 | **Test połączeń** | konto Jiry i uprawnienie administratora, projekt i tablica wzorcowa, pola wymagane przy tworzeniu zadań, których skrypt nie uzupełni sam, token i workspace Asany (lista do wyboru), dostęp do arkusza, zakładka, nagłówki, wiersze bez linku do Asany | `migration_app/cache/setup_check.json` |
-| 3 | **Arkusz projektów** | wczytanie listy projektów (przy wierszach bez nazwy - kilka minut, bo nazwy pobierane są z Asany) | `migration_app/cache/sheet.json` |
-| 4 | **Mapowanie osób** | osoby z Asany ↔ konta z wybranych grup Jiry, z propozycjami; osoby bez konta oznaczasz „nie w Jirze” | `user_map.json`, `asana_users_not_in_jira.json` |
-| 5 | **Mapowanie statusów** | sekcje Asany ze wszystkich projektów ↔ **statusy projektu wzorcowego**; status dla zadań ukończonych w Asanie | `section_status_map.json` |
-| 6 | **Sesja przeglądarki** | jednorazowe logowanie do Jiry (SSO/2FA) dla kroków kolumn i statusów tablic; po zalogowaniu wysyłasz Enter w polu odpowiedzi uruchomienia | `auth_state.json` |
-| 7 | **Podgląd** | cały pipeline w trybie dry-run - nic nie zapisuje | log w Uruchomieniach |
-| 8 | **Migracja** | pełny pipeline; panel pokazuje polecenie i prosi o potwierdzenie | projekty i zadania w Jirze |
-| 9 | **Weryfikacja** | zgodność statusów i przypisań, porównanie liczby zadań z Asaną | `migration_app/checks/` |
+| 1 | **Configuration** | a form for the key variables; paste the Google service account key; the panel shows the address the sheet must be shared with | `.env`, `service_account.json` |
+| 2 | **Connection test** | Jira account and admin permission, template project and board, fields required on issue creation that the script cannot fill in, Asana token and workspace (pick from a list), sheet access, tab, headers, rows without an Asana link | `migration_app/cache/setup_check.json` |
+| 3 | **Project sheet** | loads the project list (with rows lacking a name - a few minutes, names are fetched from Asana) | `migration_app/cache/sheet.json` |
+| 4 | **People mapping** | Asana people ↔ accounts from selected Jira groups, with suggestions; people without an account are marked "not in Jira" | `user_map.json`, `asana_users_not_in_jira.json` |
+| 5 | **Status mapping** | Asana sections from all projects ↔ **statuses of the template project**; the status for tasks completed in Asana | `section_status_map.json` |
+| 6 | **Browser session** | one-off Jira login (SSO/2FA) for the board column and status steps; after logging in send Enter in the run's input field | `auth_state.json` |
+| 7 | **Preview** | the whole pipeline in dry-run mode - writes nothing | log in Runs |
+| 8 | **Migration** | the full pipeline; the panel shows the command and asks for confirmation | projects and issues in Jira |
+| 9 | **Verification** | status and assignee consistency, task counts compared with Asana | `migration_app/checks/` |
 
-Krok 2 da się uruchomić też z terminala: `.venv/bin/python migration_app/setup_check.py`.
-Zacznij od zakładki arkusza z 1-2 projektami testowymi (`GOOGLE_SHEET_RANGE`), przejdź
-całość, obejrzyj wynik w Jirze i dopiero potem przełącz na pełną listę.
+Step 2 also runs from the terminal: `.venv/bin/python migration_app/setup_check.py`.
+Start with a sheet tab containing 1-2 test projects (`GOOGLE_SHEET_RANGE`), go through
+everything, review the result in Jira and only then switch to the full list.
 
-## Mapowanie osób i statusów
+## People and status mapping
 
-**Mapowanie osób** wczytuje członków workspace'u Asany i członków **wybranych grup
-Jiry**. Propozycje dopasowań: ten sam e-mail, ta sama część przed `@` w innej domenie,
-to samo imię i nazwisko, wzorzec `imie.nazwisko@JIRA_EMAIL_DOMAIN`. Każdą osobę możesz
-dopasować ręcznie (podpowiedzi po imieniu lub e-mailu) albo oznaczyć **„nie w Jirze”**
-- ich zadania powstają bez przypisanego i nie są liczone jako różnice. Start od obecnego
-`user_map.json` albo od pustej mapy; goście Asany są domyślnie ukryci; panel ostrzega,
-gdy dwie osoby z Asany wskazują to samo konto. Pamiętaj: przypisać zadanie można tylko
-osobie, której rola w projekcie ma uprawnienie **„Assignable User”** w schemacie
-uprawnień - samo mapowanie (ani bycie leadem projektu) tego nie daje.
+**People mapping** loads the members of the Asana workspace and the members of
+**selected Jira groups**. Suggested matches: same e-mail, same part before `@` in another
+domain, same first and last name, the pattern `first.last@JIRA_EMAIL_DOMAIN`. You can match
+each person by hand (suggestions by name or e-mail) or mark them **"not in Jira"** - their
+issues are created without an assignee and are not counted as differences. Start from the
+current `user_map.json` or from an empty map; Asana guests are hidden by default; the panel
+warns when two Asana people point to the same account. Remember: an issue can only be
+assigned to a person whose project role has the **"Assignable User"** permission in the
+permission scheme - mapping alone (or being the project lead) does not grant it.
 
-**Mapowanie statusów** zbiera nazwy sekcji ze wszystkich projektów arkusza (z liczbą
-projektów i zadań) oraz statusy projektu wzorcowego (`JIRA_TEMPLATE_PROJECT_KEY`, albo
-innego wskazanego projektu). Do wyboru są **wyłącznie statusy, które istnieją we
-wzorcu**, pogrupowane na „do zrobienia”, „w toku” i „zakończone”. Propozycje: ta sama
-nazwa, a potem znaczenie sekcji (np. Fertig/Done/Abgeschlossen → status „zakończony”
-wzorca, In Arbeit → „w toku”, Backlog/To Do → „do zrobienia”). Sekcję można oznaczyć
-„pomiń” (zadania z poddrzewem nie są migrowane); sekcja bez mapowania zostaje w statusie
-startowym workflow. **Status dla zadań ukończonych w Asanie wybierasz jawnie** (wpis
-`__ukonczone__`) - bez niego skrypt użyłby `Fertig`, którego w Twojej Jirze może nie być.
-Wpisy wskazujące status spoza wzorca są oznaczane, a krok 5 jest gotowy dopiero bez nich.
+**Status mapping** collects section names from all sheet projects (with project and task
+counts) and the statuses of the template project (`JIRA_TEMPLATE_PROJECT_KEY`, or another
+project you name). You can only choose **statuses that exist in the template**, grouped
+into "to do", "in progress" and "done". Suggestions: same name, then the meaning of the
+section (e.g. Fertig/Done/Abgeschlossen → the template's "done" status, In Arbeit → "in
+progress", Backlog/To Do → "to do"). A section can be marked "skip" (its issues and their
+subtrees are not migrated); an unmapped section stays in the workflow's initial status.
+**You pick the status for tasks completed in Asana explicitly** (the `__ukonczone__` entry) -
+without it the script would use `Fertig`, which your Jira may not have. Entries pointing to
+a status outside the template are flagged, and step 5 is only ready without them.
 
-Mapy pojedynczych projektów (`section_status_map.<KLUCZ>.json`) edytujesz w widoku
-**Statusy i osoby** albo w **Konfiguracji**.
+Single-project maps (`section_status_map.<KEY>.json`) are edited in **Statuses and people**
+or in **Configuration**.
 
-## Kopia projektu
+## Copy project
 
-Osobna karta do skopiowania istniejącego projektu (company-managed) jako nowego.
-Działa niezależnie od migracji: skrypt `clone_project.py` nie importuje innych
-skryptów, nie korzysta z projektu wzorcowego i z `.env` czyta tylko dostęp do Jiry -
-**wszystko bierze z projektu źródłowego**.
+A separate tab for copying an existing (company-managed) project into a new one. It is
+independent of the migration: the `clone_project.py` script imports no other script, does
+not use the template project and reads only Jira access from `.env` - **everything comes
+from the source project**.
 
-- **Schematy:** każdy schemat, którego używa źródło, dostaje kopię z nazwą opartą na
-  nowym projekcie - od klucza albo od nazwy (wybór w karcie, z podglądem nazw), np.
-  `XYZ Permission Scheme`, `XYZ Notification Scheme`, `XYZ Issue Security Scheme`,
-  `XYZ Workflow Scheme`, `XYZ Issue Type Scheme`, `XYZ Issue Type Screen Scheme`,
-  `XYZ Field Scheme` (w instancjach sprzed migracji na Field Schemes: `XYZ Field
-  Configuration Scheme`), `XYZ Priority Scheme`. Uprawnień, których Jira nie przyjmuje
-  przy tworzeniu schematu (np. Product Discovery, `COPY_PROJECT`), nie da się skopiować -
-  log je wymienia. Schemat o takiej nazwie, który
-  już istnieje (np. po przerwanym uruchomieniu), jest używany ponownie. Same workflow,
-  ekrany i konfiguracje pól pozostają wspólne ze źródłem (wskazują na nie nowe schematy).
-- **Projekt:** typ, lead (albo podany), opis, URL, kategoria i domyślne przypisanie jak
-  w źródle; projekt powstaje od razu z kopiami schematów.
-- **Role i dostęp:** karta wczytuje role źródła z osobami i grupami (wstępnie
-  zaznaczonymi). Możesz je odznaczyć, dodać osoby lub grupy z wyszukiwarki i dodać
-  inne role; do nowego projektu trafia dokładnie ten wybór (`--roles-file`). Z terminala
-  bez pliku role i członkowie są jak w źródle, `--no-roles` - nikogo.
-- **Tablice:** filtr z podmienionym projektem i tymi samymi udostępnieniami, tablica,
-  kolumny i **przypisanie statusów do kolumn** jak w źródle (przez API GreenHopper,
-  tokenem, bez przeglądarki). Workflow są wspólne ze źródłem, więc statusy mają te same
-  ID. Po zapisie skrypt odczytuje nową tablicę i porównuje każdą kolumnę z jej statusami
-  ze źródłem (w logu lista kolumn i statusów albo ostrzeżenie o różnicy).
-- **Dodatkowo (każde można wyłączyć):** komponenty, wersje, konteksty pól
-  niestandardowych ograniczone do źródła.
-- **Nie kopiuje:** zgłoszeń, torów (swimlanes), szybkich filtrów i wyglądu kart tablic.
+- **Schemes:** every scheme the source uses gets a copy named after the new project - from
+  its key or its name (chosen in the tab, with a name preview), e.g. `XYZ Permission Scheme`,
+  `XYZ Notification Scheme`, `XYZ Issue Security Scheme`, `XYZ Workflow Scheme`,
+  `XYZ Issue Type Scheme`, `XYZ Issue Type Screen Scheme`, `XYZ Field Scheme` (on instances
+  not yet migrated to Field Schemes: `XYZ Field Configuration Scheme`), `XYZ Priority Scheme`.
+  Permissions that Jira does not accept when creating a scheme (e.g. Product Discovery,
+  `COPY_PROJECT`) cannot be copied - the log lists them. A scheme with that name that already
+  exists (e.g. after an interrupted run) is reused. The workflows, screens and field
+  configurations themselves stay shared with the source (the new schemes point to them).
+- **Project:** type, lead (or the one you give), description, URL, category and default
+  assignee as in the source; the project is created with the scheme copies right away.
+- **Roles and access:** the tab loads the source roles with their people and groups (all
+  pre-selected). You can deselect them, add people or groups from the search and add other
+  roles; exactly that selection goes to the new project (`--roles-file`). From the terminal
+  without the file, roles and members are as in the source; `--no-roles` adds nobody.
+- **Boards:** a filter with the project replaced and the same sharing, the board, its columns
+  and **the status-to-column mapping** as in the source (via the GreenHopper API with the
+  token, no browser). Workflows are shared with the source, so statuses keep their IDs. After
+  saving, the script re-reads the new board and compares every column and its statuses with
+  the source (the log lists columns and statuses, or warns about a difference).
+- **Also (each can be switched off):** components, versions, custom field contexts limited
+  to the source project.
+- **Not copied:** issues, swimlanes, quick filters and card layout.
 
-Zacznij od **Podglądu (dry-run)** - pokazuje schematy źródła, nazwy kopii, role,
-komponenty i tablice. „Utwórz kopię” prosi o potwierdzenie. Po przerwaniu uruchom
-ponownie z „projekt docelowy już istnieje”. Z terminala:
+Start with **Preview (dry-run)** - it shows the source schemes, the copy names, roles,
+components and boards. "Create copy" asks for confirmation. After an interruption run it
+again with "target project already exists". From the terminal:
 ```bash
-.venv/bin/python clone_project.py --source ABC --target-key XYZ --target-name "Nowy projekt" --dry-run
-.venv/bin/python clone_project.py --source ABC --target-key XYZ --target-name "Nowy projekt" --name-base name
+.venv/bin/python clone_project.py --source ABC --target-key XYZ --target-name "New project" --dry-run
+.venv/bin/python clone_project.py --source ABC --target-key XYZ --target-name "New project" --name-base name
 ```
-Starszy `copy_project.py` (sekcja 4a) podpina do nowego projektu **te same** schematy co
-źródło i konfiguruje kolumny przez przeglądarkę.
+The older `copy_project.py` (section 4a) attaches **the same** schemes as the source to the
+new project and configures columns through the browser.
 
-## Widoki panelu
+## Panel views
 
-| Widok | Do czego służy |
+| View | What it is for |
 |---|---|
-| **Start** | kroki nowej migracji (wyżej) |
-| **Przegląd** | stan całości na jednym ekranie: braki w `.env`, wiek sesji przeglądarki (potrzebnej w krokach kolumn i statusów), stan synchronizacji, projekty chronione i wyłączone, ostatnie uruchomienia |
-| **Projekty** | projekty z arkusza (bez wczytanego arkusza: z pliku stanu i `project_key_cache.json`), liczba wpisów w stanie, mapa sekcji, flagi, wynik ostatniego sprawdzenia. **Zaznaczone projekty trafiają automatycznie do pól „Projekty” w narzędziach** |
-| **Narzędzia** | 69 skryptów w siedmiu grupach (tabela niżej), każdy z formularzem opcji. Panel pokazuje dokładne polecenie przed startem |
-| **Statusy i osoby** | sprawdzenie bez zapisu, per projekt: sekcje Asany → statusy Jiry (te same reguły co synchronizacja: mapa projektu, szablon, mapa główna, `__ukonczone__`), osoby → konta Jiry (czy są w `user_map.json`, czy aktywne, czy można je przypisać - przy braku uprawnienia panel pokazuje schemat uprawnień i role, które je dają) oraz różnice statusu i przypisanego w już zmigrowanych zadaniach. Brakujące mapowanie sekcji zapiszesz od razu do `section_status_map.<KLUCZ>.json`, osobę oznaczysz „nie w Jirze” |
-| **Mapowanie osób** / **Mapowanie statusów** | jak wyżej |
-| **Kopia projektu** | nowy projekt z konfiguracją istniejącego, z własnymi kopiami schematów (niżej) |
-| **Uruchomienia** | historia z pełnymi logami na żywo; pole odpowiedzi dla skryptów, które pytają o potwierdzenie; przerwanie całego uruchomienia (z procesami potomnymi) |
-| **Konfiguracja** | edycja `.env` (sekrety zamaskowane, puste pole = bez zmian), map statusów, szablonów, `user_map.json`, `asana_users_not_in_jira.json`, `sync_exclude.txt`, `protected_projects.txt` i schematów YAML; pliki, których jeszcze nie ma, powstają przy pierwszym zapisie |
-| **Raporty** | `logs/`, `pipeline_summaries/`, `repair_reports/` i raporty CSV/JSON (CSV wyświetlany jako tabela) |
+| **Start** | the steps of a new migration (above) |
+| **Overview** | the whole picture on one screen: gaps in `.env`, age of the browser session (needed by the column and status steps), sync state, protected and excluded projects, recent runs |
+| **Projects** | projects from the sheet (without a loaded sheet: from the state file and `project_key_cache.json`), number of state entries, section map, flags, result of the last check. **Selected projects automatically fill the "Projects" fields in the tools** |
+| **Tools** | 69 scripts in seven groups (table below), each with an options form. The panel shows the exact command before starting |
+| **Statuses and people** | a read-only check per project: Asana sections → Jira statuses (the same rules as the sync: project map, profile, main map, `__ukonczone__`), people → Jira accounts (whether they are in `user_map.json`, active, assignable - when they lack the permission the panel shows the permission scheme and the roles granting it) and status/assignee differences in already migrated issues. A missing section mapping can be saved straight to `section_status_map.<KEY>.json`, a person can be marked "not in Jira" |
+| **People mapping** / **Status mapping** | as above |
+| **Copy project** | a new project with an existing one's configuration and its own scheme copies (above) |
+| **Runs** | history with full live logs; an input field for scripts that ask for confirmation; stopping a whole run (with child processes) |
+| **Configuration** | editing `.env` (secrets masked, empty field = unchanged), status maps, profiles, `user_map.json`, `asana_users_not_in_jira.json`, `sync_exclude.txt`, `protected_projects.txt` and YAML schemas; files that don't exist yet are created on the first save |
+| **Reports** | `logs/`, `pipeline_summaries/`, `repair_reports/` and CSV/JSON reports (CSV shown as a table) |
 
-## Grupy narzędzi
+## Tool groups
 
-| Grupa w panelu | Co zawiera | Opis w części II |
+| Group in the panel | What it contains | Described in part II |
 |---|---|---|
-| **Pipeline migracji** | wczytanie arkusza, cały pipeline, tworzenie projektów, kolumny i statusy tablic, kandydaci na Epiki, synchronizacja w obie strony, zapis sesji przeglądarki, pliki projektu z Asany | sekcje 8, 11-12 |
-| **Asana: statusy i przypisania** | sprawdzenie statusów i osób, źródła mapowania statusów, sekcje projektów, członkowie Asany, mapa użytkowników, token | sekcja 11 („Konfiguracja przed pierwszym uruchomieniem”) |
-| **Weryfikacja** | liczenie i porównanie z Asaną, duplikaty, audyty hierarchii, diagnostyka | sekcja 14 |
-| **Naprawy** | odtwarzanie powiązań, usuwanie duplikatów, „migriert zu Jira”, fałszywe Epiki, flagi stanu, naprawy partiami | sekcja 15 |
-| **Konfiguracja Jiry** | schemat z YAML, układ i aktualizacja workflow, ekrany, field schemes, grupy na przejściach | sekcja 17 |
-| **Kopia projektów** | kopia projektu w tej samej instancji i z innej instancji Jiry | sekcja 4a |
-| **Inne** | Epiki i Story z arkusza zakresu i eksport z powrotem, zadania „Analysis” dla Story, dezaktywacja zawieszonych kont Atlassian | sekcje 20 i 22 |
+| **Migration pipeline** | loading the sheet, the whole pipeline, creating projects, board columns and statuses, Epic candidates, sync in both directions, saving the browser session, Asana project files | sections 8, 11-12 |
+| **Asana: statuses and assignees** | status and people check, status mapping sources, project sections, Asana members, user map, token | section 11 ("Configuration before the first run") |
+| **Verification** | counting and comparison with Asana, duplicates, hierarchy audits, diagnostics | section 14 |
+| **Repairs** | restoring links, removing duplicates, "migriert zu Jira", false Epics, state flags, batch repairs | section 15 |
+| **Jira configuration** | schema from YAML, workflow layout and updates, screens, field schemes, groups on transitions | section 17 |
+| **Project copies** | copy with scheme copies (`clone_project.py`), copy within the same instance and from another Jira instance | part I ("Copy project"), section 4a |
+| **Other** | Epics and Stories from the scope sheet and export back, "Analysis" issues for Stories, deactivating suspended Atlassian accounts | sections 20 and 22 |
 
-## Jak panel chroni dane
+## How the panel protects data
 
-- **Podgląd domyślnie.** Narzędzia, które mają tryb podglądu, startują z
-  zaznaczonym `--dry-run`; zapis wymaga jego odznaczenia albo zaznaczenia `--apply`.
-- **Potwierdzenie przed zapisem.** Każde uruchomienie, które zmieni dane w Jirze,
-  Asanie albo w plikach, panel oznacza i wymaga potwierdzenia.
-- **Kopie plików.** Przed każdym zapisem z panelu (konfiguracja, mapowania, `.env`)
-  panel kopiuje plik do `migration_app/backups/`.
-- **Sekrety poza repo.** `.env`, `service_account.json` i `auth_state.json` są w
-  `.gitignore`; panel nie pokazuje wartości tokenów.
-- **Te same zabezpieczenia co skrypty:** `protected_projects.txt`,
-  `sync_exclude.txt`, blokady projektów i atomowy zapis stanu działają tak samo
-  jak przy uruchomieniu z terminala (sekcja 11).
+- **Preview by default.** Tools that have a preview mode start with `--dry-run` checked;
+  writing requires unchecking it or checking `--apply`.
+- **Confirmation before writing.** Every run that will change data in Jira, Asana or in
+  files is flagged and requires confirmation.
+- **File backups.** Before every save from the panel (configuration, mappings, `.env`) the
+  panel copies the file to `migration_app/backups/`.
+- **Secrets stay out of the repo.** `.env`, `service_account.json` and `auth_state.json` are
+  in `.gitignore`; the panel never shows token values.
+- **The same safeguards as the scripts:** `protected_projects.txt`, `sync_exclude.txt`,
+  project locks and atomic state writes work exactly as when run from the terminal
+  (section 11).
 
-## Typowa praca w panelu
+## Everyday work in the panel
 
-**Nowa migracja:** zakładka **Start**, kroki 1-9. Przed masowym tworzeniem zgłoszeń
-poproś administratora Jiry o wyłączenie powiadomień i automatyzacji dla nowych
-projektów (Jira wysyła maile przy każdym zgłoszeniu tworzonym przez API).
+**A new migration:** the **Start** tab, steps 1-9. Before creating issues in bulk, ask a
+Jira administrator to switch off notifications and automation for the new projects (Jira
+sends e-mails for every issue created through the API).
 
-**Kolejne projekty w trwającej migracji:** **Projekty** → zaznacz projekty →
-**Statusy i osoby** (brakujące sekcje i osoby) → **Narzędzia → Pipeline** z podglądem,
-przejrzyj log w **Uruchomieniach**, potem ten sam pipeline bez podglądu → weryfikacja.
+**More projects in an ongoing migration:** **Projects** → select projects → **Statuses and
+people** (missing sections and people) → **Tools → Pipeline** with preview, review the log
+in **Runs**, then the same pipeline without preview → verification.
 
-**Rutynowa synchronizacja:** Narzędzia → *Pipeline* → kandydaci na Epiki, potem
-synchronizacja Asana → Jira (opcjonalnie Jira → Asana, nigdy równolegle z
-pierwszą). Podsumowanie każdego kroku jest w logu i, jeśli skonfigurowany, na
-Slacku. Jak reagować na podsumowanie: sekcja 18.
+**Routine sync:** Tools → *Pipeline* → Epic candidates, then sync Asana → Jira (optionally
+Jira → Asana, never in parallel with the first). Each step's summary is in the log and, if
+configured, on Slack. How to react to the summary: section 18.
 
-**Naprawy i kontrola:** grupy *Weryfikacja* i *Naprawy* — zawsze najpierw raport,
-potem zapis. Kolejność kroków przy naprawie projektów zsynchronizowanych starszą
-wersją opisują sekcje 15i i 18.
+**Repairs and checks:** the *Verification* and *Repairs* groups — always report first, then
+write. The order of steps when repairing projects synced by an older version is described
+in sections 15i and 18.
 
 ---
 
-# Część II. Skrypty — dokumentacja szczegółowa
+# Part II. The scripts — detailed documentation
 
-Każde narzędzie panelu to zwykły skrypt w głównym folderze. Formularz panelu
-odpowiada jego opcjom wiersza poleceń, więc wszystko poniżej da się uruchomić
-także z terminala (`.venv/bin/python <skrypt> ...` albo po `source .venv/bin/activate`).
+Every panel tool is an ordinary script in the main folder. The panel form matches its
+command-line options, so everything below can also be run from the terminal
+(`.venv/bin/python <script> ...` or after `source .venv/bin/activate`).
 
-## Przegląd pakietu
+## Toolkit overview
 
-Pakiet skryptów, który przenosi wybrane projekty z Asany do Jiry i utrzymuje je
-w synchronizacji. **Arkusz Google jest źródłem prawdy** o tym, które projekty
-mają powstać w Jirze: skrypty tworzą projekty tylko dla wierszy z arkusza.
+A toolkit that moves selected projects from Asana to Jira and keeps them in
+sync. **The Google Sheet is the source of truth** for which projects should
+exist in Jira: the scripts create projects only for rows in the sheet.
 
-Co robi pakiet, w kolejności kroków:
+What the toolkit does, step by step:
 
-1. tworzy projekty w Jirze (`jira_sync.py`),
-2. konfiguruje kolumny tablic i przypisuje do nich statusy (`browser_automation/`),
-3. wykrywa zadania wymagające hierarchii Epic → Task → Sub-task (`detect_epic_candidates.py`),
-4. synchronizuje zadania, podzadania, komentarze i załączniki (`asana_jira_sync.py`),
-5. opcjonalnie przenosi zmiany z powrotem z Jiry do Asany (`jira_asana_sync.py`).
+1. creates projects in Jira (`jira_sync.py`),
+2. configures board columns and assigns statuses to them (`browser_automation/`),
+3. detects tasks that need the Epic → Task → Sub-task hierarchy (`detect_epic_candidates.py`),
+4. syncs tasks, subtasks, comments and attachments (`asana_jira_sync.py`),
+5. optionally syncs changes back from Jira to Asana (`jira_asana_sync.py`).
 
-Kroki 1-4 uruchamia jednym poleceniem orkiestrator `run_full_pipeline.py`
-(sekcja 11a), także równolegle i ze zbiorczym podsumowaniem na Slacku.
+Steps 1-4 are run with a single command by the `run_full_pipeline.py`
+orchestrator (section 11a), also in parallel and with a combined Slack summary.
 
-**Arkusz zawiera tylko projekty, które mają być teraz synchronizowane.** Projekty
-już zmigrowane i zarchiwizowane w Jirze są z niego usuwane, więc żadne narzędzie
-działające na arkuszu ich nie dotyka. Całą procedurę pracy opisuje sekcja 18.
+**The sheet contains only the projects that should be synced right now.** Projects
+that are already migrated and archived in Jira are removed from it, so no tool
+working off the sheet touches them. The whole working procedure is in section 18.
 
-Dodatkowo pakiet zawiera:
+The toolkit also includes:
 
-- **narzędzia kontroli i naprawy** projektów zsynchronizowanych starszymi wersjami:
-  porównanie z Asaną (`compare_project_totals.py`), audyt hierarchii
-  (`audit_hierarchy.py`), odtwarzanie zgubionych powiązań (`relink_state.py`),
-  usuwanie duplikatów (`resolve_relink_duplicates.py`), zadania przeniesione
-  ręcznie do Jiry (`handle_migrated_to_jira.py`) i sterownik dla wielu projektów
-  (`repair_batch.py`), sekcje 14-15,
-- **kopiowanie projektów z innej instancji Jiry**, także z podziałem na kilka
-  projektów i dociąganiem nowości (`copy_project_cross_instance.py`, sekcja 4a),
-- **mechanizmy ochronne**: `sync_exclude.txt` (czasowe wyłączenie synchronizacji)
-  i `protected_projects.txt` (trwałe wyłączenie ze wszystkiego), sekcja 11,
-- **konfigurację Jiry z pliku YAML** (`build_jira_schema.py`, sekcja 17) oraz
-  **Epiki i Story z arkusza zakresu** (`create_epics_stories_from_sheet.py`,
-  sekcja 20); oba narzędzia są niezależne od migracji z Asany,
-- **panel webowy** `migration_app/` (część I; pliki panelu: sekcja 21).
+- **check and repair tools** for projects synced with older versions:
+  comparison with Asana (`compare_project_totals.py`), hierarchy audit
+  (`audit_hierarchy.py`), restoring lost links (`relink_state.py`),
+  removing duplicates (`resolve_relink_duplicates.py`), tasks moved to Jira
+  by hand (`handle_migrated_to_jira.py`) and a multi-project driver
+  (`repair_batch.py`), sections 14-15,
+- **copying projects from another Jira instance**, including splitting into
+  several projects and pulling in new items (`copy_project_cross_instance.py`, section 4a),
+- **safety mechanisms**: `sync_exclude.txt` (temporarily excludes from sync)
+  and `protected_projects.txt` (permanently excludes from everything), section 11,
+- **Jira configuration from a YAML file** (`build_jira_schema.py`, section 17) and
+  **Epics and Stories from a scope sheet** (`create_epics_stories_from_sheet.py`,
+  section 20); both tools are independent of the Asana migration,
+- **the web panel** `migration_app/` (part I; panel files: section 21).
 
-Każdy wiersz arkusza musi mieć `asana_project_link`. Wiersz bez linku (albo z
-linkiem, do którego token nie ma dostępu) jest **pomijany w całości**: projekt
-nie powstaje w Jirze. Dopasowanie po nazwie zostało celowo wyłączone (sekcja 7).
+Every sheet row must have an `asana_project_link`. A row without a link (or with
+a link the token cannot access) is **skipped entirely**: the project is not
+created in Jira. Name-based matching has been deliberately disabled (section 7).
 
-**Spis treści części II:** 1-3 instalacja i konfiguracja · 4-4a projekt wzorcowy i kopiowanie
-projektów · 5-6 role · 7 format arkusza · 8-10 tworzenie projektów · 11 synchronizacja
-zadań (w tym hierarchia Epików) · 11a cały pipeline i równoległość · 11b statusy
-w kolumnach · 12 kierunek zwrotny · 13 logi i Slack · 14 weryfikacja i sprzątanie ·
-15 naprawa hierarchii, zgubionych powiązań i duplikatów (15f-15i) · 16 pliki stanu ·
-17 konfiguracja Jiry z YAML (pola, statusy, workflow, ekrany, schematy) ·
-18 procedura pracy (naprawa, rutynowo, okresowo) · 19 rozwiązywanie problemów
-(19a synchronizacja i naprawy, 19b konfiguracja Jiry w praktyce) ·
-20 Epiki i Story z arkusza "Zakres MVP" · 21 pliki panelu ·
-22 pozostałe skrypty pomocnicze
+**Contents of part II:** 1-3 installation and configuration · 4-4a template project and copying
+projects · 5-6 roles · 7 sheet format · 8-10 creating projects · 11 task sync
+(including the Epic hierarchy) · 11a the whole pipeline and parallelism · 11b statuses
+in columns · 12 reverse direction · 13 logs and Slack · 14 verification and cleanup ·
+15 repairing hierarchy, lost links and duplicates (15f-15i) · 16 state files ·
+17 Jira configuration from YAML (fields, statuses, workflows, screens, schemes) ·
+18 working procedure (repair, routine, periodic) · 19 troubleshooting
+(19a sync and repairs, 19b Jira configuration in practice) ·
+20 Epics and Stories from the "Zakres MVP" (MVP scope) sheet · 21 panel files ·
+22 other helper scripts
 
-## 1. Instalacja
+## 1. Installation
 
-Jak w części I („Szybki start”): środowisko `.venv` i `requirements.txt`.
-Skrypty przeglądarkowe wymagają też `playwright install chromium`.
+Simplest: `./start.sh` (part I, "Quick start"). By hand - the panel and the scripts expect
+the environment in `.venv`:
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python -m playwright install chromium   # browser steps (board columns and statuses)
+```
 
-## 2. Konfiguracja
+## 2. Configuration
 
-1. Skopiuj `.env.example` do `.env`:
+**In the panel:** the Start tab, step 1 - the form saves `.env` (created from
+`.env.example`), a pasted Google service account key goes to `service_account.json`, and
+the panel shows the address the sheet must be shared with. Step 2 checks everything at
+once (from the terminal: `.venv/bin/python migration_app/setup_check.py`).
+
+**By hand:**
+
+1. Copy `.env.example` to `.env`:
    ```bash
    cp .env.example .env
    ```
-2. Uzupełnij wartości w `.env`:
-   - **Jira**: adres instancji, e-mail, [token API](https://id.atlassian.com/manage-profile/security/api-tokens)
-   - **Asana**: [Personal Access Token](https://app.asana.com/0/my-apps), GID workspace'u
-   - **Google Sheets**: konto serwisowe (JSON key) z [Google Cloud Console](https://console.cloud.google.com/)
-     — pamiętaj, żeby **udostępnić arkusz** adresowi e-mail konta serwisowego.
+2. Fill in the values in `.env`:
+   - **Jira**: instance URL, e-mail, [API token](https://id.atlassian.com/manage-profile/security/api-tokens)
+   - **Asana**: [Personal Access Token](https://app.asana.com/0/my-apps), workspace GID
+   - **Google Sheets**: a service account (JSON key) from [Google Cloud Console](https://console.cloud.google.com/),
+     the sheet ID and range (`GOOGLE_SHEET_RANGE`) — remember to **share the sheet** with the
+     service account's e-mail address (as Editor if the scripts should write Jira keys).
+   - recommended: a **template project** `JIRA_TEMPLATE_PROJECT_KEY` (section 4) - new
+     projects get its workflow, screens and fields, and the panel takes the statuses for
+     section mapping from it; with several template boards also `JIRA_TEMPLATE_BOARD_ID`.
 
-   Żeby szybko sprawdzić, czy `ASANA_TOKEN` faktycznie działa (niezależnie
-   od dostępu do konkretnego projektu — przydatne przy błędach `403`):
+   `.env.example` describes every variable; only the Jira, Asana and Google sections are
+   required. An empty value (`X=`) is not the same as a missing variable - some scripts
+   have defaults only for an absent variable, so keep unused options commented out.
+
+   To quickly check whether `ASANA_TOKEN` actually works (regardless of
+   access to a specific project — useful with `403` errors):
    ```bash
    python check_asana_token.py
    ```
 
-### Czego nie ma w repozytorium
+### What is not in the repository
 
-Repozytorium zawiera wyłącznie kod i dokumentację. Pliki z danymi powstają
-lokalnie przy pracy i są wykluczone w `.gitignore`: `.env`, sesja przeglądarki
-(`auth_state.json`), pliki stanu i cache (`*.json`, sekcja 16), raporty `*.csv`,
-arkusze `*.xlsx`, listy projektów `*.txt` (np. `sync_exclude.txt`,
-`protected_projects.txt`), konfiguracje YAML konkretnej instancji oraz katalogi
-`logs/`, `locks/`, `pipeline_summaries/`, `diagnostics/`, `repair_reports/`.
-Klucze projektów, nazwy instancji i grup w przykładach (`PROJ`, `KLUCZ`,
-`twoja-instancja.atlassian.net`, `KlientX`) są przykładowe — podstaw własne.
+The repository contains only code and documentation. Data files are created
+locally while you work and are excluded in `.gitignore`: `.env`, the Google key
+(`service_account.json`), the browser session (`auth_state.json`), state and cache files (`*.json`, section 16),
+`*.csv` reports, `*.xlsx` sheets, `*.txt` project lists (e.g. `sync_exclude.txt`,
+`protected_projects.txt`), instance-specific YAML configurations and the
+`logs/`, `locks/`, `pipeline_summaries/`, `diagnostics/`, `repair_reports/`
+directories. Project keys, instance and group names in the examples (`PROJ`,
+`KLUCZ` = "KEY", `twoja-instancja.atlassian.net`, `KlientX`) are placeholders —
+use your own.
 
-## 3. Typ tablicy
+## 3. Board type
 
-Domyślnie **wszystkie tworzone projekty są tablicami Kanban typu company-managed**
-(klasyczny, zarządzany centralnie przez admina Jira — wymaga uprawnień administracyjnych
-do tworzenia projektów tego typu). Jeśli wolisz wariant team-managed (prostszy,
-konfigurowany samodzielnie przez zespół), w `.env.example` jest gotowa, zakomentowana
-linia z odpowiednim kluczem szablonu.
+By default **all created projects are company-managed Kanban boards**
+(classic, centrally managed by a Jira admin — creating projects of this type
+requires administrative permissions). If you prefer team-managed (simpler,
+configured by the team itself), `.env.example` contains a ready, commented-out
+line with the matching template key.
 
-## 4. Kopiowanie konfiguracji z projektu wzorcowego
+## 4. Copying configuration from a template project
 
-Jeśli chcesz, żeby nowe projekty miały **taki sam workflow, layout ekranów i pola**
-jak istniejący, wybrany projekt w Jira — ustaw w `.env`:
+If you want new projects to have **the same workflow, screen layout and fields**
+as an existing Jira project, set in `.env`:
 
 ```
-JIRA_TEMPLATE_PROJECT_KEY=TWOJKLUCZ
+JIRA_TEMPLATE_PROJECT_KEY=YOURKEY
 ```
 
-Skrypt wtedy dla każdego nowo tworzonego projektu skopiuje z projektu wzorcowego:
+For every newly created project the script will then copy from the template project:
 
-- **workflow** (schemat workflow),
-- **layout** — schemat ekranów przypisanych do typów zadań (issue type screen scheme),
-- **pola** — konfigurację pól (field configuration scheme),
-- **typy zadań** — schemat typów zadań (issue type scheme),
-- uprawnienia, powiadomienia i schemat bezpieczeństwa (jeśli projekt wzorcowy
-  ma niestandardowe — w przeciwnym razie użyty zostanie domyślny Jira).
+- **workflow** (workflow scheme),
+- **layout** — the screens assigned to issue types (issue type screen scheme),
+- **fields** — field configuration (field configuration scheme),
+- **issue types** — issue type scheme,
+- permissions, notifications and security scheme (if the template project has
+  custom ones — otherwise the Jira default is used).
 
-**Ograniczenia, o których warto wiedzieć:**
-- Działa **tylko dla projektów company-managed (klasycznych)** — co i tak jest
-  naszym domyślnym typem (patrz sekcja 3).
-- Wymaga **uprawnień administratora Jira** (Administer Jira global permission) —
-  bez nich Jira zwróci błąd 403 przy próbie przypisania workflow/layoutu/pól.
-- Workflow, layout i pola są przypisywane w osobnym kroku, **zaraz po** utworzeniu
-  pustego projektu — działa to tylko dopóki projekt nie ma żadnych zadań, co
-  zawsze jest prawdą dla świeżo utworzonego projektu.
-- Jeśli przypisanie któregoś ze schematów się nie powiedzie (np. brak
-  uprawnień), skrypt **nie usuwa** już utworzonego projektu — zgłasza to jako
-  ostrzeżenie w podsumowaniu, żebyś mógł to poprawić ręcznie w Jira.
-- Tryb `--dry-run` nie testuje samego kopiowania konfiguracji (bo projekt
-  jeszcze nie istnieje) — pokazuje tylko, że konfiguracja zostałaby skopiowana.
+**Limitations worth knowing:**
+- Works **only for company-managed (classic) projects** — which is our
+  default type anyway (see section 3).
+- Requires **Jira admin permissions** (Administer Jira global permission) —
+  without them Jira returns 403 when assigning the workflow/layout/fields.
+- Workflow, layout and fields are assigned in a separate step **right after**
+  the empty project is created — this only works while the project has no
+  issues, which is always true for a freshly created project.
+- If assigning any of the schemes fails (e.g. missing permissions), the script
+  **does not delete** the created project — it reports a warning in the
+  summary so you can fix it by hand in Jira.
+- `--dry-run` does not test the configuration copy itself (the project does not
+  exist yet) — it only shows that the configuration would be copied.
 
-**Ważne ograniczenie: kolumny tablicy Kanban.** Jira **nie udostępnia publicznego
-API do ustawiania kolumn tablicy** (board) — to jedyny element wizualnej konfiguracji,
-którego nie da się skopiować automatycznie. Workflow, statusy, ekrany i pola będą
-identyczne jak we wzorcu, ale nowa tablica dostanie domyślny układ kolumn Jiry
-(zwykle jeden status = jedna kolumna). Żeby ułatwić ręczne odtworzenie układu ze
-wzorca, uruchom:
+**Important limitation: Kanban board columns.** Jira **has no public API for
+setting board columns** — the only part of the visual configuration that cannot
+be copied automatically. Workflow, statuses, screens and fields will match the
+template, but the new board gets Jira's default column layout (usually one
+status = one column). To make recreating the template layout by hand easier, run:
 ```bash
 python show_template_board_columns.py
 ```
-Wypisze dokładny układ kolumn (nazwy + które statusy są w której kolumnie) z tablicy
-wzorcowej — wystarczy przeciągnąć statusy w te same miejsca na nowej tablicy
-(Board → Configure → Columns), co zajmuje dosłownie chwilę. Przy dużej liczbie
-projektów zobacz też `browser_automation/` — automatyzację Playwright do tego kroku.
+It prints the exact column layout (names + which statuses are in which column) of
+the template board — just drag the statuses into the same places on the new board
+(Board → Configure → Columns), which takes a moment. With many projects, see
+`browser_automation/` — Playwright automation for this step.
 
-## 4a. Pełna kopia JEDNEGO projektu, WŁĄCZNIE z tablicami i kolumnami (`copy_project.py`)
+## 4a. Full copy of ONE project, INCLUDING boards and columns (`copy_project.py`)
 
-> Do kopii projektu z **własnymi** schematami (nazwanymi od nowego projektu), bez
-> przeglądarki i bez innych skryptów, służy `clone_project.py` - karta „Kopia projektu”
-> w panelu (część I). Ten rozdział opisuje starszy `copy_project.py`, który podpina te
-> same schematy co źródło.
+> For a project copy with **its own** schemes (named after the new project), without a
+> browser and without other scripts, use `clone_project.py` - the "Copy project" tab in the
+> panel (part I). This section describes the older `copy_project.py`, which attaches the
+> same schemes as the source.
 
-Osobny skrypt do innego scenariusza niż główny `jira_sync.py` (masowe tworzenie
-z arkusza) — kopiuje **jeden konkretny, istniejący** projekt Jiry w całości,
-łącznie z tym, czego sekcja 4 wyżej nie potrafi zrobić automatycznie: **wszystkimi
-tablicami** źródłowego projektu, ich **układem kolumn** i **przypisaniem statusów
-do kolumn** (przez ten sam wewnętrzny mechanizm GraphQL/GreenHopper co
-`run_column_assignments.py` — patrz sekcja 11b, wbudowany tu bezpośrednio, żeby
-nie zależeć od dokładnej wersji tamtego pliku).
+A separate script for a different scenario than the main `jira_sync.py` (bulk
+creation from the sheet) — it copies **one specific, existing** Jira project in
+full, including what section 4 cannot do automatically: **all boards** of the
+source project, their **column layout** and **status-to-column assignment**
+(via the same internal GraphQL/GreenHopper mechanism as
+`run_column_assignments.py` — see section 11b, built in directly so it does not
+depend on the exact version of that file).
 
 ```bash
-python copy_project.py --source ABC --target-key XYZ --target-name "Nowy Projekt" \
-    --lead-account-id 5b10a2844c20165700ede21 --dry-run   # podgląd planu
+python copy_project.py --source ABC --target-key XYZ --target-name "New Project" \
+    --lead-account-id 5b10a2844c20165700ede21 --dry-run   # preview the plan
 
-python copy_project.py --source ABC --target-key XYZ --target-name "Nowy Projekt" \
-    --lead-account-id 5b10a2844c20165700ede21             # faktyczne utworzenie
+python copy_project.py --source ABC --target-key XYZ --target-name "New Project" \
+    --lead-account-id 5b10a2844c20165700ede21             # actually create
 ```
 
-**Udostępnienia filtrów tablic.** Tablica jest widoczna tylko dla osób, które
-widzą jej filtr. Nowy filtr dostaje te same udostępnienia i prawa edycji co filtr
-źródłowy, z projektem źródłowym podmienionym na nowy (udostępnienie roli w
-projekcie źródłowym staje się udostępnieniem tej roli w nowym projekcie, grupy
-i inne udostępnienia bez zmian). Dodatkowo filtr jest zawsze udostępniany nowemu
-projektowi, nawet gdy źródłowy był prywatny. Projekty skopiowane starszą wersją
-skryptu (zespół nie widzi tablic) poprawia `fix_board_filter_permissions.py` *(skrypt nie jest dołączony do tego repozytorium)*:
+**Board filter sharing.** A board is visible only to people who can see its
+filter. The new filter gets the same sharing and edit permissions as the source
+filter, with the source project replaced by the new one (sharing with a role in
+the source project becomes sharing with that role in the new project; groups and
+other shares stay unchanged). In addition, the filter is always shared with the
+new project, even if the source one was private. Projects copied with an older
+version of the script (the team cannot see the boards) are fixed by
+`fix_board_filter_permissions.py` *(script not included in this repository)*:
 ```bash
-python fix_board_filter_permissions.py --project-keys XYZ                      # raport
-python fix_board_filter_permissions.py --project-keys XYZ --apply --editable   # udostępnij + prawo edycji
+python fix_board_filter_permissions.py --project-keys XYZ                      # report
+python fix_board_filter_permissions.py --project-keys XYZ --apply --editable   # share + edit permission
 ```
-Ostrzeżenie `tablica jest przypisana do projektu ...` oznacza, że tablica nie
-pojawi się w menu projektu; zmiana w Ustawienia tablicy → Ogólne → Lokalizacja.
+The warning `tablica jest przypisana do projektu ...` ("the board is assigned to
+project ...") means the board will not show up in the project menu; change it in
+Board settings → General → Location.
 
-**Lead projektu** (`--lead-account-id`) musi być poprawnym identyfikatorem konta
-(24 znaki albo format `712020:...`) z dostępem do Jiry, inaczej Jira zwraca
+**Project lead** (`--lead-account-id`) must be a valid account ID (24 characters
+or the `712020:...` format) with Jira access, otherwise Jira returns
 `projectLead: You must specify a valid project lead`.
 
-**Celowo pomija** role/członków (deweloperzy, administratorzy) — dodaj ręcznie
-po utworzeniu, albo skorzystaj z `DEVELOPER_GROUP_NAME`/`ADMIN_ACCOUNT_ID` w `.env`
-tak jak przy zwykłym `jira_sync.py` (sekcje 5–6).
+**Deliberately skips** roles/members (developers, administrators) — add them by
+hand after creation, or use `DEVELOPER_GROUP_NAME`/`ADMIN_ACCOUNT_ID` in `.env`
+as with regular `jira_sync.py` (sections 5–6).
 
-Przydatne flagi:
-- **`--board-ids 123,456`** — pomija automatyczne (wolne przy dużej instancji)
-  wykrywanie tablic źródłowych, używa podanych ID bezpośrednio. Pierwsze
-  uruchomienie bez tej flagi wypisze znalezione ID na końcu — warto je zapisać.
-- **`--skip-project-creation`** — zakłada, że projekt docelowy już istnieje
-  (np. z poprzedniej, przerwanej próby) i przechodzi od razu do tablic/kolumn/
-  statusów, pomijając ponowne tworzenie projektu i przypisywanie schematów.
+Useful flags:
+- **`--board-ids 123,456`** — skips the automatic (slow on a large instance)
+  discovery of source boards and uses the given IDs directly. The first run
+  without this flag prints the found IDs at the end — worth noting them down.
+- **`--skip-project-creation`** — assumes the target project already exists
+  (e.g. from a previous, interrupted attempt) and goes straight to boards/columns/
+  statuses, skipping project creation and scheme assignment.
 
-Wymaga zapisanej sesji przeglądarki (`auth_state.json` —
-`browser_automation/save_login_session.py`), bo przypisywanie statusów do
-kolumn używa tego samego nieoficjalnego, wewnętrznego API co
-`run_column_assignments.py` — te same zastrzeżenia o stabilności (sekcja 11b).
-Wymaga też `CLOUD_ID` w `.env` (identyfikator instancji Jira Cloud, używany
-przez zapytania GraphQL).
+Requires a saved browser session (`auth_state.json` —
+`browser_automation/save_login_session.py`), because assigning statuses to
+columns uses the same unofficial internal API as `run_column_assignments.py` —
+same stability caveats (section 11b). Also requires `CLOUD_ID` in `.env` (the
+Jira Cloud instance ID, used by the GraphQL queries).
 
-### Statusy projektu (`list_project_statuses.py`)
+### Project statuses (`list_project_statuses.py`)
 
-Wypisuje statusy dostępne w projekcie dla każdego typu zgłoszenia. Przyjmuje
-klucz albo dowolny link Jiry (tablica, backlog, ustawienia, zgłoszenie,
-`?selectedIssue=`):
+Prints the statuses available in a project for each issue type. Accepts a key
+or any Jira link (board, backlog, settings, issue, `?selectedIssue=`):
 ```bash
 python list_project_statuses.py PROJ3
 python list_project_statuses.py "https://twoja-instancja.atlassian.net/jira/software/c/projects/PROJ3/boards/123"
 ```
-Przydaje się przy mapach statusów (sekcja 11 i kopiowanie z innej instancji):
-mapy używają **nazw statusów**, a nie nazw kolumn tablicy.
+Useful for status maps (section 11 and copying from another instance): the maps
+use **status names**, not board column names.
 
-### Zdejmowanie statusu z kolumny tablic (`remove_status_from_column.py`)
+### Removing a status from a board column (`remove_status_from_column.py`)
 
-Przenosi wskazany status z kolumny tablicy do niezmapowanych statusów, na
-wybranych albo wszystkich tablicach projektów z arkusza. Korzysta z tego samego
-mechanizmu przeglądarkowego co `copy_project.py`, a po zapisie sprawdza całą
-konfigurację tablicy.
+Moves the given status from a board column to unmapped statuses, on selected
+or all boards of the projects in the sheet. Uses the same browser mechanism as
+`copy_project.py` and verifies the whole board configuration after saving.
 ```bash
-python remove_status_from_column.py                                                  # podgląd; domyślnie status "Backlog" z kolumny "Backlog"
-python remove_status_from_column.py --column "Done" --status "Closed"                 # podgląd dla innej pary
+python remove_status_from_column.py                                                  # preview; by default status "Backlog" from column "Backlog"
+python remove_status_from_column.py --column "Done" --status "Closed"                 # preview for another pair
 python remove_status_from_column.py --column "Done" --status "Closed" --apply
-python remove_status_from_column.py --board-ids 8351,8352 --apply                    # wybrane tablice
+python remove_status_from_column.py --board-ids 8351,8352 --apply                    # selected boards
 ```
-Tablice już zmienione są przy ponownym uruchomieniu pokazywane jako "bez zmian",
-więc przerwany przebieg wystarczy uruchomić jeszcze raz. Projekty z
-`protected_projects.txt` są pomijane, także przy `--board-ids`.
+Boards already changed are shown as "bez zmian" (unchanged) on a re-run, so an
+interrupted run can simply be started again. Projects from
+`protected_projects.txt` are skipped, also with `--board-ids`.
 
-### Gdy zapis kolumn przestaje działać
+### When saving columns stops working
 
-Przypisywanie statusów do kolumn (`copy_project.py`, `remove_status_from_column.py`,
-krok 3 pipeline'u) korzysta z wewnętrznego zapytania GraphQL interfejsu Jiry.
-Błędy i ich przyczyny:
+Assigning statuses to columns (`copy_project.py`, `remove_status_from_column.py`,
+pipeline step 3) uses an internal GraphQL query of the Jira UI. Errors and their
+causes:
 
-| Komunikat | Przyczyna | Co zrobić |
+| Message | Cause | What to do |
 |---|---|---|
-| `... -> sesja przeglądarki wygasła` (odpowiedź `UNAUTHENTICATED`) | sesja zapisana przez `save_login_session.py` wygasła w trakcie długiego przebiegu | `python browser_automation/save_login_session.py` i ponowne uruchomienie. `remove_status_from_column.py` zatrzymuje się przy pierwszym takim błędzie (`[PRZERWANO]`) |
-| `Brak poprawnej odpowiedzi GraphQL po 4 próbach ... pustą treścią` | przeciążenie albo ograniczenie zapytań (np. kilka dużych procesów naraz) | odczekać kilka minut i ponowić; skrypt sam ponawia pusty odczyt do 4 razy |
-| `... Jira nie zna już skrótu zapytania` (`PersistedQueryNotFound`) | Atlassian zmienił skrót zapisanego zapytania przy aktualizacji interfejsu | przechwycić nowy skrót (niżej) |
+| `... -> sesja przeglądarki wygasła` (browser session expired; response `UNAUTHENTICATED`) | the session saved by `save_login_session.py` expired during a long run | `python browser_automation/save_login_session.py` and run again. `remove_status_from_column.py` stops at the first such error (`[PRZERWANO]` = aborted) |
+| `Brak poprawnej odpowiedzi GraphQL po 4 próbach ... pustą treścią` (no valid GraphQL response after 4 attempts, empty body) | overload or rate limiting (e.g. several large processes at once) | wait a few minutes and retry; the script itself retries an empty read up to 4 times |
+| `... Jira nie zna już skrótu zapytania` (`PersistedQueryNotFound`) | Atlassian changed the persisted query hash in a UI update | capture the new hash (below) |
 
-**Nowy skrót zapytania:** w przeglądarce otwórz dowolną tablicę → Ustawienia
-tablicy → Kolumny, DevTools (F12) → Network, filtr `ColumnsSettings`, przeładuj
-stronę. W adresie zapytania `.../gateway/api/graphql/pq/<SKRÓT>?operation=<NAZWA>`
-jest skrót i nazwa operacji. Wpisz je do `.env`:
+**New query hash:** in the browser open any board → Board settings → Columns,
+DevTools (F12) → Network, filter `ColumnsSettings`, reload the page. The request
+URL `.../gateway/api/graphql/pq/<HASH>?operation=<NAME>` contains the hash and
+the operation name. Put them in `.env`:
 ```
-GRAPHQL_QUERY_HASH=<SKRÓT>
-GRAPHQL_OPERATION=<NAZWA>      # tylko jeśli zmieniła się też nazwa
+GRAPHQL_QUERY_HASH=<HASH>
+GRAPHQL_OPERATION=<NAME>      # only if the name changed too
 ```
-Ten sam skrót wykorzystuje `run_column_assignments.py` / `assign_statuses_to_columns.js`
-(sekcja 11b).
+The same hash is used by `run_column_assignments.py` / `assign_statuses_to_columns.js`
+(section 11b).
 
-### Kopia projektu z INNEJ instancji Jiry (`copy_project_cross_instance.py`)
+### Copying a project from ANOTHER Jira instance (`copy_project_cross_instance.py`)
 
-Przenosi **zawartość** projektu z cudzej instancji Jiry do naszej: zgłoszenia
-z typem i hierarchią (Epic → Task → Sub-task, rodzice tworzeni przed dziećmi),
-opisy, komentarze (cały wątek), załączniki, zgłaszającego i przypisanego,
-**etykiety**, **priorytet** i status według mapy albo reguły. **Nie przenosi
-konfiguracji** (pola niestandardowe i ich wartości, workflowy, ekrany, schematy),
-terminów, oryginalnych dat ani powiązań między zgłoszeniami.
+Moves the **content** of a project from someone else's Jira instance to ours:
+issues with type and hierarchy (Epic → Task → Sub-task, parents created before
+children), descriptions, comments (the whole thread), attachments, reporter and
+assignee, **labels**, **priority** and status according to a map or rule. **Does
+not move configuration** (custom fields and their values, workflows, screens,
+schemes), due dates, original dates or links between issues.
 
-#### Dostęp do źródła
+#### Access to the source
 
-W `.env` (docelowa instancja to zwykłe `JIRA_*`):
+In `.env` (the target instance is the regular `JIRA_*`):
 ```
 SOURCE_JIRA_BASE_URL=https://ich-firma.atlassian.net
-SOURCE_JIRA_EMAIL=...          # to samo konto Atlassian, jeśli masz tam dostęp tym mailem
-SOURCE_JIRA_API_TOKEN=...      # zwykły token, NIE "token z zakresami" (scoped)
+SOURCE_JIRA_EMAIL=...          # the same Atlassian account, if you have access there with this e-mail
+SOURCE_JIRA_API_TOKEN=...      # a regular token, NOT a "scoped" token
 ```
-Token należy do konta Atlassian, nie do instancji, więc przy tym samym mailu
-działa w obu. Zalecany osobny token z czytelną nazwą, do usunięcia po migracji.
-Tokeny wygasają: skrypt na starcie sprawdza logowanie (`/myself`) i widoczność
-projektu źródłowego. Przy `HTTP 401` albo braku projektu zatrzymuje się od razu
-z komunikatem `[BŁĄD] Instancja źródłowa ... odrzuca logowanie`. Bez tej kontroli
-wyszukiwanie zwróciłoby pustą listę jak dla anonimowego użytkownika i wyglądało
-na "0 zadań w źródle".
+The token belongs to the Atlassian account, not to the instance, so with the same
+e-mail it works in both. A separate token with a clear name is recommended, to be
+deleted after the migration. Tokens expire: at startup the script checks the login
+(`/myself`) and the visibility of the source project. On `HTTP 401` or a missing
+project it stops immediately with `[BŁĄD] Instancja źródłowa ... odrzuca logowanie`
+("source instance rejects the login"). Without this check the search would return
+an empty list as for an anonymous user and look like "0 tasks in the source".
 
-#### Projekt docelowy
+#### Target project
 
-**Najlepiej utworzyć go wcześniej** ręcznie, z opcją "Udostępnij ustawienia
-istniejącego projektu" i naszym projektem wzorcowym. Wtedy dostaje nasz
-standardowy workflow i schematy, a skrypt tylko go wypełnia. Dla **istniejącego**
-projektu `--target-name` i `--target-lead-account-id` są zbędne (lead i nazwa
-zostają bez zmian, lead nie jest dopisywany do administratorów). Gdy projekt
-nie istnieje, skrypt tworzy go z domyślną konfiguracją instancji i wtedy oba
-parametry są wymagane. Jeśli projekt ma już naszą tablicę, dodaj `--skip-boards`.
+**Best to create it beforehand** by hand, with the "Share settings with an
+existing project" option and our template project. It then gets our standard
+workflow and schemes, and the script only fills it. For an **existing** project
+`--target-name` and `--target-lead-account-id` are unnecessary (lead and name
+stay unchanged, the lead is not added to administrators). When the project does
+not exist, the script creates it with the instance's default configuration and
+then both parameters are required. If the project already has our board, add
+`--skip-boards`.
 
-Przy pierwszym ustawianiu statusów skrypt jednorazowo buduje mapę przejść
-workflow przez kilka tymczasowych zgłoszeń, które od razu usuwa. Stąd luki
-w numeracji (np. `CJD-2` do `CJD-7`). W aktywnym projekcie mogą one uruchomić
-reguły automatyzacji.
+When setting statuses for the first time, the script builds a map of workflow
+transitions once, using a few temporary issues that it deletes right away. Hence
+gaps in numbering (e.g. `CJD-2` to `CJD-7`). In an active project they may trigger
+automation rules.
 
-**Projekt docelowy z istniejącymi zgłoszeniami:** podgląd pokazuje, ile zadań ze
-źródła ma tytuł identyczny z istniejącym zgłoszeniem w celu (np. przeniesione
-wcześniej ręcznie). `--skip-existing-titles` pomija je razem z ich podzadaniami.
-Bez tej opcji kopiowane jest wszystko. Przy kopiowaniu do aktywnego projektu warto
-też poprosić administratora o czasowe wstrzymanie automatyzacji i pamiętać, że
-Jira przy tworzeniu przez API zawsze wysyła maile do przypisanych osób.
+**Target project with existing issues:** the preview shows how many source tasks
+have a title identical to an existing issue in the target (e.g. moved earlier by
+hand). `--skip-existing-titles` skips them together with their subtasks. Without
+this option everything is copied. When copying into an active project, it is also
+worth asking an administrator to pause automation temporarily, and remember that
+Jira always e-mails assignees when issues are created via the API.
 
-#### Odtworzenie workflow źródła (opcjonalnie, przed kopiowaniem zadań)
+#### Recreating the source workflow (optional, before copying tasks)
 
-Gdy projekt docelowy ma mieć **ten sam workflow co źródło** (zamiast naszego
-standardowego), przed kopiowaniem zadań odtwarza się go w trzech krokach.
-Konto w instancji źródłowej musi być tam administratorem, inaczej workflow nie
-da się odczytać.
+When the target project should have **the same workflow as the source** (instead
+of our standard one), recreate it in three steps before copying tasks. The account
+in the source instance must be an administrator there, otherwise the workflow
+cannot be read.
 
-1. **Eksport workflow** (`export_source_workflows.py`, tylko odczyt źródła) *(skrypt nie jest dołączony do tego repozytorium)*:
+1. **Export the workflow** (`export_source_workflows.py`, read-only on the source) *(script not included in this repository)*:
    ```bash
-   python export_source_workflows.py --source-key KLUCZ
-   python export_source_workflows.py --source-key KLUCZ --name-prefix "KLUCZ – " --out jira_schema_klucz.yaml
+   python export_source_workflows.py --source-key KEY
+   python export_source_workflows.py --source-key KEY --name-prefix "KEY – " --out jira_schema_key.yaml
    ```
-   Powstają `jira_schema_<klucz>.yaml` (statusy z kategoriami, workflow z
-   przejściami, id i układem diagramu, mapowanie typ → workflow) oraz
-   `status_map_<klucz>.json` (mapowanie statusów 1:1, gotowe do `--status-map`).
-   Działa dla projektów company- i team-managed. Reguł przejść (warunki,
-   walidatory, post-functions) **nie kopiuje**, bo odwołują się do grup i pól
-   tamtej instancji; skrypt wypisuje je na końcu do ręcznego odtworzenia.
-2. **Workflow i schemat u nas** (sekcja 17):
+   This produces `jira_schema_<key>.yaml` (statuses with categories, workflows with
+   transitions, ids and diagram layout, type → workflow mapping) and
+   `status_map_<key>.json` (1:1 status mapping, ready for `--status-map`).
+   Works for company- and team-managed projects. It **does not copy** transition
+   rules (conditions, validators, post-functions), because they refer to groups
+   and fields of that instance; the script prints them at the end for manual
+   recreation.
+2. **Workflow and scheme on our side** (section 17):
    ```bash
-   python build_jira_schema.py --schema jira_schema_klucz.yaml --only statuses_workflow,workflow_scheme --dry-run
-   python build_jira_schema.py --schema jira_schema_klucz.yaml --only statuses_workflow,workflow_scheme
+   python build_jira_schema.py --schema jira_schema_key.yaml --only statuses_workflow,workflow_scheme --dry-run
+   python build_jira_schema.py --schema jira_schema_key.yaml --only statuses_workflow,workflow_scheme
    ```
-   Sprawdź wcześniej dokładną pisownię statusów: status różniący się jednym
-   znakiem powstanie jako nowy.
-3. **Pusty projekt firmowy** z podpiętym schematem "KLUCZ – Workflow Scheme"
-   (bez zgłoszeń Jira nie pyta o migrację statusów). Potem kopiowanie zadań
-   z `--status-map status_map_<klucz>.json`; skrypt wykryje istniejący projekt
-   i go użyje.
+   Check the exact spelling of statuses first: a status that differs by one
+   character will be created as a new one.
+3. **An empty company project** with the "KEY – Workflow Scheme" scheme attached
+   (without issues Jira does not ask about status migration). Then copy the tasks
+   with `--status-map status_map_<key>.json`; the script detects the existing
+   project and uses it.
 
-Pominięcie kroku 3 oznacza, że `copy_project_cross_instance.py` założy projekt
-z domyślnym workflow instancji.
+Skipping step 3 means `copy_project_cross_instance.py` will create the project
+with the instance's default workflow.
 
-#### Statusy
+#### Statuses
 
-Plik z mapą **nazw statusów** (nie kolumn tablicy) albo reguła według **kategorii**
-statusu w źródle; wpis z pliku ma pierwszeństwo:
+A file with a map of **status names** (not board columns) or a rule based on the
+status **category** in the source; an entry from the file takes precedence:
 ```bash
---status-map status_map_projekt1.json      # {"Status w źródle": "Status u nas"}
---done-status Done --other-status Misc     # kategoria Done -> Done, reszta -> Misc
+--status-map status_map_projekt1.json      # {"Status in source": "Status on our side"}
+--done-status Done --other-status Misc     # Done category -> Done, everything else -> Misc
 ```
-Nazwy muszą zgadzać się co do znaku, łącznie ze znakami typu `·` i `✓`.
-Kolumny tablicy często nazywają się inaczej niż statusy w nich (np. kolumna
-"Review Kunde" zawiera status "Customer Testing"), więc nazwy statusów
-sprawdzaj przez `python list_project_statuses.py KLUCZ` albo w ustawieniach
-kolumn tablicy. Podgląd wypisuje faktyczne statusy źródła, plan
-"docelowy <- źródłowe" i sprawdza, czy każdy status docelowy istnieje. Pozycja
-`(domyślny)` w planie oznacza status źródła bez mapowania. Uwaga: dodanie
-statusu do workflow współdzielonego przez wiele projektów zmienia go we wszystkich.
+Names must match character for character, including characters like `·` and `✓`.
+Board columns are often named differently from the statuses in them (e.g. the
+column "Review Kunde" contains the status "Customer Testing"), so check status
+names with `python list_project_statuses.py KEY` or in the board column settings.
+The preview prints the actual source statuses, the "target <- source" plan, and
+checks that every target status exists. `(domyślny)` (default) in the plan means
+a source status without a mapping. Note: adding a status to a workflow shared by
+many projects changes it in all of them.
 
-#### Osoby
+#### People
 
-Zgłaszający i przypisany są ustawiani, jeśli ta sama osoba ma konto u nas.
-Dopasowanie: najpierw `--user-map`, potem ten sam identyfikator konta Atlassian,
-potem mail. Podgląd wypisuje niedopasowanych z identyfikatorem w źródle:
+Reporter and assignee are set if the same person has an account on our side.
+Matching: first `--user-map`, then the same Atlassian account ID, then e-mail.
+The preview prints unmatched people with their ID in the source:
 ```json
-{"accountId w źródle": "accountId u nas"}
+{"accountId in source": "accountId on our side"}
 ```
-**Nazwij tę mapę inaczej niż `user_map.json`** (np. `wt_user_map.json`):
-`user_map.json` to mapa użytkowników **Asany** używana przez `asana_jira_sync.py`.
-Ustawienie zgłaszającego wymaga uprawnienia *Modify Reporter*, przypisanego
-uprawnienia *Assignable User*. Twórcy i autorów komentarzy nie da się ustawić
-przez API.
+**Name this map something other than `user_map.json`** (e.g. `wt_user_map.json`):
+`user_map.json` is the **Asana** user map used by `asana_jira_sync.py`.
+Setting the reporter requires the *Modify Reporter* permission, the assignee the
+*Assignable User* permission. The creator and comment authors cannot be set via the API.
 
-#### Notka o pochodzeniu, etykiety, priorytety, opisy
+#### Origin note, labels, priorities, descriptions
 
-- **Notka (po niemiecku)** na początku opisu i prefiks przy każdym komentarzu:
+- **A note (in German)** at the start of the description and a prefix on every comment:
   > *Übernommen aus ich-firma.atlassian.net · Original: WT-30 · erstellt am: 2025-03-14 · Melder: Pascal Probst · zugewiesen an: nicht zugewiesen*
 
-  Teksty w stałych `ORIGIN_NOTE_TEMPLATE` i `COMMENT_PREFIX_TEMPLATE`, wyłączenie
-  `--no-origin-note`.
-- **Etykiety** są przenoszone 1:1 (spacje zamieniane na `_`, bo Jira ich nie dopuszcza).
-- **Priorytet** po nazwie, ale tylko spośród priorytetów **dozwolonych w projekcie
-  docelowym** (schemat priorytetów projektu). Nieznany priorytet zostaje domyślny
-  i trafia do podsumowania (`Priorytety ze źródła nieznane u nas`).
-- **Opis odrzucony przez Jirę** (elementy wskazujące na tamtą instancję) jest
-  najpierw **oczyszczany**: wzmianka → "@Imię Nazwisko", obrazek/plik →
-  "[Anhang: nazwa]", karta z linkiem → sam link, emoji/status/data → tekst
-  (`[INFO] Opis oczyszczony`). Dopiero gdy i to nie przejdzie, zostaje sama notka.
-- Pole odrzucone przez ekran albo schemat (etykiety, priorytet, osoby) jest
-  pomijane, a zgłoszenie i tak powstaje.
+  The texts are in the `ORIGIN_NOTE_TEMPLATE` and `COMMENT_PREFIX_TEMPLATE`
+  constants; disable with `--no-origin-note`.
+- **Labels** are moved 1:1 (spaces replaced with `_`, because Jira does not allow them).
+- **Priority** by name, but only from the priorities **allowed in the target
+  project** (the project's priority scheme). An unknown priority stays default and
+  is listed in the summary (`Priorytety ze źródła nieznane u nas` = source
+  priorities unknown on our side).
+- **A description rejected by Jira** (elements pointing to the other instance) is
+  first **cleaned**: mention → "@First Last", image/file → "[Anhang: name]",
+  link card → plain link, emoji/status/date → text (`[INFO] Opis oczyszczony` =
+  description cleaned). Only if that fails too does just the note remain.
+- A field rejected by the screen or scheme (labels, priority, people) is skipped,
+  and the issue is created anyway.
 
-#### Podział jednego źródła na kilka projektów
+#### Splitting one source into several projects
 
-`--only-statuses` / `--exclude-statuses` (nazwy statusów **źródła**, po przecinku)
-wybierają część zgłoszeń. Skrypt uruchamia się wtedy raz na każdy projekt docelowy,
-zwykle z tą samą listą raz w `--only-statuses`, raz w `--exclude-statuses`.
-Zasady, żeby nie rozrywać hierarchii:
+`--only-statuses` / `--exclude-statuses` (**source** status names, comma-separated)
+select part of the issues. The script then runs once per target project, usually
+with the same list once in `--only-statuses` and once in `--exclude-statuses`.
+Rules that keep the hierarchy intact:
 
-| Element | Gdzie trafia |
+| Element | Where it goes |
 |---|---|
-| Task, Bug, Story itd. | według **własnego** statusu |
-| Sub-task | **razem z rodzicem**, niezależnie od własnego statusu |
-| Epic z dziećmi | do **każdego** projektu, do którego trafia choć jedno jego dziecko (bez pustych duplikatów) |
-| Epic bez dzieci | według własnego statusu |
+| Task, Bug, Story etc. | according to its **own** status |
+| Sub-task | **together with its parent**, regardless of its own status |
+| Epic with children | to **every** project that receives at least one of its children (no empty duplicates) |
+| Epic without children | according to its own status |
 
-Przy podziale stan kopiowania jest prowadzony osobno dla pary `źródło>cel`
-(np. `WEB>CJD`, `WEB>PROJ4`), więc ten sam Epik może być w dwóch projektach.
-Sub-taski idą z rodzicem, więc mapa statusów projektu, do którego trafia rodzic,
-musi obejmować też statusy podzadań z drugiej grupy (inaczej w planie pojawi się
-`(domyślny)`).
+When splitting, the copy state is kept separately for each `source>target` pair
+(e.g. `WEB>CJD`, `WEB>PROJ4`), so the same Epic can exist in two projects.
+Sub-tasks go with their parent, so the status map of the project that receives
+the parent must also cover the subtask statuses from the other group (otherwise
+`(domyślny)` appears in the plan).
 
-#### Kopiowanie przyrostowe (nowości ze źródła)
+#### Incremental copy (new items from the source)
 
-Ponowne uruchomienie **tej samej komendy**:
-- tworzy tylko zgłoszenia, których nie ma jeszcze w stanie kopiowania,
-- dosyła nowe komentarze i załączniki do już skopiowanych,
-- z `--update-status` przestawia status już skopiowanych, gdy w źródle się zmienił
-  (ostatnio nadany status zapisuje się w stanie, więc kolejne przebiegi są szybkie),
-- z `--refresh-existing` uzupełnia już skopiowane: dopisuje etykiety, ustawia
-  priorytet i podmienia opis **tylko** tam, gdzie jest dziś sama notka,
-- przy podziale na projekty **nie dubluje** zadania, które w źródle przeszło do
-  statusu z drugiej grupy: zostaje w projekcie, do którego trafiło pierwotnie,
-  a skrypt wypisze je jako `Pomijam N zadań skopiowanych już do innego projektu`.
-  Jego status nie jest wtedy aktualizowany; o przeniesieniu decydujesz ręcznie.
+Re-running **the same command**:
+- creates only issues that are not yet in the copy state,
+- sends new comments and attachments to already copied issues,
+- with `--update-status` changes the status of already copied issues when it
+  changed in the source (the last applied status is saved in the state, so
+  subsequent runs are fast),
+- with `--refresh-existing` fills in already copied issues: adds labels, sets
+  priority and replaces the description **only** where it is just the note today,
+- when splitting into projects, **does not duplicate** a task that moved in the
+  source to a status of the other group: it stays in the project it originally
+  went to, and the script lists it as `Pomijam N zadań skopiowanych już do innego
+  projektu` (skipping N tasks already copied to another project). Its status is
+  then not updated; you decide about moving it by hand.
 
-Podgląd (`--dry-run`) rozróżnia: `NOWE do utworzenia` (z listą), `Już skopiowane`,
-`Zmiana statusu już skopiowanych` oraz `Skopiowane przed --update-status` (przy
-pierwszym użyciu tej opcji status każdego z nich zostanie sprawdzony raz).
+The preview (`--dry-run`) distinguishes: `NOWE do utworzenia` (new, to be created,
+with a list), `Już skopiowane` (already copied), `Zmiana statusu już skopiowanych`
+(status change of already copied) and `Skopiowane przed --update-status` (copied
+before `--update-status`; on the first use of this option the status of each of
+them is checked once).
 
-#### Uprawnienia
+#### Permissions
 
-Przed kopiowaniem zgłoszeń skrypt dodaje te same grupy i role co przy migracji
-(z `.env`, sekcje 5-6). Dodatkowe grupy: `--extra-group "Nazwa grupy=Nazwa roli"`
-(można powtarzać). Dla skonfigurowanego projektu użyj `--skip-access`.
+Before copying issues the script adds the same groups and roles as during the
+migration (from `.env`, sections 5-6). Extra groups:
+`--extra-group "Group name=Role name"` (can be repeated). For an already
+configured project use `--skip-access`.
 
-#### Gotowe komendy
+#### Ready-made commands
 
-Pierwsza kopia całego projektu:
+First copy of a whole project:
 ```bash
 python copy_project_cross_instance.py \
     --source-key WT --target-key WT --target-name "Webshop Testing" \
@@ -634,8 +664,8 @@ python copy_project_cross_instance.py \
     --done-status Done --other-status Misc \
     --user-map wt_user_map.json --skip-boards --dry-run
 ```
-Podział WEB na dwa istniejące projekty (CJD i PROJ4), także do późniejszego
-dociągania nowości:
+Splitting WEB into two existing projects (CJD and PROJ4), also for pulling in
+new items later:
 ```bash
 python copy_project_cross_instance.py \
     --source-key WEB --target-key CJD \
@@ -649,376 +679,369 @@ python copy_project_cross_instance.py \
     --status-map status_map_projekt2.json \
     --user-map wt_user_map.json --skip-boards --skip-access --update-status --dry-run
 ```
-Te same komendy bez `--dry-run` wykonują kopię. Można je bezpiecznie przerwać
-(`Ctrl+C`) i uruchomić ponownie; jedyny wyjątek to przerwanie w trakcie komentarzy
-jednego zgłoszenia, wtedy jego część komentarzy pojawi się drugi raz. Bezpieczniej
-przerywać na początku kolejnego zgłoszenia (linia `[n/N] ... -> Utworzono ...`).
+The same commands without `--dry-run` perform the copy. They can be safely
+interrupted (`Ctrl+C`) and run again; the only exception is an interruption while
+the comments of one issue are being copied, in which case some of its comments
+will appear twice. It is safer to interrupt at the start of the next issue (the
+line `[n/N] ... -> Utworzono ...` = created).
 
-#### Współistnienie z projektami synchronizowanymi z Asany
+#### Coexisting with projects synced from Asana
 
-Zgłoszenia skopiowane z innej instancji nie mają odpowiednika w Asanie.
-Wszystkie narzędzia porównujące Jirę z Asaną (`compare_project_totals.py`,
-`relink_state.py`, `handle_migrated_to_jira.py`) **pomijają** je na podstawie
-`cross_instance_copy_state.json` (komunikat `Pomijam N zgłoszeń skopiowanych
-z innej instancji Jiry`), a `resolve_relink_duplicates.py` nigdy ich nie usunie.
-Dlatego `cross_instance_copy_state.json` **nie wolno kasować**, dopóki projekt
-docelowy jest synchronizowany z Asaną. Statusy w tych zgłoszeniach wynikają ze
-źródła, więc nie zamykaj ich narzędziem `close_children_of_done.py --source jira`.
+Issues copied from another instance have no counterpart in Asana. All tools that
+compare Jira with Asana (`compare_project_totals.py`, `relink_state.py`,
+`handle_migrated_to_jira.py`) **skip** them based on
+`cross_instance_copy_state.json` (message `Pomijam N zgłoszeń skopiowanych
+z innej instancji Jiry` = skipping N issues copied from another Jira instance),
+and `resolve_relink_duplicates.py` will never delete them. That is why
+`cross_instance_copy_state.json` **must not be deleted** as long as the target
+project is synced with Asana. The statuses of these issues come from the source,
+so do not close them with `close_children_of_done.py --source jira`.
 
-**Alternatywa bez API:** w źródle eksport "Excel CSV (wszystkie pola)", u nas
-Ustawienia → System → Import z systemów zewnętrznych → CSV. Załączniki są wtedy
-tylko linkami do źródłowej instancji.
+**Alternative without the API:** in the source, export "Excel CSV (all fields)",
+on our side Settings → System → External system import → CSV. Attachments are
+then only links to the source instance.
 
-## 5. Automatyczne dodawanie grupy/użytkowników deweloperów
+## 5. Automatically adding a developer group/users
 
-Jeśli chcesz, żeby konkretna grupa Jira **i/lub** konkretni użytkownicy byli
-automatycznie dodawani do roli "Developers" (albo innej roli) w każdym nowo
-tworzonym projekcie, ustaw w `.env`:
+If you want a specific Jira group **and/or** specific users to be added
+automatically to the "Developers" role (or another role) in every newly created
+project, set in `.env`:
 
 ```
-DEVELOPER_GROUP_NAME=nazwa-grupy
+DEVELOPER_GROUP_NAME=group-name
 DEVELOPER_ACCOUNT_IDS=5b10a2844c20165700ede21,5c20a2844c20165700ede99
 DEVELOPER_ROLE_NAME=Developers
 ```
 
-Oba (grupa i lista użytkowników) działają **niezależnie** — możesz użyć jednego,
-drugiego, albo obu naraz (dwa osobne żądania do tej samej roli).
+Both (the group and the user list) work **independently** — you can use one,
+the other, or both at once (two separate requests to the same role).
 
-Skrypt raz na starcie sprawdzi, czy taka rola istnieje w Jirze, i jeśli tak —
-po każdym udanym utworzeniu projektu doda tę grupę do tej roli (dokłada, nie
-nadpisuje ewentualnych innych aktorów już przypisanych do roli). Jeśli rola o
-podanej nazwie nie istnieje, skrypt wypisze ostrzeżenie na starcie i nie doda
-grupy do żadnego projektu (żeby nie próbować bez sensu 550 razy).
+At startup the script checks once whether such a role exists in Jira, and if so —
+after every successfully created project it adds the group to that role (it adds,
+it does not overwrite other actors already assigned to the role). If a role with
+the given name does not exist, the script prints a warning at startup and does not
+add the group to any project (so it does not try pointlessly 550 times).
 
-Wymaga uprawnień *Administer Projects* dla tworzonych projektów albo
-*Administer Jira* — token użyty w `.env` musi je mieć, inaczej dostaniesz
-ostrzeżenie per-projekt w podsumowaniu (projekt i tak zostanie utworzony,
-tylko bez dodanej grupy — trzeba ją będzie dodać ręcznie).
+Requires *Administer Projects* permission for the created projects or *Administer
+Jira* — the token used in `.env` must have it, otherwise you get a per-project
+warning in the summary (the project is still created, just without the group —
+you will have to add it by hand).
 
-Nie masz pewności co do dokładnej nazwy grupy albo roli? Uruchom:
+Not sure about the exact group or role name? Run:
 ```bash
-python list_groups.py          # wszystkie grupy (opcjonalnie z fragmentem nazwy)
-python list_project_roles.py   # wszystkie role projektowe
+python list_groups.py          # all groups (optionally filtered by part of the name)
+python list_project_roles.py   # all project roles
 ```
 
-## 6. Automatyczne dodawanie administratora(ów)
+## 6. Automatically adding administrator(s)
 
-Analogicznie możesz dodać **jednego lub kilku konkretnych użytkowników**
-(np. siebie i kilku członków zespołu) do roli administratora w każdym nowo
-tworzonym projekcie:
+Similarly, you can add **one or several specific users** (e.g. yourself and a few
+team members) to the administrator role in every newly created project:
 
 ```
-ADMIN_ACCOUNT_ID=twój-accountId
+ADMIN_ACCOUNT_ID=your-accountId
 ADMIN_ROLE_NAME=Administrators
 ```
 
-Kilka osób naraz — rozdziel przecinkami (jedno żądanie do API na projekt,
-niezależnie od liczby osób):
+Several people at once — separate with commas (one API request per project,
+regardless of the number of people):
 ```
 ADMIN_ACCOUNT_ID=5b10a2844c20165700ede21,5c20a2844c20165700ede99
 ```
 
-`ADMIN_ACCOUNT_ID` to `accountId`, nie e-mail — znajdziesz go przez:
+`ADMIN_ACCOUNT_ID` is an `accountId`, not an e-mail — find it with:
 ```bash
-python get_my_account_id.py              # dla siebie
-python get_group_members.py "Nazwa grupy" # dla wielu osób z grupy naraz
+python get_my_account_id.py              # for yourself
+python get_group_members.py "Group name" # for many people in a group at once
 ```
 
-Działa identycznie jak grupa deweloperów (sekcja 5): sprawdzenie roli raz na
-starcie, dodanie po każdym utworzeniu projektu, ostrzeżenie zamiast twardego
-błędu, jeśli się nie powiedzie.
+Works exactly like the developer group (section 5): the role is checked once at
+startup, added after every created project, a warning instead of a hard error if
+it fails.
 
-**Dodatkowo:** możesz sprawić, żeby lead **każdego** projektu (różny per
-projekt — kolumna `lead_account_id` w arkuszu, albo `DEFAULT_LEAD_ACCOUNT_ID`)
-automatycznie dostawał uprawnienia administratora **w swoim własnym**
-projekcie, niezależnie od globalnej listy `ADMIN_ACCOUNT_ID` powyżej:
+**In addition:** you can make the lead of **every** project (different per
+project — the `lead_account_id` column in the sheet, or `DEFAULT_LEAD_ACCOUNT_ID`)
+automatically get administrator permissions **in their own** project, regardless
+of the global `ADMIN_ACCOUNT_ID` list above:
 
 ```
 ADD_LEAD_AS_ADMIN=true
 ```
 
-Oba mechanizmy łączą się w **jedno** żądanie do API na projekt (bez
-duplikatów, jeśli lead akurat jest też na liście `ADMIN_ACCOUNT_ID`).
+Both mechanisms are combined into **one** API request per project (without
+duplicates, if the lead also happens to be on the `ADMIN_ACCOUNT_ID` list).
 
-## 7. Format arkusza Google
+## 7. Google Sheet format
 
-Pierwszy wiersz to nagłówki (wielkość liter nieistotna). **`asana_project_link`
-jest bezwzględnie wymagany.** Bez niego (albo gdy dostęp do podanego linku się
-nie powiedzie, np. projekt prywatny bez dostępu dla tokena) — **cały wiersz
-jest pomijany, projekt NIE zostaje utworzony w Jirze** (nie tylko bez opisu —
-w ogóle). To celowe: dopasowanie po nazwie zostało usunięte jako zawodne
-(patrz sekcja `asana_project_link` niżej), więc bez linku nie ma bezpiecznego
-sposobu na jednoznaczne powiązanie z właściwym projektem w Asanie. Skrypt
-wypisuje zbiorcze podsumowanie wszystkich pominiętych wierszy na końcu
-przebiegu. `project_name` możesz zostawić puste, jeśli podałeś link — nazwa
-zostanie pobrana automatycznie z Asany. Reszta kolumn jest opcjonalna:
+The connection test in the panel (Start, step 2) checks the headers, the number of rows
+and rows without a valid Asana link. The first row contains headers (case-insensitive). **`asana_project_link` is
+strictly required.** Without it (or when access to the given link fails, e.g. a
+private project the token cannot access) — **the whole row is skipped, the
+project is NOT created in Jira** (not just without a description — not at all).
+This is deliberate: name-based matching was removed as unreliable (see
+`asana_project_link` below), so without a link there is no safe way to
+unambiguously link the row to the right Asana project. The script prints a
+combined summary of all skipped rows at the end of the run. `project_name` can be
+left empty if you provided a link — the name is fetched automatically from Asana.
+The remaining columns are optional:
 
 | project_name              | jira_key | jira_link | project_type_key | template_key | lead_account_id       | description | board_template_id | asana_project_link |
 |-----------------------------|----------|-----------|--------------------|-----------------|--------------------------|--------------|--------------------|----------------------|
-| Kampania Q4                 |          |           | software           |                 | 5b10a2844c20165700ede21 |              |                    | https://app.asana.com/0/1234567890123456/list |
-| Redesign strony głównej     |          |           | business           |                 |                          | Redesign UI  | 7276               | https://app.asana.com/0/1111111111111111/list |
-| *(puste — nazwa dociągnięta z linku)* |  |  |    |                 |                          |              |                    | https://app.asana.com/0/9876543210987654/list |
+| Q4 Campaign                 |          |           | software           |                 | 5b10a2844c20165700ede21 |              |                    | https://app.asana.com/0/1234567890123456/list |
+| Homepage redesign           |          |           | business           |                 |                          | Redesign UI  | 7276               | https://app.asana.com/0/1111111111111111/list |
+| *(empty — name pulled from the link)* |  |  |    |                 |                          |              |                    | https://app.asana.com/0/9876543210987654/list |
 
-- **`board_template_id`** — używane przez `bulk_configure_columns.py` (nie przez
-  `jira_sync.py`). ID tablicy wzorcowej dla UKŁADU KOLUMN tego konkretnego
-  projektu — przydatne, gdy projekt wzorcowy ma kilka tablic o różnych układach
-  (np. `REFERENCE2` ma zarówno 11-kolumnowy wzorzec na tablicy 6110, jak i
-  prostszy 4-kolumnowy na tablicach 7276/7273/7274/7275). Puste = użyty zostanie
-  domyślny wzorzec (`JIRA_TEMPLATE_BOARD_ID` z `.env`); wypełnione = użyta
-  zostanie dokładnie ta tablica — **per wiersz**, więc różne projekty mogą
-  korzystać z różnych wzorców w jednym przebiegu skryptu.
+- **`board_template_id`** — used by `bulk_configure_columns.py` (not by
+  `jira_sync.py`). The ID of the template board for the COLUMN LAYOUT of this
+  particular project — useful when the template project has several boards with
+  different layouts (e.g. `REFERENCE2` has both an 11-column template on board 6110
+  and a simpler 4-column one on boards 7276/7273/7274/7275). Empty = the default
+  template is used (`JIRA_TEMPLATE_BOARD_ID` from `.env`); filled = exactly this
+  board is used — **per row**, so different projects can use different templates
+  in one run.
 
-- **`asana_project_link`** — BEZPOŚREDNI link do projektu w Asanie (skopiowany
-  z paska adresu przeglądarki). To **jedyny** sposób identyfikacji projektu
-  Asany w całym pakiecie — dopasowanie po nazwie zostało **celowo usunięte**
-  (bywały duplikaty nazw projektów w Asanie, co prowadziło do synchronizacji
-  z niewłaściwym projektem — kosztowna lekcja z boleśnie długiego debugowania).
-  Obsługiwane formaty: `https://app.asana.com/0/<id>/list` oraz
-  `https://app.asana.com/1/<workspace>/project/<id>/list` (i warianty `/board`
-  zamiast `/list`). Używane przez `jira_sync.py` (wzbogacenie opisu),
-  `asana_jira_sync.py` i `jira_asana_sync.py` (synchronizacja zadań w obie strony).
+- **`asana_project_link`** — a DIRECT link to the project in Asana (copied from
+  the browser address bar). This is the **only** way the whole toolkit identifies
+  an Asana project — name-based matching was **deliberately removed** (there were
+  duplicate project names in Asana, which led to syncing with the wrong project —
+  a costly lesson from painfully long debugging). Supported formats:
+  `https://app.asana.com/0/<id>/list` and
+  `https://app.asana.com/1/<workspace>/project/<id>/list` (and `/board` variants
+  instead of `/list`). Used by `jira_sync.py` (description enrichment),
+  `asana_jira_sync.py` and `jira_asana_sync.py` (task sync in both directions).
 
-- **`jira_key` jest zapisywany z powrotem do arkusza automatycznie** po
-  wygenerowaniu (patrz sekcja 9) — więc nawet zostawiając to pole puste,
-  po pierwszym uruchomieniu będziesz mieć gotowe klucze do szybkiego
-  kopiowania (np. do ręcznej konfiguracji kolumn/statusów w Jirze).
+- **`jira_key` is written back to the sheet automatically** after it is generated
+  (see section 9) — so even if you leave this field empty, after the first run you
+  will have the keys ready to copy (e.g. for manual column/status configuration in Jira).
 
-- **`jira_link` (opcjonalna)** — jeśli dodasz tę kolumnę w nagłówku, skrypt
-  automatycznie zapisze tam też gotowy, klikalny link do projektu
-  (`.../browse/KLUCZ`), razem z zapisem `jira_key`. Bez tej kolumny wszystko
-  działa dokładnie tak samo, po prostu bez linków.
+- **`jira_link` (optional)** — if you add this column to the header, the script
+  automatically writes a ready, clickable link to the project there too
+  (`.../browse/KEY`), together with `jira_key`. Without this column everything
+  works exactly the same, just without links.
 
-- `lead_account_id` to `accountId` użytkownika w Jira (nie e-mail!). Znajdziesz go np. przez
-  `GET /rest/api/3/user/search?query=email@firma.com`, albo prościej — uruchom dołączony
-  `python get_my_account_id.py email@firma.com`. Jeśli wiersz nie ma leada, użyty zostanie
-  `DEFAULT_LEAD_ACCOUNT_ID` z `.env` (jeśli ustawiony). **Jira wymaga poprawnego leada przy
-  tworzeniu projektu** — jeśli oba pola są puste, skrypt zgłosi to jako czytelny błąd
-  zamiast wysyłać żądanie, które i tak zostałoby odrzucone.
+- `lead_account_id` is the user's `accountId` in Jira (not an e-mail!). You can find
+  it e.g. via `GET /rest/api/3/user/search?query=email@company.com`, or more simply —
+  run the included `python get_my_account_id.py email@company.com`. If the row has no
+  lead, `DEFAULT_LEAD_ACCOUNT_ID` from `.env` is used (if set). **Jira requires a
+  valid lead when creating a project** — if both fields are empty, the script
+  reports a readable error instead of sending a request that would be rejected anyway.
 
-## 8. Uruchomienie
+## 8. Running
 
-Najpierw podgląd, bez tworzenia czegokolwiek:
+First a preview, without creating anything:
 ```bash
 python jira_sync.py --dry-run
 ```
 
-Faktyczne utworzenie projektów:
+Actually creating the projects:
 ```bash
 python jira_sync.py
 ```
 
-Skrypt jest **idempotentny** — jeśli projekt o danym kluczu już istnieje w Jira,
-zostanie pominięty. Można go więc uruchamiać wielokrotnie (np. za każdym razem,
-gdy dodasz nowy wiersz do arkusza) bez ryzyka duplikatów.
+The script is **idempotent** — if a project with the given key already exists in
+Jira, it is skipped. So it can be run many times (e.g. every time you add a new row
+to the sheet) without the risk of duplicates.
 
-Równolegle, w kilku terminalach (każdy proces bierze swoją część arkusza):
+In parallel, in several terminals (each process takes its part of the sheet):
 ```bash
 python jira_sync.py --shard 1/3
 python jira_sync.py --shard 2/3
 python jira_sync.py --shard 3/3
 ```
-Wygodniej zrobić to przez orkiestrator: `python run_full_pipeline.py --only projects --parallel 3`
-(sekcja 11a).
+It is more convenient to do this via the orchestrator:
+`python run_full_pipeline.py --only projects --parallel 3` (section 11a).
 
-Kod wyjścia `2` oznacza **częściowe** niepowodzenie (część projektów powstała,
-część nie), `1` oznacza błąd krytyczny (np. brak `.env`). Orkiestrator przy
-kodzie `2` kontynuuje kolejne kroki dla projektów, które się udały.
+Exit code `2` means a **partial** failure (some projects were created, some were
+not), `1` means a critical error (e.g. missing `.env`). On code `2` the
+orchestrator continues the next steps for the projects that succeeded.
 
-## 9. Jak działa generowanie kluczy
+## 9. How key generation works
 
-Dla nazwy projektu bez podanego `jira_key`:
-1. Kilka słów → inicjały każdego słowa (np. "Portal Klienta B2B" → `PKB`).
-2. Jedno słowo → pierwsze do 10 znaków, wielkimi literami.
-3. **Minimum 6 znaków** — jeśli wynik jest krótszy, dopełniany kolejnymi
-   literami z nazwy, a w ostateczności literą "X" (np. "A" → `AXXXXX`).
-4. Jeśli wygenerowany klucz koliduje z już przydzielonym w tym samym przebiegu,
-   w cache, ALBO z **faktycznie istniejącym** projektem w Jirze (sprawdzane
-   na żywo przez API — nie tylko po naszym lokalnym cache), doklejany jest
-   numer (`PKB2`, `PKB3`, ...) i próba powtarza się.
-5. Wynik zapisywany jest do `project_key_cache.json` (trwały między uruchomieniami)
-   **oraz z powrotem do arkusza** (kolumna `jira_key`) — jednym zbiorczym
-   żądaniem na końcu całego przebiegu, nie w trybie `--dry-run`. Wymaga, żeby
-   konto serwisowe Google miało w arkuszu uprawnienia **Edytora**, nie tylko
-   Przeglądającego, i żeby kolumna `jira_key` już istniała w nagłówku.
+For a project name without a given `jira_key`:
+1. Several words → the initials of each word (e.g. "Portal Klienta B2B" → `PKB`).
+2. One word → the first up to 10 characters, uppercase.
+3. **At least 6 characters** — if the result is shorter, it is padded with further
+   letters from the name, and as a last resort with the letter "X" (e.g. "A" → `AXXXXX`).
+4. If the generated key collides with one already assigned in the same run, in the
+   cache, OR with an **actually existing** project in Jira (checked live via the
+   API — not only against our local cache), a number is appended
+   (`PKB2`, `PKB3`, ...) and the attempt is repeated.
+5. The result is saved to `project_key_cache.json` (persistent between runs)
+   **and back to the sheet** (the `jira_key` column) — with one batch request at the
+   end of the whole run, not in `--dry-run` mode. Requires the Google service
+   account to have **Editor** permissions on the sheet, not just Viewer, and the
+   `jira_key` column to already exist in the header.
 
-Jeśli chcesz mieć pełną kontrolę nad konkretnym kluczem — po prostu wpisz go
-ręcznie w kolumnie `jira_key` dla danego wiersza, a skrypt go nie nadpisze.
+If you want full control over a specific key — just type it by hand in the
+`jira_key` column for that row, and the script will not overwrite it.
 
-**Cache kluczowany jest po GID Asany, nie po nazwie projektu.** Dwa różne
-projekty Asany mogą mieć identyczną nazwę (np. dwa etapy tej samej umowy,
-"Miniaudit" i "Umsetzung", nazwane tak samo w arkuszu) — kluczowanie po
-nazwie błędnie przypisywało im TEN SAM klucz Jiry, mieszając ich zadania w
-jednym projekcie (kosztowna lekcja: przypadek `PROJ9`, poprawione). Każdy
-unikalny link Asany zawsze dostaje własny, osobny klucz.
+**The cache is keyed by the Asana GID, not by the project name.** Two different
+Asana projects can have identical names (e.g. two stages of the same contract,
+"Miniaudit" and "Umsetzung", named the same in the sheet) — keying by name wrongly
+assigned them THE SAME Jira key, mixing their tasks in one project (a costly
+lesson: the `PROJ9` case, fixed). Every unique Asana link always gets its own,
+separate key.
 
-**Ważne ograniczenie Jiry, niezależne od klucza:** Jira wymaga też **unikalnych
-NAZW** projektów, nie tylko unikalnych kluczy. Jeśli dwa wiersze w arkuszu mają
-identyczną nazwę (np. przez pusty `project_name`, dociągnięty automatycznie z
-identycznie nazwanego projektu w Asanie), drugi z nich **zawsze** dostanie błąd
-`400 A project with that name already exists`, niezależnie od tego, jak wiele
-różnych kluczy skrypt wypróbuje. Rozwiązanie: wpisz ręcznie różne nazwy w
-kolumnie `project_name` dla takich wierszy (nadpisuje automatyczne dociąganie
-z Asany — patrz sekcja 7).
+**An important Jira limitation, independent of the key:** Jira also requires
+**unique project NAMES**, not just unique keys. If two rows in the sheet have the
+same name (e.g. because of an empty `project_name`, pulled automatically from an
+identically named Asana project), the second one will **always** get the error
+`400 A project with that name already exists`, no matter how many different keys
+the script tries. Solution: type different names by hand in the `project_name`
+column for such rows (overrides the automatic pull from Asana — see section 7).
 
-**Zabezpieczenie przed pomyłką w arkuszu:** na starcie każdego przebiegu
-skrypt sprawdza, czy jakiś `jira_key` **wpisany ręcznie** w arkuszu nie
-występuje w dwóch wierszach z **różnymi** `asana_project_link` — jeśli tak,
-cały skrypt zatrzymuje się z czytelnym błędem, zanim cokolwiek zdąży się
-utworzyć/wymieszać (patrz `check_duplicate_sheet_rows.py` w sekcji 14, żeby
-to sprawdzić ręcznie w dowolnym momencie).
+**Protection against a mistake in the sheet:** at the start of every run the script
+checks whether a `jira_key` **typed by hand** in the sheet appears in two rows with
+**different** `asana_project_link` values — if so, the whole script stops with a
+readable error before anything gets created/mixed up (see
+`check_duplicate_sheet_rows.py` in section 14 to check this by hand at any time).
 
-## 10. Co skrypt wypisuje na końcu
+## 10. What the script prints at the end
 
-- liczbę utworzonych, zaktualizowanych (opis) i pominiętych projektów,
-- błędy (np. brak uprawnień, brak leada, zajęty klucz lub nazwa),
-- ostrzeżenia (np. nie udało się skopiować któregoś schematu z projektu wzorcowego
-  albo dodać roli),
-- listę wierszy pominiętych z powodu braku `asana_project_link` lub dostępu do
-  projektu w Asanie (te projekty **nie** zostały utworzone),
-- ścieżkę do pliku z mapowaniem (`project_key_cache.json`).
+- the number of created, updated (description) and skipped projects,
+- errors (e.g. missing permissions, missing lead, key or name already taken),
+- warnings (e.g. failed to copy one of the schemes from the template project
+  or to add a role),
+- the list of rows skipped because of a missing `asana_project_link` or no access
+  to the Asana project (these projects were **not** created),
+- the path to the mapping file (`project_key_cache.json`).
 
-Przy uruchomieniu przez `run_full_pipeline.py` te same liczby i szczegóły błędów
-trafiają do zbiorczego podsumowania kroku na Slacku (sekcja 13).
+When run through `run_full_pipeline.py`, the same numbers and error details go to
+the combined step summary on Slack (section 13).
 
-## 11. Synchronizacja zadań Asana → Jira (`asana_jira_sync.py`)
+## 11. Task sync Asana → Jira (`asana_jira_sync.py`)
 
-Osobny skrypt (obok `jira_sync.py`, który tworzy tylko *projekty*) — synchronizuje
-*zadania* wewnątrz już utworzonych projektów. Jednokierunkowo: Asana → Jira
-(kierunek zwrotny to osobny skrypt, `jira_asana_sync.py` — patrz sekcja 12).
+A separate script (next to `jira_sync.py`, which only creates *projects*) — it
+syncs *tasks* inside already created projects. One-way: Asana → Jira (the reverse
+direction is a separate script, `jira_asana_sync.py` — see section 12).
 
-### Co synchronizuje
+### What it syncs
 
-- Tytuł (skracany bezpiecznie do 255 znaków — limit Jiry — z pełną wersją
-  zachowaną na początku opisu, jeśli oryginał był dłuższy), opis (z bogatym
-  formatowaniem: linki, listy, pogrubienie/kursywa/podkreślenie/przekreślenie),
-  przypisany, termin — zawsze, i tylko jeśli faktycznie się zmieniły.
-- Status — przez sekcję Asany, zmapowaną na status Jira (patrz niżej).
-  Sprawdzany PRZY KAŻDYM uruchomieniu, niezależnie od tego, czy inne pola
-  się zmieniły (przeniesienie między sekcjami nie zawsze aktualizuje
-  znacznik czasu zadania w Asanie).
-- Komentarze — tylko prawdziwe (bez zdarzeń systemowych typu "zmienił termin"),
-  z prefiksem `[Asana — Autor, data]` w treści (Jira nie pozwala podszyć się
-  pod oryginalnego autora bez dodatkowej konfiguracji).
-- Załączniki — pobierane z Asany i wgrywane do Jiry.
-- **Podzadania i hierarchia**: podzadania z Asany jako Sub-taski, a dla zadań
-  z trzema poziomami zagnieżdżenia pełna struktura Epic → Task → Sub-task
-  (szczegóły w podsekcji niżej).
-- **Fallback assignee** — jeśli przypisany z Asany nie może być przypisany w projekcie
-  Jira (żadna jego rola nie ma „Assignable User” w schemacie uprawnień), NOWE zadanie
-  powstaje bez przypisanego (lead projektu tylko wtedy, gdy projekt nie pozwala na
-  nieprzypisane). W JUŻ utworzonych zadaniach przypisany zostaje bez zmian, a tytuł,
-  opis i termin zapisują się normalnie.
-- **Fallback formatowania** — jeśli konwersja HTML→ADF wygeneruje strukturę,
-  którą Jira odrzuci jako niepoprawną (rzadkie, ale się zdarza), skrypt
-  automatycznie ponawia z opisem jako zwykłym tekstem (bez formatowania)
-  zamiast tracić całe zadanie.
+- Title (safely truncated to 255 characters — the Jira limit — with the full
+  version kept at the start of the description if the original was longer),
+  description (with rich formatting: links, lists, bold/italic/underline/
+  strikethrough), assignee, due date — always, and only if they actually changed.
+- Status — via the Asana section, mapped to a Jira status (see below). Checked ON
+  EVERY run, regardless of whether other fields changed (moving between sections
+  does not always update the task's timestamp in Asana).
+- Comments — only real ones (without system events like "changed the due date"),
+  with a `[Asana — Author, date]` prefix in the body (Jira does not allow
+  impersonating the original author without extra configuration).
+- Attachments — downloaded from Asana and uploaded to Jira.
+- **Subtasks and hierarchy**: Asana subtasks as Sub-tasks, and for tasks with
+  three levels of nesting the full Epic → Task → Sub-task structure (details in
+  the subsection below).
+- **Fallback assignee** — if the Asana assignee cannot be assigned in the Jira project
+  (none of their roles has "Assignable User" in the permission scheme), a NEW issue is
+  created without an assignee (the project lead only when the project does not allow
+  unassigned issues). In ALREADY created issues the assignee is left unchanged, and the
+  summary, description and due date are saved as usual.
+- **Formatting fallback** — if the HTML→ADF conversion produces a structure Jira
+  rejects as invalid (rare, but it happens), the script automatically retries with
+  the description as plain text (without formatting) instead of losing the whole task.
 
-### Hierarchia zadań: Epic → Task → Sub-task
+### Task hierarchy: Epic → Task → Sub-task
 
-Jira ma trzy poziomy (Epic, Task, Sub-task), a Sub-task nie może mieć własnych
-podzadań. Asana pozwala zagnieżdżać dowolnie głęboko, więc skrypt stosuje reguły:
+Jira has three levels (Epic, Task, Sub-task), and a Sub-task cannot have its own
+subtasks. Asana allows nesting arbitrarily deep, so the script applies these rules:
 
-| W Asanie | W Jirze |
+| In Asana | In Jira |
 |---|---|
-| zadanie bez podzadań podzadań | Task |
-| jego podzadanie | Sub-task pod tym Taskiem |
-| zadanie, którego podzadanie ma własne podzadania (kandydat na Epic) | Epic |
-| podzadanie kandydata | Task pod Epikiem |
-| podzadanie takiego Taska | Sub-task |
-| głębsze poziomy (dowolnie głęboko) | Sub-task pod najbliższym przodkiem, który nie jest Sub-taskiem (spłaszczenie) |
+| task without sub-subtasks | Task |
+| its subtask | Sub-task under that Task |
+| task whose subtask has its own subtasks (Epic candidate) | Epic |
+| subtask of the candidate | Task under the Epic |
+| subtask of such a Task | Sub-task |
+| deeper levels (arbitrarily deep) | Sub-task under the nearest ancestor that is not a Sub-task (flattening) |
 
-Synchronizacja schodzi rekurencyjnie na wszystkie poziomy, a listę zadań
-projektu porządkuje tak, żeby rodzic zawsze był przetworzony przed dzieckiem
-(Asana zwraca na liście projektu także podzadania dodane do projektu, w
-dowolnej kolejności). **Starsze wersje** miały tu dwa błędy: pomijały podzadania
-od drugiego poziomu w dół (jeśli pośrednie podzadanie nie było na liście
-projektu) i tworzyły podzadanie jako samodzielny Task, gdy stało na liście przed
-rodzicem. Projekty zsynchronizowane wcześniej sprawdza i naprawia sekcja 15e, a
-brakujące zadania dociąga zwykła ponowna synchronizacja.
+The sync descends recursively into all levels and orders the project's task list
+so that a parent is always processed before its child (Asana's project list also
+returns subtasks added to the project, in any order). **Older versions** had two
+bugs here: they skipped subtasks from the second level down (if the intermediate
+subtask was not on the project list) and created a subtask as a standalone Task
+when it came before its parent on the list. Projects synced earlier are checked
+and fixed by section 15e, and missing tasks are pulled in by a regular re-sync.
 
-Kandydatów na Epic wykrywa **przed** synchronizacją `detect_epic_candidates.py`
-i zapisuje ich listę do `epic_candidates.json`, który `asana_jira_sync.py`
-czyta automatycznie:
+Epic candidates are detected **before** the sync by `detect_epic_candidates.py`,
+which saves their list to `epic_candidates.json`, read automatically by
+`asana_jira_sync.py`:
 ```bash
-python detect_epic_candidates.py                           # wszystkie projekty z arkusza
-python detect_epic_candidates.py --project-keys KLUCZ1,KLUCZ2
-python detect_epic_candidates.py --shard 1/3               # równolegle
-python detect_epic_candidates.py --project-keys KLUCZ --force   # skanuj ponownie, mimo że projekt już jest w pliku
+python detect_epic_candidates.py                           # all projects from the sheet
+python detect_epic_candidates.py --project-keys KEY1,KEY2
+python detect_epic_candidates.py --shard 1/3               # in parallel
+python detect_epic_candidates.py --project-keys KEY --force   # rescan even though the project is already in the file
 ```
-Domyślnie skrypt **wznawia pracę**: pomija projekty już zapisane w pliku. Po
-zmianie struktury w Asanie albo po naprawach hierarchii użyj `--force` dla
-dotkniętych projektów.
+By default the script **resumes**: it skips projects already saved in the file.
+After the structure changes in Asana or after hierarchy repairs, use `--force` for
+the affected projects.
 
-Podzadanie, które ktoś **dodatkowo dodał do projektu** w Asanie, widać na liście
-zadań projektu jak zwykłe zadanie. Skrypt je rozpoznaje (ma rodzica w tym samym
-projekcie) i nie traktuje go jako zadania najwyższego poziomu. Bez tego filtra
-takie podzadanie mogło zostać fałszywym Epikiem; jak naprawić Epiki utworzone
-przed wprowadzeniem filtra, opisuje sekcja 15.
+A subtask that someone **additionally added to the project** in Asana shows up on
+the project's task list like a regular task. The script recognizes it (it has a
+parent in the same project) and does not treat it as a top-level task. Without this
+filter such a subtask could become a false Epic; section 15 describes how to fix
+Epics created before the filter was introduced.
 
-Typ i rodzic zgłoszenia są ustawiane **tylko przy tworzeniu**. Kolejne
-uruchomienia aktualizują treść i status, ale nie przestawiają hierarchii.
-Zmiany struktury już zmigrowanych zadań robią narzędzia z sekcji 15.
+The issue type and parent are set **only on creation**. Subsequent runs update the
+content and status but do not rearrange the hierarchy. Structure changes of already
+migrated tasks are done by the tools in section 15.
 
-### Jak nie duplikować przy wielokrotnym uruchomieniu
+### How to avoid duplicates on repeated runs
 
-Lokalny plik `task_sync_state.json` (tworzony automatycznie, **nie kasować
-między uruchomieniami**) zapamiętuje dla każdego zadania: jego klucz Jira,
-ostatni znany `modified_at` z Asany, ID już przeniesionych komentarzy
-i załączników oraz flagi hierarchii (`is_epic`, `is_subtask`,
-`top_level_ancestor_key`, czyli miejsce, pod które trafiają nowe podzadania
-zadania będącego Sub-taskiem). Flagi po naprawach hierarchii odświeża
-`refresh_state_flags.py` (sekcja 15). Zadania usunięte ręcznie w Jirze mogą
-być oznaczone `deleted_in_jira` i są wtedy trwale pomijane (sekcja 14e). Zapisywany **po każdym pojedynczym zadaniu** (nie dopiero po
-całym projekcie) — bezpieczne nawet jeśli internet padnie w połowie przebiegu
-(sprawdzone boleśnie w praktyce). Bezpieczny też przy kilku równoległych
-instancjach uruchomionych na RÓŻNYCH projektach naraz: każdy proces zapamiętuje
-migawkę stanu z chwili wczytania i zapisuje **wyłącznie wpisy, które sam zmienił**
-(z blokadą pliku). **Starsze wersje** scalały cały projekt z chwili startu, więc
-równoległe procesy kasowały sobie nawzajem świeżo dodane wpisy. Skutek: zgubione
-powiązania, a przy kolejnych synchronizacjach całe serie duplikatów. Takie
-projekty naprawia procedura z sekcji 15f-15i.
+A local `task_sync_state.json` file (created automatically, **do not delete
+between runs**) remembers for each task: its Jira key, the last known `modified_at`
+from Asana, the IDs of already transferred comments and attachments, and hierarchy
+flags (`is_epic`, `is_subtask`, `top_level_ancestor_key`, i.e. where new subtasks
+of a task that is a Sub-task go). The flags are refreshed after hierarchy repairs by
+`refresh_state_flags.py` (section 15). Tasks deleted by hand in Jira can be marked
+`deleted_in_jira` and are then permanently skipped (section 14e). It is saved
+**after every single task** (not only after the whole project) — safe even if the
+internet goes down halfway through a run (learned the hard way). Also safe with
+several parallel instances running on DIFFERENT projects at once: each process
+remembers a snapshot of the state from the moment it was loaded and writes **only
+the entries it changed itself** (with a file lock). **Older versions** merged the
+whole project as of start time, so parallel processes deleted each other's freshly
+added entries. The result: lost links and, on later syncs, whole series of
+duplicates. Such projects are fixed by the procedure in sections 15f-15i.
 
-**Zapis jest atomowy** (tymczasowy plik + `os.replace`, z blokadą `fcntl`) —
-odporny na race condition przy dużej równoległości (`--parallel` w
-`run_full_pipeline.py`): odczyt w trakcie zapisu przez inny proces nie
-skończy się uszkodzonym JSON-em. Jeśli mimo to plik kiedyś się uszkodzi
-(np. po `Ctrl+C` w złym momencie), użyj `repair_state_file.py` (sekcja 14).
+**The write is atomic** (temporary file + `os.replace`, with an `fcntl` lock) —
+resistant to race conditions at high parallelism (`--parallel` in
+`run_full_pipeline.py`): reading while another process is writing will not end in
+corrupted JSON. If the file still gets corrupted at some point (e.g. after `Ctrl+C`
+at the wrong moment), use `repair_state_file.py` (section 14).
 
-**Ponawianie przy błędach przejściowych** — wszystkie zapytania do Asany i
-Jiry (w tym rate limit `429`, z uwzględnieniem nagłówka `Retry-After`) są
-automatycznie ponawiane z rosnącym opóźnieniem, zamiast od razu przerywać
-całe zadanie.
+**Retrying on transient errors** — all requests to Asana and Jira (including the
+`429` rate limit, honouring the `Retry-After` header) are retried automatically
+with increasing delay, instead of aborting the whole task right away.
 
-### Link do Asany w każdym zgłoszeniu
+### Link to Asana in every issue
 
-Każde zgłoszenie dostaje jednorazowo **link zdalny** do swojego zadania w Asanie
-(sekcja "Linki" w Jirze, relacja "Asana", identyfikator `asana:task:<gid>`).
-Flaga `asana_link` w stanie zapobiega dodawaniu go przy każdym przebiegu. Link
-pozwala zespołowi przejść do oryginału i jest najpewniejszą podstawą do
-odtwarzania powiązań (`relink_state.py`, przebieg `LINK`, sekcja 15f).
-W podsumowaniu: `Linki do Asany dodane`.
+Every issue gets a one-time **remote link** to its task in Asana (the "Links"
+section in Jira, relation "Asana", identifier `asana:task:<gid>`). The `asana_link`
+flag in the state prevents adding it on every run. The link lets the team jump to
+the original and is the most reliable basis for restoring links (`relink_state.py`,
+the `LINK` pass, section 15f). In the summary: `Linki do Asany dodane` (links to
+Asana added).
 
-### Wyłączanie projektów: `sync_exclude.txt` i `protected_projects.txt`
+### Excluding projects: `sync_exclude.txt` and `protected_projects.txt`
 
-| Plik | Działa na | Kiedy używać |
+| File | Affects | When to use |
 |---|---|---|
-| `sync_exclude.txt` | tylko synchronizację (oba kierunki, także `--project-keys` i podgląd) | **tymczasowo**, na czas naprawy projektu; narzędzia naprawcze działają normalnie |
-| `protected_projects.txt` | synchronizację, pipeline i **wszystkie** narzędzia zmieniające dane, także przy kluczu podanym wprost | **trwale**, gdy projekt nie może być ruszany (np. zespół pracuje już tylko w Jirze) |
+| `sync_exclude.txt` | sync only (both directions, also `--project-keys` and preview) | **temporarily**, while a project is being repaired; repair tools work normally |
+| `protected_projects.txt` | sync, the pipeline and **all** tools that change data, also when the key is given explicitly | **permanently**, when a project must not be touched (e.g. the team now works only in Jira) |
 
-Format obu: jeden klucz w linii, `#` = komentarz:
+Format of both: one key per line, `#` = comment:
 ```
-PROJ3   # zespół pracuje w Jirze, bez synchronizacji i napraw
+PROJ3   # team works in Jira, no sync and no repairs
 ```
-Projekty z `protected_projects.txt` znikają z arkusza dla wszystkich skryptów
-(`jira_sync.get_sheet_rows()`), a narzędzia działające na pliku stanu albo na
-kluczach podanych wprost (`refresh_state_flags`, `fix_stale_resolution`,
-`close_children_of_done`, `relink_state`, `resolve_relink_duplicates`,
-`handle_migrated_to_jira`, `audit_hierarchy`, `remove_status_from_column`,
-`repair_batch`) pomijają je z komunikatem `[CHRONIONE]`. Konsekwencja: także
-porównanie nie pokaże takiego projektu; żeby go podejrzeć, zakomentuj chwilowo
-jego linię.
+Projects from `protected_projects.txt` disappear from the sheet for all scripts
+(`jira_sync.get_sheet_rows()`), and tools working on the state file or on explicitly
+given keys (`refresh_state_flags`, `fix_stale_resolution`, `close_children_of_done`,
+`relink_state`, `resolve_relink_duplicates`, `handle_migrated_to_jira`,
+`audit_hierarchy`, `remove_status_from_column`, `repair_batch`) skip them with the
+message `[CHRONIONE]` (protected). Consequence: the comparison will not show such a
+project either; to look at it, temporarily comment out its line.
 
-Zdejmowanie partii projektów z `sync_exclude.txt` bez ruszania reszty pliku:
+Removing a batch of projects from `sync_exclude.txt` without touching the rest of the file:
 ```bash
 python3 - partia.txt << 'PY'
 import sys, re
@@ -1029,103 +1052,118 @@ open("sync_exclude.txt", "w", encoding="utf-8").write("\n".join(keep) + "\n")
 print(f"Zdjęto linii: {len(lines) - len(keep)}")
 PY
 ```
-Komunikat liczy usunięte **linie**: jeśli projekt był wpisany dwa razy, liczba
-będzie większa niż liczba projektów. Podwójne wpisy usuwa
+The message counts removed **lines**: if a project was listed twice, the number
+will be higher than the number of projects. Duplicate entries are removed with
 `awk '{k=$1} !seen[k]++' sync_exclude.txt > tmp && mv tmp sync_exclude.txt`.
 
-### Zadania przeniesione ręcznie do Jiry ("migriert zu Jira")
+### Tasks moved to Jira by hand ("migriert zu Jira")
 
-Zespoły bywa, że przenoszą zadanie do Jiry ręcznie i oznaczają je w Asanie
-dopiskiem, np. "Agenda JF (migriert zu Jira)" (także z literówką "mirgiert").
-Dla takich zadań źródłem prawdy jest Jira, więc synchronizacja pomija je **razem
-z całym poddrzewem**: nie tworzy ich i nie aktualizuje. To samo dotyczy wpisów
-oznaczonych w stanie flagą `jira_master` (ustawia ją `handle_migrated_to_jira.py`,
-sekcja 15h). Wzorzec (wyrażenie regularne, bez wielkości liter) można zmienić
-w `.env`:
+Teams sometimes move a task to Jira by hand and mark it in Asana with a note, e.g.
+"Agenda JF (migriert zu Jira)" (also with the typo "mirgiert"). For such tasks Jira
+is the source of truth, so the sync skips them **together with their whole
+subtree**: it neither creates nor updates them. The same applies to entries marked
+in the state with the `jira_master` flag (set by `handle_migrated_to_jira.py`,
+section 15h). The pattern (a case-insensitive regular expression) can be changed in `.env`:
 ```
 MIGRATED_TO_JIRA_PATTERN=mi[rg]{1,2}r?iert\s+zu\s+jira
 ```
-W podsumowaniu: `prowadzone w Jirze ('migriert zu Jira')`. Zespołom warto
-przekazać: przy ręcznym przeniesieniu zadania do Jiry dopisać to w Asanie.
+In the summary: `prowadzone w Jirze ('migriert zu Jira')` (maintained in Jira).
+Worth telling the teams: when moving a task to Jira by hand, note it in Asana.
 
-### Konfiguracja przed pierwszym uruchomieniem
+### Configuration before the first run
 
-1. **`asana_project_link` w arkuszu** — wymagany dla każdego wiersza (patrz
-   sekcja 7). Bez niego projekt jest pomijany z czytelnym ostrzeżeniem.
+1. **`asana_project_link` in the sheet** — required for every row (see section 7).
+   Without it the project is skipped with a readable warning.
 
-2. **Wymagane pola** — Twój projekt wzorcowy może mieć pola obowiązkowe przy
-   tworzeniu zadania (np. niestandardowe "Type", "Department"), których Asana
-   nie ma. Sprawdź je:
+2. **Required fields** — your template project may have fields that are mandatory
+   when creating an issue (e.g. custom "Type", "Department") that Asana does not
+   have. Check them:
    ```bash
-   python check_required_fields.py KLUCZPROJEKTU
+   python check_required_fields.py PROJECTKEY
    ```
-   Pola z jedną dozwoloną wartością uzupełniają się automatycznie. Pole "Type"
-   ma ustawioną wartość domyślną `NONBILLABLE` (zmień w `.env`:
-   `DEFAULT_TYPE_FIELD_VALUE=...`, albo `DEFAULT_TYPE_FIELD_ID=...`, jeśli to
-   inne pole niż `customfield_10188`).
+   The connection test in the panel lists such fields for the template project. Fields
+   with a single allowed value are filled automatically. For one field with several
+   values set `DEFAULT_TYPE_FIELD_ID` and `DEFAULT_TYPE_FIELD_VALUE`; when neither variable
+   is in `.env`, the script uses `customfield_10188` = `NONBILLABLE` (the "Type" field of
+   the instance the toolkit was built for), and an empty value switches this off.
 
-3. **Mapowanie sekcja Asany → status Jira** — sekcje Asany bywają etapami/
-   kamieniami milowymi (np. "3. Kickoff"), nie nazwami pasującymi wprost do
-   statusów Jiry ("In Progress"). Wypisz sekcje **jednego** projektu:
+3. **Asana section → Jira status mapping** — Asana sections are often stages/
+   milestones (e.g. "3. Kickoff"), not names matching Jira statuses directly
+   ("In Progress").
+
+   **In the panel: "Status mapping"** (part I) - sections from all sheet projects ↔ the
+   template project's statuses, only statuses that exist in the template, with
+   suggestions and an explicit status for completed tasks (`__ukonczone__`).
+
+   **From the terminal** - list the sections of **one** project:
    ```bash
-   python list_asana_sections.py "Dokładna nazwa projektu w Asanie"
+   python list_asana_sections.py "Exact project name in Asana"
    python list_asana_sections.py --link "https://app.asana.com/0/123456789/list"
    ```
-   Albo, przy wielu projektach naraz — wypisz **unikalne** sekcje ze
-   **wszystkich** wierszy arkuszu jednym przebiegiem (z gotowym formatem
-   `"sekcja: przykładowy projekt": "",` do wklejenia, i automatycznym
-   porównaniem z tym, co już masz zmapowane):
+   Or, with many projects at once — list the **unique** sections from **all** sheet
+   rows in one pass (in a ready `"section: example project": "",` format to paste,
+   with an automatic comparison with what you have already mapped):
    ```bash
    python list_all_asana_sections.py
-   python list_all_asana_sections.py --limit 10          # test na próbce
-   python list_all_asana_sections.py --save wynik.json   # zapis do pliku
+   python list_all_asana_sections.py --limit 10          # test on a sample
+   python list_all_asana_sections.py --save wynik.json   # save to a file
    ```
-   **Ważne:** wklejony w ten sposób klucz zawiera dopisany przykładowy
-   projekt (po dwukropku) — to tylko podpowiedź kontekstu, nie prawdziwa
-   nazwa sekcji. Przed zapisaniem do `section_status_map.json` odetnij część
-   po **ostatnim** `": "` (chyba że prawdziwa nazwa sekcji sama zawiera
-   dwukropek — wtedy sprawdź ręcznie, który dwukropek jest "Twój").
+   **Important:** a key pasted this way contains an appended example project
+   (after the colon) — it is only a context hint, not the real section name. Before
+   saving to `section_status_map.json`, cut off the part after the **last** `": "`
+   (unless the real section name itself contains a colon — then check by hand which
+   colon is "yours").
 
-   Uzupełnij `section_status_map.json` (klucz = **czysta** nazwa sekcji,
-   wartość = nazwa statusu Jira **albo lista statusów**, np.
-   `["In progress", "Feedback Required"]` — przydatne, gdy jedna sekcja w
-   prostym projekcie ma sensownie odpowiadać kilku bardziej szczegółowym
-   statusom przy kierunku zwrotnym). Ta tabela jest globalna — współdzielona
-   między wszystkimi projektami i OBOMA kierunkami synchronizacji, dokładaj
-   wpisy w miarę odkrywania nowych sekcji. Sekcja bez wpisu = zadanie
-   zostaje przy domyślnym statusie startowym (skrypt wypisze listę takich
-   sekcji na końcu przebiegu). Nazwa sekcji jest automatycznie **oczyszczana
-   z białych znaków** na początku/końcu przed porównaniem z mapą — sekcja
-   `"Prio "` (ze spacją, jak bywa w Asanie) poprawnie dopasuje się do wpisu
-   `"Prio"` w mapie.
+   Fill in `section_status_map.json` (key = the **clean** section name, value = the
+   Jira status name **or a list of statuses**, e.g. `["In progress", "Feedback
+   Required"]` — useful when one section in a simple project should sensibly map to
+   several more detailed statuses in the reverse direction). This table is global —
+   shared between all projects and BOTH sync directions; add entries as you discover
+   new sections. A section without an entry = the task keeps the default starting
+   status (the script prints a list of such sections at the end of the run). The
+   section name is automatically **stripped of whitespace** at the start/end before
+   comparing with the map — the section `"Prio "` (with a space, as happens in Asana)
+   correctly matches the `"Prio"` entry in the map.
 
-4. **Mapowanie użytkowników** — bez tego zadania importują się bez
-   przypisanego użytkownika:
+4. **User mapping** — without it tasks are imported without an assignee. **In the panel:
+   "People mapping"** (part I) - Asana people ↔ accounts from selected Jira groups, with
+   suggestions; people without an account are marked "not in Jira"
+   (`asana_users_not_in_jira.json`). An issue can only be assigned to a person whose
+   project role has "Assignable User" in the permission scheme - mapping alone (or being
+   the project lead) does not grant it; "Statuses and people" in the panel shows the scheme
+   and the roles with that permission. From the terminal:
    ```bash
    python generate_user_map.py
    ```
-   Dopasowuje automatycznie po adresie e-mail; jeśli adresy w Jirze mają stały
-   wzorzec (`Imię.Nazwisko@domena`, różny od adresu w Asanie), skrypt próbuje
-   też zbudować taki adres z imienia/nazwiska (z wariantem transliterowanym
-   niemieckich znaków ü/ö/ä/ß). Domena ustawiana przez `JIRA_EMAIL_DOMAIN`
-   w `.env` (gdy brak zmiennej: domena instancji, dla której pakiet powstał). Domyślnie **pomija gości** Asany —
-   żeby ich uwzględnić: `python generate_user_map.py --include-guests`.
-   Wynik: `user_map.json`. Osoby niedopasowane automatycznie możesz dopisać
-   ręcznie do tego pliku (`"asana_user_gid": "jira_accountId"`), albo znaleźć
-   gid Asany przez `python list_asana_members.py`.
+   It matches automatically by e-mail address; if the addresses in Jira follow a
+   fixed pattern (`First.Last@domain`, different from the address in Asana), the
+   script also tries to build such an address from the first/last name (with a
+   transliterated variant of the German characters ü/ö/ä/ß). The domain is set by
+   `JIRA_EMAIL_DOMAIN` in `.env` (if unset: the domain of the instance the toolkit was built for). By default it **skips
+   Asana guests** — to include them: `python generate_user_map.py --include-guests`.
+   Result: `user_map.json` (**overwritten entirely** - which is why the "not in Jira" list
+   lives in a separate file). People not matched automatically can be added to this
+   file by hand (`"asana_user_gid": "jira_accountId"`), and the Asana gid can be
+   found with `python list_asana_members.py`.
 
-### Statusy: mapa sekcji, mapy projektów, zadania ukończone i podzadania
+### Statuses: section map, project maps, completed tasks and subtasks
 
-**Zadania z listy projektu** dostają status według sekcji Asany przy **każdym**
-przebiegu (nie tylko przy tworzeniu), z `section_status_map.json`. Zadanie
-**odhaczone** w Asanie dostaje status końcowy niezależnie od sekcji.
+**Tasks on the project list** get a status according to their Asana section on
+**every** run (not only on creation), from `section_status_map.json`. A task
+**checked off** in Asana gets the final status regardless of the section.
 
-**Mapa dla jednego projektu:** gdy projekt ma inne statusy niż standardowe albo
-te same nazwy sekcji mają w nim prowadzić gdzie indziej, obok głównej mapy
-tworzysz `section_status_map.<KLUCZ>.json` (dwie kropki, klucz wielkimi literami,
-dokładnie jak w Jirze). Jego wpisy mają pierwszeństwo, ale tylko w tym projekcie;
-główna mapa zostaje nietknięta. Wpis `"__ukonczone__"` wskazuje status dla
-zadań odhaczonych w Asanie w tym projekcie (pierwszeństwo przed mapą główną; gdy brak w obu - `Fertig`):
+**The final status** is the `"__ukonczone__"` entry: first from the project map, then from
+the main map, and if neither has it - `Fertig` (a status of the instance the toolkit was
+built for; on another Jira set `__ukonczone__` in the main map - the panel does this in
+"Status mapping"). If that status does not exist in the project, the issue gets the status
+from its section and the script prints a warning.
+
+**A map for a single project:** when a project has statuses other than the standard
+ones, or the same section names should lead somewhere else in it, create
+`section_status_map.<KEY>.json` next to the main map (two dots, the key in uppercase,
+exactly as in Jira). Its entries take precedence, but only in that project; the main
+map stays untouched. The `"__ukonczone__"` ("completed") entry gives the status for
+tasks checked off in Asana in that project (takes precedence over the main map; if neither has it - `Fertig`):
 ```json
 {
   "__ukonczone__": "Live",
@@ -1136,301 +1174,295 @@ zadań odhaczonych w Asanie w tym projekcie (pierwszeństwo przed mapą główn�
   "Live": "Live"
 }
 ```
-Sprawdzenie, czy plik jest wczytywany (pusty słownik = zła nazwa pliku):
+Checking whether the file is loaded (an empty dict = wrong file name):
 ```bash
 python3 -c "import asana_jira_sync as a; print(a.project_section_overrides('PROJ'))"
 ```
-Kierunek zwrotny (Jira → Asana) korzysta z tego samego pliku. Wyłączenie mapy
-projektu: zmień nazwę pliku (np. dopisz `.wylaczona`). Przed powrotem do głównej
-mapy upewnij się, że workflow projektu ma statusy, na które ona wskazuje.
+The reverse direction (Jira → Asana) uses the same file. Disabling a project map:
+rename the file (e.g. append `.wylaczona`). Before going back to the main map, make
+sure the project's workflow has the statuses it points to.
 
-**Podzadania** (wszystkie poziomy):
+**Subtasks** (all levels):
 
-| W Asanie | Status w Jirze |
+| In Asana | Status in Jira |
 |---|---|
-| podzadanie odhaczone | status końcowy (`__ukonczone__` projektu, mapy głównej albo `Fertig`) |
-| otwarte podzadanie pod **odhaczonym** zadaniem (na dowolnym poziomie) | status końcowy |
-| otwarte podzadanie z **własną** sekcją (dodane też do listy projektu) | według swojej sekcji (pierwszeństwo) |
-| pozostałe otwarte podzadania | status zadania najwyższego poziomu według jego sekcji |
+| subtask checked off | final status (`__ukonczone__` of the project, of the main map, or `Fertig`) |
+| open subtask under a **checked-off** task (at any level) | final status |
+| open subtask with its **own** section (also added to the project list) | according to its section (takes precedence) |
+| other open subtasks | the status of the top-level task according to its section |
 
-Ostatnio nadany status jest zapisywany w stanie (`status_applied`), więc
-przestawiany jest tylko wtedy, gdy wynik się zmienia. Pierwszy przebieg po tej
-zmianie ustawia statusy **wszystkim** podzadaniom projektu.
+The last applied status is saved in the state (`status_applied`), so it is changed
+only when the result changes. The first run after this change sets the statuses of
+**all** subtasks of the project.
 
-Sekcje bez mapowania wypisywane są na końcu podsumowania ("Sekcje BEZ wpisu
-w section_status_map.json"). Warianty z literówką dopisuje się do mapy jako
-osobne klucze z tym samym statusem, bezpiecznie np. tak:
+Sections without a mapping are listed at the end of the summary ("Sekcje BEZ wpisu
+w section_status_map.json" = sections WITHOUT an entry). Variants with typos are
+added to the map as separate keys with the same status, safely e.g. like this:
 ```bash
 python3 -c "import json; p='section_status_map.json'; m=json.load(open(p,encoding='utf-8')); m['Whishlist (PM & Lead)']='To Clarify'; json.dump(m,open(p,'w',encoding='utf-8'),ensure_ascii=False,indent=2)"
 ```
-Status nieosiągalny w workflow (brak przejścia, np. z "Setup" do "Backlog")
-daje ostrzeżenie i `Statusy błąd` w podsumowaniu. Rozwiązanie: przejście
-"z dowolnego statusu" w workflow albo ręczna zmiana statusu.
+A status unreachable in the workflow (no transition, e.g. from "Setup" to "Backlog")
+gives a warning and `Statusy błąd` (status errors) in the summary. Solution: a
+transition "from any status" in the workflow, or a manual status change.
 
-### Podsumowanie przebiegu
+### Run summary
 
-| Linia | Znaczenie |
+| Line | Meaning |
 |---|---|
-| `Utworzono` / `Zaktualizowano` | z podziałem na Epiki, Taski, Sub-taski |
-| `Linki do Asany dodane` | nowe linki zdalne (sekcja wyżej) |
-| `bez zmian od ostatniego syncu` | zadanie w Asanie nie zmieniło się (w tym podzadania obecne też na liście projektu, obsłużone razem z rodzicem) |
-| `usunięte w Jirze (deleted_in_jira)` | celowo pomijane (sekcja 14h) |
-| `kandydaci na Epic do retrofit_epics.py` | zadanie powinno być Epikiem, ale ma już zmigrowane podzadania; opcjonalnie sekcja 15a |
-| `prowadzone w Jirze ('migriert zu Jira')` | pominięte z całym poddrzewem |
-| `Zadań-podzadań z własnymi podzadaniami (spłaszczone pod przodka)` | Asana zagnieżdża głębiej niż Jira; ich podzadania trafiają pod najbliższego przodka, który nie jest Sub-taskiem (dawniej osobna linia `[INFO]` przy każdym takim zadaniu) |
-| `Statusy OK` / `Statusy błąd` | ustawione i nieosiągalne statusy |
+| `Utworzono` / `Zaktualizowano` (created / updated) | broken down into Epics, Tasks, Sub-tasks |
+| `Linki do Asany dodane` | new remote links (section above) |
+| `bez zmian od ostatniego syncu` (unchanged since last sync) | the task in Asana did not change (including subtasks also on the project list, handled together with the parent) |
+| `usunięte w Jirze (deleted_in_jira)` | deliberately skipped (section 14h) |
+| `kandydaci na Epic do retrofit_epics.py` | the task should be an Epic but already has migrated subtasks; optionally section 15a |
+| `prowadzone w Jirze ('migriert zu Jira')` | skipped with the whole subtree |
+| `Zadań-podzadań z własnymi podzadaniami (spłaszczone pod przodka)` | Asana nests deeper than Jira; their subtasks go under the nearest ancestor that is not a Sub-task (formerly a separate `[INFO]` line for each such task) |
+| `Statusy OK` / `Statusy błąd` | statuses set / unreachable |
 
-### Uruchomienie
+### Running
 
 ```bash
-python asana_jira_sync.py --dry-run --limit 1 --project-keys KLUCZ   # podgląd bez zapisu
-python asana_jira_sync.py --limit 1 --project-keys KLUCZ             # faktyczny zapis, 1 projekt
-python asana_jira_sync.py                                             # wszystkie projekty z arkusza
-python asana_jira_sync.py --shard 1/3                                 # 1. z 3 równoległych procesów
+python asana_jira_sync.py --dry-run --limit 1 --project-keys KEY   # preview without writing
+python asana_jira_sync.py --limit 1 --project-keys KEY             # actual write, 1 project
+python asana_jira_sync.py                                           # all projects from the sheet
+python asana_jira_sync.py --shard 1/3                               # 1st of 3 parallel processes
 ```
 
-Na końcu skrypt wypisuje podsumowanie z podziałem na typy, np.
-`Utworzono: 186 (Epiki: 6, Taski: 60, Sub-taski: 120)`, tak samo zaktualizowane,
-komentarze, załączniki, statusy i błędy, oraz listę sekcji Asany bez wpisu
-w `section_status_map.json`. Pominięte są rozbite na przyczyny:
+At the end the script prints a summary broken down by type, e.g.
+`Utworzono: 186 (Epiki: 6, Taski: 60, Sub-taski: 120)`, likewise for updated items,
+comments, attachments, statuses and errors, plus a list of Asana sections without an
+entry in `section_status_map.json`. Skipped items are broken down by reason:
 
-| Przyczyna | Znaczenie |
+| Reason | Meaning |
 |---|---|
-| bez zmian od ostatniego syncu | normalne; w tym podzadania widoczne też na liście projektu, obsłużone razem z rodzicem |
-| usunięte w Jirze (`deleted_in_jira`) | nie będą odtwarzane; jeśli projekt w Jirze utworzono od nowa, wyczyść jego wpisy w stanie (`clean_stale_task_state.py`) |
-| kandydaci na Epic do `retrofit_epics.py` | zadanie powinno być Epikiem, a jego podzadania już istnieją (sekcja 15a) |
+| unchanged since last sync | normal; includes subtasks also visible on the project list, handled together with the parent |
+| deleted in Jira (`deleted_in_jira`) | will not be recreated; if the Jira project was created from scratch, clear its entries in the state (`clean_stale_task_state.py`) |
+| Epic candidates for `retrofit_epics.py` | the task should be an Epic and its subtasks already exist (section 15a) |
 
-`--dry-run` pokazuje, co **by** zrobił skrypt (odczyt jest bezpieczny, więc
-nawet w dry-run zobaczysz realną liczbę komentarzy/załączników do przeniesienia),
-bez faktycznego tworzenia/zmieniania niczego w Jirze.
+`--dry-run` shows what the script **would** do (reading is safe, so even in dry-run
+you see the real number of comments/attachments to transfer), without actually
+creating/changing anything in Jira.
 
-**Diagnostyka:** ustaw `DEBUG_SYNC=1` przed komendą, żeby zobaczyć szczegółowe
-informacje o każdym zadaniu (dokładne dane wysyłane do Jiry, sekcję/status,
-porównania znaczników czasu) — przydatne, gdy coś nie działa zgodnie z oczekiwaniami:
+**Diagnostics:** set `DEBUG_SYNC=1` before the command to see detailed information
+about every task (the exact data sent to Jira, section/status, timestamp
+comparisons) — useful when something does not work as expected:
 ```bash
-DEBUG_SYNC=1 python asana_jira_sync.py --limit 1 --project-keys KLUCZ
+DEBUG_SYNC=1 python asana_jira_sync.py --limit 1 --project-keys KEY
 ```
 
-### Pliki tego pakietu
+### Files in this toolkit
 
-| Plik | Rola |
+| File | Role |
 |---|---|
-| `asana_jira_sync.py` | główny skrypt synchronizujący Asana → Jira |
-| `run_full_pipeline.py` | orkiestrator całego pipeline'u, równoległość, zbiorcze podsumowania (sekcja 11a) |
-| `pipeline_summary.py` | wspólny moduł: zapis liczb i szczegółów błędów dla orkiestratora |
-| `detect_epic_candidates.py` | wykrywa kandydatów na Epic przed synchronizacją |
-| `epic_candidates.json` | **automatycznie tworzona** lista kandydatów na Epic per projekt |
-| `copy_project_cross_instance.py` | kopia projektu między dwiema instancjami Jiry (sekcja 4a) |
-| `copy_project.py` | pełna kopia JEDNEGO istniejącego projektu Jiry, łącznie z tablicami/kolumnami (sekcja 4a) |
-| `fix_board_filter_permissions.py` | udostępnia filtry tablic projektowi, gdy zespół nie widzi tablic (sekcja 4a) *(skrypt nie jest dołączony do tego repozytorium)* |
-| `audit_hierarchy.py` | audyt i naprawa miejsca zgłoszeń w hierarchii względem drzewa Asany (sekcja 15e) |
-| `compare_project_totals.py` | pełne porównanie projektu Asana vs Jira, wszystkie poziomy, po identyfikatorach (sekcja 14a) |
-| `jira_asana_sync.py` | kierunek zwrotny, Jira → Asana (sekcja 12) |
-| `list_asana_sections.py` | wypisuje sekcje JEDNEGO projektu Asany (do `section_status_map.json`) |
-| `list_all_asana_sections.py` | wypisuje unikalne sekcje ze WSZYSTKICH projektów w arkuszu naraz, z porównaniem do już zmapowanych |
-| `check_asana_token.py` | diagnostyka: sprawdza czy ASANA_TOKEN jest ważny i ma dostęp do workspace'u (niezależnie od konkretnego projektu) |
-| `section_status_map.json` | mapowanie: sekcja Asany → status(y) Jira (uzupełniasz ręcznie) |
-| `generate_user_map.py` | generuje `user_map.json` (dopasowanie po e-mailu) |
-| `list_asana_members.py` | wypisuje członków/gości workspace'u Asany z ich gid |
-| `get_group_members.py` | wypisuje członków grupy Jira z ich accountId |
-| `user_map.json` | mapowanie: Asana user gid → Jira accountId |
-| `check_required_fields.py` | diagnostyka: jakie pola są wymagane przy tworzeniu zadania |
-| `list_project_statuses.py` | diagnostyka: jakie statusy faktycznie istnieją w danym projekcie |
-| `check_task_section.py` | diagnostyka: sprawdza sekcję zadania dwoma niezależnymi zapytaniami |
-| `count_state_entries.py` | diagnostyka: liczy/pokazuje wpisy w `task_sync_state.json` dla projektu |
-| `count_migrated_tasks.py` | liczy zadania w Jirze (i opcjonalnie załączniki), porównuje z prawdziwą liczbą w Asanie |
-| `find_duplicate_tasks.py` | wykrywa zdublowane tytuły zadań w obrębie projektu (tylko wykrywanie) |
-| `resolve_duplicates.py` | wykrywa I bezpiecznie usuwa osierocone duplikaty zadań (sekcja 14) |
-| `find_duplicate_comments_attachments.py` | wykrywa zdublowane komentarze/załączniki WEWNĄTRZ pojedynczych zadań |
-| `check_duplicate_sheet_rows.py` | diagnostyka: klucze Jiry z więcej niż jednym wierszem w arkuszu |
-| `diagnose_jira_asana_gap.py` | diagnostyka: które konkretnie tytuły istnieją tylko w Jirze / tylko w Asanie |
-| `trace_task_origins.py` | diagnostyka: przy dwóch źródłach Asany pod jednym kluczem Jiry, ustala pochodzenie każdego zadania *(skrypt nie jest dołączony do tego repozytorium)* |
-| `clean_stale_task_state.py` | usuwa z `task_sync_state.json` wpisy wskazujące na nieistniejące już zadania Jiry |
-| `repair_state_file.py` | naprawia uszkodzony (np. po `Ctrl+C`) `task_sync_state.json` |
-| `repair_missing_state_entries.py` | odtwarza brakujące wpisy w stanie, dopasowując zadania po tytule (sekcja 14e) |
-| `mark_deleted_as_skipped.py` | oznacza zadania usunięte ręcznie w Jirze jako trwale pomijane (sekcja 14e) |
-| `refresh_state_flags.py` | odświeża flagi hierarchii w stanie na podstawie Jiry (sekcja 15) |
-| `retrofit_epics.py`, `convert_to_epic.py` | przebudowa hierarchii już zmigrowanych zadań (sekcja 15) |
-| `audit_epic_candidates.py`, `revert_false_epics.py`, `resolve_deep_chains.py` | wykrywanie i naprawa fałszywych Epików (sekcja 15) |
-| `compare_project_totals.py` | pełne porównanie projektów Asana vs Jira, wszystkie poziomy (sekcja 14a) |
-| `close_children_of_done.py` | zamyka w Jirze (opcjonalnie też w Asanie) zadania otwarte pod ukończonymi (sekcja 14f) |
-| `fix_stale_resolution.py` | czyści pozostawione Rozwiązanie w otwartych zgłoszeniach (sekcja 14g) |
-| `relink_state.py` | odtwarza zgubione powiązania, wykrywa serie duplikatów (sekcja 15f) |
-| `resolve_relink_duplicates.py` | usuwa duplikaty z raportu relink, zostawia najstarszą kopię (sekcja 15g) |
-| `handle_migrated_to_jira.py` | porządkuje zadania z dopiskiem "migriert zu Jira" (sekcja 15h) |
-| `repair_batch.py` | uruchamia 15f-15h dla wielu projektów z tabelą podsumowania (sekcja 15i) |
-| `list_project_statuses.py` | statusy projektu dla każdego typu, z klucza albo linku (sekcja 4a) |
-| `remove_status_from_column.py` | zdejmuje status z kolumny tablic (sekcja 4a) |
-| `copy_project_cross_instance.py` | kopia (także przyrostowa i z podziałem) projektu z innej instancji Jiry (sekcja 4a) |
-| `sync_exclude.txt`, `protected_projects.txt` | czasowe i trwałe wyłączenia projektów (sekcja 11) |
-| `export_source_workflows.py` | eksport workflow i statusów z innej instancji Jiry do YAML i mapy statusów (sekcja 4a) *(skrypt nie jest dołączony do tego repozytorium)* |
-| `build_jira_schema.py` | konfiguracja Jiry z pliku YAML (sekcja 17) |
-| `set_transition_groups.py` | kto może wykonać przejście w workflow (sekcja 17j) |
-| `parse_jira_pdfs.py`, `parse_jira_workflow.py`, `parse_jira_pptx.py`, `merge_jira_sources.py` | budowa pliku YAML z dokumentacji klienta (sekcja 17) |
-| `create_epics_stories_from_sheet.py`, `export_stories_to_sheet.py` | Epiki i Story z arkusza zakresu i eksport z powrotem (sekcja 20) |
-| `section_status_map.<KLUCZ>.json` | mapa statusów dla jednego projektu (sekcja 11) |
-| `notify.py` | log do pliku + opcjonalne powiadomienie na Slack |
-| `clone_project.py` | samodzielna kopia projektu z kopiami schematów nazwanymi od nowego projektu (część I, „Kopia projektu”) |
-| `task_sync_state.json` | **automatycznie tworzony** stan synchronizacji (obu kierunków) — nie kasować |
-| `workflow_graph_cache.json` | **automatycznie tworzony** cache mapy przejść workflow — bezpieczny do skasowania |
+| `asana_jira_sync.py` | the main Asana → Jira sync script |
+| `run_full_pipeline.py` | orchestrator of the whole pipeline, parallelism, combined summaries (section 11a) |
+| `pipeline_summary.py` | shared module: records counts and error details for the orchestrator |
+| `detect_epic_candidates.py` | detects Epic candidates before the sync |
+| `epic_candidates.json` | **automatically created** list of Epic candidates per project |
+| `copy_project_cross_instance.py` | copies a project between two Jira instances (section 4a) |
+| `copy_project.py` | full copy of ONE existing Jira project, including boards/columns (section 4a) |
+| `fix_board_filter_permissions.py` | shares board filters with the project when the team cannot see the boards (section 4a) *(script not included in this repository)* |
+| `audit_hierarchy.py` | audits and fixes where issues sit in the hierarchy relative to the Asana tree (section 15e) |
+| `compare_project_totals.py` | full Asana vs Jira project comparison, all levels, by ID (section 14a) |
+| `jira_asana_sync.py` | reverse direction, Jira → Asana (section 12) |
+| `list_asana_sections.py` | lists the sections of ONE Asana project (for `section_status_map.json`) |
+| `list_all_asana_sections.py` | lists unique sections from ALL projects in the sheet at once, compared with those already mapped |
+| `check_asana_token.py` | diagnostics: checks whether ASANA_TOKEN is valid and has access to the workspace (regardless of a specific project) |
+| `section_status_map.json` | mapping: Asana section → Jira status(es) (panel: "Status mapping", or by hand) |
+| `generate_user_map.py` | generates `user_map.json` (matching by e-mail) |
+| `list_asana_members.py` | lists Asana workspace members/guests with their gid |
+| `get_group_members.py` | lists Jira group members with their accountId |
+| `user_map.json` | mapping: Asana user gid → Jira accountId (panel: "People mapping") |
+| `check_required_fields.py` | diagnostics: which fields are required when creating an issue |
+| `list_project_statuses.py` | diagnostics: which statuses actually exist in a given project |
+| `check_task_section.py` | diagnostics: checks a task's section with two independent queries |
+| `count_state_entries.py` | diagnostics: counts/shows entries in `task_sync_state.json` for a project |
+| `count_migrated_tasks.py` | counts tasks in Jira (and optionally attachments), compares with the real number in Asana |
+| `find_duplicate_tasks.py` | detects duplicate task titles within a project (detection only) |
+| `resolve_duplicates.py` | detects AND safely deletes orphaned duplicate tasks (section 14) |
+| `find_duplicate_comments_attachments.py` | detects duplicate comments/attachments INSIDE single tasks |
+| `check_duplicate_sheet_rows.py` | diagnostics: Jira keys with more than one row in the sheet |
+| `diagnose_jira_asana_gap.py` | diagnostics: which exact titles exist only in Jira / only in Asana |
+| `trace_task_origins.py` | diagnostics: with two Asana sources under one Jira key, determines the origin of every task *(script not included in this repository)* |
+| `clean_stale_task_state.py` | removes entries from `task_sync_state.json` that point to Jira issues that no longer exist |
+| `repair_state_file.py` | repairs a corrupted (e.g. after `Ctrl+C`) `task_sync_state.json` |
+| `repair_missing_state_entries.py` | restores missing entries in the state by matching tasks by title (section 14e) |
+| `mark_deleted_as_skipped.py` | marks tasks deleted by hand in Jira as permanently skipped (section 14e) |
+| `refresh_state_flags.py` | refreshes hierarchy flags in the state based on Jira (section 15) |
+| `retrofit_epics.py`, `convert_to_epic.py` | rebuild the hierarchy of already migrated tasks (section 15) |
+| `audit_epic_candidates.py`, `revert_false_epics.py`, `resolve_deep_chains.py` | detecting and fixing false Epics (section 15) |
+| `close_children_of_done.py` | closes in Jira (optionally also in Asana) tasks left open under completed ones (section 14f) |
+| `fix_stale_resolution.py` | clears a leftover Resolution in open issues (section 14g) |
+| `relink_state.py` | restores lost links, detects series of duplicates (section 15f) |
+| `resolve_relink_duplicates.py` | removes duplicates from the relink report, keeps the oldest copy (section 15g) |
+| `handle_migrated_to_jira.py` | tidies up tasks marked "migriert zu Jira" (section 15h) |
+| `repair_batch.py` | runs 15f-15h for many projects with a summary table (section 15i) |
+| `remove_status_from_column.py` | removes a status from a board column (section 4a) |
+| `sync_exclude.txt`, `protected_projects.txt` | temporary and permanent project exclusions (section 11) |
+| `export_source_workflows.py` | exports workflows and statuses from another Jira instance to YAML and a status map (section 4a) *(script not included in this repository)* |
+| `build_jira_schema.py` | Jira configuration from a YAML file (section 17) |
+| `set_transition_groups.py` | who may perform a workflow transition (section 17j) |
+| `parse_jira_pdfs.py`, `parse_jira_workflow.py`, `parse_jira_pptx.py`, `merge_jira_sources.py` | building the YAML file from client documentation (section 17) |
+| `create_epics_stories_from_sheet.py`, `export_stories_to_sheet.py` | Epics and Stories from the scope sheet and export back (section 20) |
+| `section_status_map.<KEY>.json` | status map for a single project (section 11) |
+| `notify.py` | log to file + optional Slack notification |
+| `start.sh` | installation (`.venv`, dependencies, browser) and panel start |
+| `clone_project.py` | standalone project copy with scheme copies named after the new project (part I, "Copy project") |
+| `asana_users_not_in_jira.json` | Asana people deliberately without a Jira account (panel, "People mapping") |
+| `task_sync_state.json` | **automatically created** sync state (both directions) — do not delete |
+| `workflow_graph_cache.json` | **automatically created** cache of the workflow transition map — safe to delete |
 
-## 11a. Kolejność kroków i cały pipeline jednym poleceniem (`run_full_pipeline.py`)
+## 11a. Order of steps and the whole pipeline in one command (`run_full_pipeline.py`)
 
-Kroki muszą iść w tej kolejności, bo każdy zakłada, że poprzedni się skończył:
+The steps must run in this order, because each assumes the previous one has finished:
 
-| Krok | Klucz | Skrypt | Co robi |
+| Step | Key | Script | What it does |
 |---|---|---|---|
-| 1 | `projects` | `jira_sync.py` | tworzy projekty z arkusza |
-| 2 | `columns` | `browser_automation/bulk_configure_columns.py` | tworzy kolumny tablic (wzorzec z `.env` albo z kolumny `board_template_id`) |
-| 3 | `statuses` | `browser_automation/run_column_assignments.py` | przypisuje statusy do kolumn (sekcja 11b) |
-| 4 | `epics` | `detect_epic_candidates.py` | wykrywa kandydatów na Epic (sekcja 11) |
-| 5 | `sync` | `asana_jira_sync.py` | synchronizuje zadania na gotowe, skonfigurowane tablice |
+| 1 | `projects` | `jira_sync.py` | creates projects from the sheet |
+| 2 | `columns` | `browser_automation/bulk_configure_columns.py` | creates board columns (template from `.env` or from the `board_template_id` column) |
+| 3 | `statuses` | `browser_automation/run_column_assignments.py` | assigns statuses to columns (section 11b) |
+| 4 | `epics` | `detect_epic_candidates.py` | detects Epic candidates (section 11) |
+| 5 | `sync` | `asana_jira_sync.py` | syncs tasks onto the ready, configured boards |
 
-Opcjonalnie potem, w miarę bieżącej pracy: `python jira_asana_sync.py`
-(kierunek zwrotny, sekcja 12). Nie jest częścią orkiestratora.
+Optionally afterwards, as ongoing work requires: `python jira_asana_sync.py`
+(reverse direction, section 12). It is not part of the orchestrator.
 
-### Orkiestrator
+### Orchestrator
 
-`run_full_pipeline.py` uruchamia powyższe skrypty jako osobne procesy, w tej
-kolejności, i zatrzymuje się na pierwszym kroku zakończonym błędem krytycznym.
-Nie zmienia logiki żadnego kroku.
+`run_full_pipeline.py` runs the scripts above as separate processes, in this order,
+and stops at the first step that ends with a critical error. It does not change the
+logic of any step.
 
 ```bash
-python run_full_pipeline.py                            # cały pipeline, sekwencyjnie
-python run_full_pipeline.py --parallel 3               # każdy krok jako 3 równoległe procesy
-python run_full_pipeline.py --dry-run                  # podgląd (krok 3 pominięty: nie ma trybu podglądu)
-python run_full_pipeline.py --limit 5                  # pierwsze 5 projektów w krokach, które to wspierają
-python run_full_pipeline.py --only sync --parallel 3   # tylko jeden krok (--only przyjmuje dokładnie jeden)
+python run_full_pipeline.py                            # the whole pipeline, sequentially
+python run_full_pipeline.py --parallel 3               # each step as 3 parallel processes
+python run_full_pipeline.py --dry-run                  # preview (step 3 skipped: it has no preview mode)
+python run_full_pipeline.py --limit 5                  # first 5 projects in the steps that support it
+python run_full_pipeline.py --only sync --parallel 3   # just one step (--only takes exactly one)
 python run_full_pipeline.py --skip columns --skip statuses
-python run_full_pipeline.py --skip-columns             # pomiń kroki 2-3
-python run_full_pipeline.py --skip-sync                # pomiń kroki 4-5
+python run_full_pipeline.py --skip-columns             # skip steps 2-3
+python run_full_pipeline.py --skip-sync                # skip steps 4-5
 ```
 
-**Równoległość (`--parallel N`)** dotyczy każdego kroku osobno: orkiestrator
-uruchamia N procesów z automatycznym `--shard K/N` i czeka na wszystkie, zanim
-przejdzie do następnego kroku. Procesy dzielą ten sam limit zapytań Jiry i
-Asany, więc większe N nie przyspiesza proporcjonalnie. Zalecane 3-5. Przy
-`--parallel` każda linia wyjścia ma prefiks procesu (`[2/3] ...`).
+**Parallelism (`--parallel N`)** applies to each step separately: the orchestrator
+starts N processes with an automatic `--shard K/N` and waits for all of them before
+moving to the next step. The processes share the same Jira and Asana rate limits, so
+a larger N does not speed things up proportionally. 3-5 is recommended. With
+`--parallel` every output line has a process prefix (`[2/3] ...`).
 
-**Kody wyjścia:** `0` sukces, `2` częściowe niepowodzenie (tylko krok 1: pipeline
-idzie dalej dla projektów, które powstały), każdy inny kod zatrzymuje pipeline.
-Kolejne uruchomienie może pominąć gotowe kroki przez `--only` / `--skip`.
+**Exit codes:** `0` success, `2` partial failure (step 1 only: the pipeline continues
+for the projects that were created), any other code stops the pipeline. The next run
+can skip finished steps with `--only` / `--skip`.
 
-**Uwaga o kroku 3:** jeśli wymaga ręcznego zalogowania w przeglądarce (wygasła
-sesja), uruchamiaj go bez `--parallel`, bo prompty z kilku procesów wymieszają
-się w jednej linii. Najpierw odśwież sesję: `python browser_automation/save_login_session.py`.
+**Note on step 3:** if it requires logging in by hand in the browser (expired
+session), run it without `--parallel`, because prompts from several processes would
+get mixed up in one line. Refresh the session first:
+`python browser_automation/save_login_session.py`.
 
-**Podsumowanie po każdym kroku** trafia na Slack jako jedna wiadomość za
-wszystkie procesy: status, czas, zsumowane liczby i lista błędów (sekcja 13).
+**A summary after each step** goes to Slack as one message for all processes:
+status, time, summed counts and a list of errors (section 13).
 
-## 11b. Automatyczne przypisywanie statusów do kolumn (`run_column_assignments.py`)
+## 11b. Automatically assigning statuses to columns (`run_column_assignments.py`)
 
-Jira **nie ma publicznego, udokumentowanego API** do zapisu przypisania
-statusów do kolumn tablicy — stąd wcześniejsze (nieudane) próby przez
-symulację przeciągania myszą. Znaleźliśmy jednak działający **wewnętrzny**
-endpoint, którego używa samo UI Jiry (podejrzany przez DevTools -> Network
-podczas ręcznego przeciągania):
+Jira **has no public, documented API** for saving the assignment of statuses to
+board columns — hence the earlier (failed) attempts by simulating mouse dragging.
+We did, however, find a working **internal** endpoint that the Jira UI itself uses
+(spotted via DevTools -> Network while dragging by hand):
 
-- **Odczyt** — GraphQL, persisted query `ColumnsSettingsPageNewContentQuery`.
-- **Zapis** — `PUT /rest/greenhopper/1.0/rapidviewconfig/columns` (stare,
-  nieudokumentowane API "GreenHopper", poprzednik dzisiejszej nazwy
-  "Jira Software").
+- **Read** — GraphQL, persisted query `ColumnsSettingsPageNewContentQuery`.
+- **Write** — `PUT /rest/greenhopper/1.0/rapidviewconfig/columns` (the old,
+  undocumented "GreenHopper" API, the predecessor of today's "Jira Software").
 
-**Ważne zastrzeżenie:** to NIEOFICJALNE API. Atlassian nie gwarantuje jego
-stabilności — może się zmienić bez ostrzeżenia przy aktualizacji Jiry
-(zwłaszcza `atl-client-version` i `x-experimentalapi`, przywiązane do
-konkretnego builda frontendu). Jeśli po jakiejś przyszłej aktualizacji Jiry
-skrypt zacznie zwracać błąd 400/415 z GraphQL, trzeba będzie świeżo
-przechwycić te dwie wartości z Network (patrz komentarze w
-`assign_statuses_to_columns.js`) i podmienić w skrypcie.
+**Important caveat:** this is an UNOFFICIAL API. Atlassian does not guarantee its
+stability — it may change without warning in a Jira update (especially
+`atl-client-version` and `x-experimentalapi`, tied to a specific frontend build). If
+after some future Jira update the script starts returning 400/415 errors from
+GraphQL, you will need to capture these two values from Network again (see the
+comments in `assign_statuses_to_columns.js`) and replace them in the script.
 
-Wymaga tego, że te endpointy używają **sesji przeglądarki** (ciasteczka,
-token CSRF), nie zwykłego tokenu API — dlatego wykonanie odbywa się przez
-Playwright z zapisaną sesją logowania (`auth_state.json`), a nie przez
-`requests` z tokenem, jak reszta skryptów.
+These endpoints require a **browser session** (cookies, CSRF token), not a regular
+API token — which is why execution goes through Playwright with a saved login session
+(`auth_state.json`), not through `requests` with a token like the rest of the scripts.
 
-### Pliki tego mechanizmu
+### Files of this mechanism
 
-| Plik | Rola |
+| File | Role |
 |---|---|
-| `assign_statuses_to_columns.js` | biblioteka JS (funkcje `assignStatusesToColumns`, `assignStatusesToManyBoards`) — może być też wklejona ręcznie w konsoli przeglądarki, niezależnie od Pythona |
-| `generate_column_assignments.py` | generuje listę {boardId, projectKey, mapping} dla projektów z arkusza (tylko odczyt, zwykłe API) |
-| `run_column_assignments.py` | **główny skrypt end-to-end** — łączy oba powyższe, wykonuje przez Playwright, bez ręcznej interakcji |
+| `assign_statuses_to_columns.js` | JS library (functions `assignStatusesToColumns`, `assignStatusesToManyBoards`) — can also be pasted by hand into the browser console, independently of Python |
+| `generate_column_assignments.py` | generates a list of {boardId, projectKey, mapping} for the projects in the sheet (read-only, regular API) |
+| `run_column_assignments.py` | **the main end-to-end script** — combines the two above, executes via Playwright, without manual interaction |
 
-### Uruchomienie
+### Running
 
 ```bash
-python save_login_session.py                                   # jeśli sesja wygasła
-python run_column_assignments.py --limit 1 --project-keys KLUCZ  # test na 1 projekcie
-python run_column_assignments.py                                 # wszystkie projekty
+python save_login_session.py                                   # if the session expired
+python run_column_assignments.py --limit 1 --project-keys KEY    # test on 1 project
+python run_column_assignments.py                                 # all projects
 ```
 
-Wynik zapisywany do `column_assignment_report.json`.
+The result is saved to `column_assignment_report.json`.
 
-**Alternatywa bez Playwrighta:** można też wkleić `assign_statuses_to_columns.js`
-ręcznie w konsoli przeglądarki (F12) i wywołać funkcje bezpośrednio — przydatne
-do szybkiego, jednorazowego testu. Żeby nie wklejać za każdym razem, zapisz
-skrypt jako DevTools Snippet (Sources -> Snippets -> zapisuje się na stałe
-w przeglądarce, uruchamiane przez Ctrl+Enter).
+**Alternative without Playwright:** you can also paste `assign_statuses_to_columns.js`
+by hand into the browser console (F12) and call the functions directly — useful for a
+quick one-off test. To avoid pasting every time, save the script as a DevTools Snippet
+(Sources -> Snippets -> saved permanently in the browser, run with Ctrl+Enter).
 
-## 12. Kierunek zwrotny synchronizacji (`jira_asana_sync.py`, Jira → Asana)
+## 12. Reverse sync direction (`jira_asana_sync.py`, Jira → Asana)
 
-Osobny skrypt (nie tryb w `asana_jira_sync.py`, bo iteruje inaczej: po już
-powiązanych parach z `task_sync_state.json` — WSPÓLNYM plikiem z `asana_jira_sync.py`
-— nie po zadaniach Asany).
+A separate script (not a mode of `asana_jira_sync.py`, because it iterates differently:
+over the already linked pairs from `task_sync_state.json` — a file SHARED with
+`asana_jira_sync.py` — not over Asana tasks).
 
-### Co synchronizuje
+### What it syncs
 
-- Tytuł, opis (konwersja ADF → HTML), termin, przypisanego (przez ODWRÓCONY
-  `user_map.json`, z fallbackiem: jeśli oryginalny assignee nie może zostać
-  przypisany w Asanie, aktualizacja przechodzi bez niego zamiast się wywalać).
-- **Status → sekcja** — przez ODWRÓCONĄ `section_status_map.json`. Ponieważ
-  jedna sekcja Asany może odpowiadać wielu statusom Jiry (i odwrotnie, wiele
-  sekcji temu samemu statusowi), skrypt **próbuje po kolei wszystkich
-  kandydatów**, aż znajdzie taki, który faktycznie istnieje w KONKRETNYM
-  projekcie Asany — nie zakłada, że pierwszy z listy zawsze pasuje.
-- Nowe komentarze i załączniki z Jiry do Asany.
+- Title, description (ADF → HTML conversion), due date, assignee (via the REVERSED
+  `user_map.json`, with a fallback: if the original assignee cannot be assigned in
+  Asana, the update goes through without them instead of failing).
+- **Status → section** — via the REVERSED `section_status_map.json`. Since one Asana
+  section can correspond to many Jira statuses (and conversely, many sections to the
+  same status), the script **tries all candidates in turn** until it finds one that
+  actually exists in the SPECIFIC Asana project — it does not assume the first one on
+  the list always fits. Special entries (`__ukonczone__`, `__szablon__`) are skipped, and
+  for extended entries (`{"status": ..., "labels": ...}`) the `status` is used.
+- New comments and attachments from Jira to Asana.
 
-**Rozstrzyganie konfliktów:** proste porównanie znacznika czasu ostatniej
-modyfikacji w Jirze (`updated`) — **nie ma pełnego mergowania pól**, jeśli
-oba systemy zmieniły to samo zadanie w tym samym czasie; wygrywa stan z Jiry.
+**Conflict resolution:** a simple comparison of the last modification timestamp in
+Jira (`updated`) — **there is no full field merge** if both systems changed the same
+task at the same time; the Jira state wins.
 
-### Uruchomienie
+### Running
 
 ```bash
-python jira_asana_sync.py --dry-run --limit 1   # podgląd, bez --project-keys (patrz niżej)
+python jira_asana_sync.py --dry-run --limit 1   # preview, without --project-keys (see below)
 python jira_asana_sync.py --limit 1
 python jira_asana_sync.py
-DEBUG_SYNC=1 python jira_asana_sync.py --limit 1   # ze szczegółową diagnostyką
+DEBUG_SYNC=1 python jira_asana_sync.py --limit 1   # with detailed diagnostics
 ```
 
-**Ważne o `--project-keys`:** jeśli podasz konkretne klucze tą flagą, skrypt
-NIE ma skąd wziąć `asana_project_link`/nazwy projektu z arkusza dla tych
-kluczy — synchronizacja statusu → sekcja **nie zadziała** w tym trybie
-(dostaniesz czytelne ostrzeżenie). Do testowania na 1 projekcie użyj
-`--limit 1` **bez** `--project-keys` — wtedy skrypt bierze pierwszy wiersz
-z arkusza razem z jego linkiem.
+**Important about `--project-keys`:** if you pass specific keys with this flag, the
+script has NO way to get the `asana_project_link`/project name from the sheet for those
+keys — status → section sync **will not work** in this mode (you will get a readable
+warning). To test on 1 project use `--limit 1` **without** `--project-keys` — the
+script then takes the first row of the sheet together with its link.
 
-**Kolejność przy używaniu obu kierunków:** uruchamiaj naprzemiennie
-(`asana_jira_sync.py`, potem `jira_asana_sync.py`), nie równolegle —
-unikniesz sytuacji, gdzie oba nadpisują się nawzajem w trakcie działania.
+**Order when using both directions:** run them alternately (`asana_jira_sync.py`, then
+`jira_asana_sync.py`), not in parallel — this avoids both overwriting each other while
+running.
 
-## 13. Dodatkowe funkcje
+## 13. Additional features
 
-- **Log do pliku + podsumowanie na Slack** — moduł `notify.py`, używany przez
-  `jira_sync.py`, `asana_jira_sync.py` i `jira_asana_sync.py`. Log trafia do
-  `logs/<skrypt>_<data-godzina>.log` automatycznie (nic nie trzeba włączać).
-  Slack jest opcjonalny — ustaw w `.env`:
+- **Log to file + Slack summary** — the `notify.py` module, used by `jira_sync.py`,
+  `asana_jira_sync.py` and `jira_asana_sync.py`. The log goes to
+  `logs/<script>_<date-time>.log` automatically (nothing needs to be enabled).
+  Slack is optional — set in `.env`:
   ```
   SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
   ```
-  Bez tego skrypty po prostu nie wysyłają nic na Slacka (bez błędu). E-mail
-  nie został zaimplementowany (wymaga danych SMTP).
-- **Zbiorcze podsumowania w pipeline**: przy uruchomieniu przez
-  `run_full_pipeline.py` poszczególne skrypty nie wysyłają własnych wiadomości
-  (rozpoznają to po zmiennej środowiskowej `PIPELINE_RUN=1`, którą ustawia
-  orkiestrator). Zamiast tego po każdym kroku przychodzi jedna wiadomość za
-  wszystkie procesy równoległe:
+  Without it the scripts simply send nothing to Slack (no error). E-mail has not been
+  implemented (it requires SMTP credentials).
+- **Combined summaries in the pipeline**: when run through `run_full_pipeline.py`, the
+  individual scripts do not send their own messages (they detect this by the
+  `PIPELINE_RUN=1` environment variable set by the orchestrator). Instead, after each
+  step one message arrives for all parallel processes:
   ```
   ⚠️ 1/5 Tworzenie projektów zakończony z częściowymi błędami
   Procesy: 3 | Czas: 4min 12s | Kody wyjścia: [0, 2, 0]
@@ -1441,122 +1473,118 @@ unikniesz sytuacji, gdzie oba nadpisują się nawzajem w trakcie działania.
 
   Pełny raport: logs/pipeline_projects_20260927_182054_raport.txt
   ```
-  Każda liczba jest sumowana osobno ze wszystkich procesów (dla synchronizacji
-  zadań m.in. utworzone i zaktualizowane Epiki, Taski i Sub-taski, komentarze,
-  załączniki). Identyczne błędy są scalane z licznikiem (`60x ... 429`). Na
-  Slacku widać do 20 błędów i 10 ostrzeżeń (stałe `SLACK_MAX_ERRORS` /
-  `SLACK_MAX_WARNINGS` w `run_full_pipeline.py`), pełna lista trafia do
-  `logs/pipeline_<krok>_<data>_raport.txt`. Jeśli proces padł (np. traceback),
-  wiadomość zawiera ostatnie linie jego wyjścia. Na koniec całego pipeline'u
-  przychodzi krótka wiadomość 🏁 z łącznym czasem.
+  (In English: "Project creation finished with partial errors · Processes · Time ·
+  Exit codes · created · description updated · skipped · errors · Full report".)
+  Every number is summed separately across all processes (for task sync, among others,
+  created and updated Epics, Tasks and Sub-tasks, comments, attachments). Identical
+  errors are merged with a counter (`60x ... 429`). Slack shows up to 20 errors and 10
+  warnings (the `SLACK_MAX_ERRORS` / `SLACK_MAX_WARNINGS` constants in
+  `run_full_pipeline.py`); the full list goes to `logs/pipeline_<step>_<date>_raport.txt`.
+  If a process crashed (e.g. a traceback), the message contains the last lines of its
+  output. At the end of the whole pipeline a short 🏁 message arrives with the total time.
 
-  Liczby i szczegóły błędów raportują `jira_sync.py`, `bulk_configure_columns.py`,
-  `detect_epic_candidates.py` i `asana_jira_sync.py`. Krok 3 raportuje status,
-  czas i ewentualny crash. Żeby inny skrypt dołączył do podsumowań, wystarczy
-  `record_error(...)` / `record_warning(...)` w miejscach łapania błędów i
-  `write_shard_summary(...)` na końcu `main()` (moduł `pipeline_summary.py`).
-- **Konfiguracja kolumn (`bulk_configure_columns.py`)** rozpoznaje wygasłą sesję
-  przeglądarki (przerywa przebieg z komunikatem, zamiast timeoutu na każdym
-  projekcie), pomija projekty team-managed, wybiera tablicę należącą do danego
-  projektu i podaje adres, gdy Jira przekierowała gdzie indziej. Przy timeoucie
-  zapisuje zrzut `error_<KLUCZ>.png`. Czas oczekiwania: `BULK_COLUMNS_TIMEOUT_MS`
-  w `.env` (domyślnie 30000). Jeśli timeout zostaje mimo świeżej sesji, Jira
-  prawdopodobnie zmieniła wygląd strony; selektory są w słowniku `SELECTORS`.
-- **Aktualizacja istniejących projektów** — `jira_sync.py` nie tylko pomija
-  już istniejące projekty, ale aktualizuje ich **opis**, jeśli różni się od
-  tego w arkuszu/Asanie (patrz podsumowanie: "Zaktualizowany opis").
+  Counts and error details are reported by `jira_sync.py`, `bulk_configure_columns.py`,
+  `detect_epic_candidates.py` and `asana_jira_sync.py`. Step 3 reports status, time and
+  any crash. For another script to join the summaries, it is enough to call
+  `record_error(...)` / `record_warning(...)` where errors are caught and
+  `write_shard_summary(...)` at the end of `main()` (the `pipeline_summary.py` module).
+- **Column configuration (`bulk_configure_columns.py`)** recognizes an expired browser
+  session (aborts the run with a message instead of timing out on every project), skips
+  team-managed projects, picks the board belonging to the given project and reports the
+  URL when Jira redirected elsewhere. On a timeout it saves an `error_<KEY>.png`
+  screenshot. The wait time: `BULK_COLUMNS_TIMEOUT_MS` in `.env` (default 30000). If the
+  timeout persists even with a fresh session, Jira has probably changed the page layout;
+  the selectors are in the `SELECTORS` dictionary.
+- **Updating existing projects** — `jira_sync.py` not only skips already existing
+  projects, it also updates their **description** if it differs from the one in the
+  sheet/Asana (see the summary: "Zaktualizowany opis" = description updated).
 
-## 14. Weryfikacja i sprzątanie po migracji
+## 14. Verification and cleanup after the migration
 
-Po głównej synchronizacji (sekcja 11), zwłaszcza po wielokrotnych, przerywanych
-przebiegach, warto zweryfikować rezultat i posprzątać ewentualne duplikaty
-powstałe przez utratę/uszkodzenie `task_sync_state.json` w trakcie wcześniejszych
-prób. Poniższe narzędzia są w pełni niezależne od głównej synchronizacji —
-nigdy nie modyfikują `task_sync_state.json` (poza `clean_stale_task_state.py`
-i `repair_state_file.py`, jawnie do tego przeznaczonymi).
+After the main sync (section 11), especially after repeated, interrupted runs, it is
+worth verifying the result and cleaning up any duplicates created by the loss/corruption
+of `task_sync_state.json` during earlier attempts. The tools below are fully independent
+of the main sync — they never modify `task_sync_state.json` (except
+`clean_stale_task_state.py` and `repair_state_file.py`, which are explicitly meant for that).
 
-### 14a. Ile zadań faktycznie jest w Jirze (`count_migrated_tasks.py`)
+### 14a. How many tasks are actually in Jira (`count_migrated_tasks.py`)
 
 ```bash
-python count_migrated_tasks.py                     # łączna liczba zadań + per projekt
-python count_migrated_tasks.py --summary-only       # tylko łączna liczba
-python count_migrated_tasks.py --with-attachments   # dodatkowo liczy załączniki (wolniejsze)
-python count_migrated_tasks.py --compare-asana       # porównuje z PRAWDZIWĄ liczbą w Asanie
-python count_migrated_tasks.py --compare-full        # szersze porównanie z Asaną (szczegóły: --help)
+python count_migrated_tasks.py                     # total number of tasks + per project
+python count_migrated_tasks.py --summary-only       # total only
+python count_migrated_tasks.py --with-attachments   # also counts attachments (slower)
+python count_migrated_tasks.py --compare-asana       # compares with the REAL number in Asana
+python count_migrated_tasks.py --compare-full        # broader comparison with Asana (details: --help)
 ```
 
-Liczy przez oficjalny endpoint `/search/approximate-count` (jedno zapytanie na
-projekt — Jira Cloud nie ma prostszego sposobu policzenia zadań). `--compare-asana`
-niezależnie weryfikuje wynik przez Asanę i wskazuje projekty z rozbieżnością
-(zwykle sygnał pozostałych duplikatów). **Jeśli projekt ma więcej niż jeden
-wiersz w arkuszu** (patrz `check_duplicate_sheet_rows.py` niżej) — liczby ze
-WSZYSTKICH pasujących wierszy są sumowane, a sam fakt wielu wierszy jest
-głośno flagowany jako wymagający ręcznej weryfikacji, nie cicho ignorowany.
+Counts via the official `/search/approximate-count` endpoint (one request per project —
+Jira Cloud has no simpler way to count issues). `--compare-asana` independently verifies
+the result through Asana and points out projects with a discrepancy (usually a sign of
+remaining duplicates). **If a project has more than one row in the sheet** (see
+`check_duplicate_sheet_rows.py` below) — the counts from ALL matching rows are summed, and
+the fact that there are several rows is loudly flagged as needing manual verification,
+not silently ignored.
 
-**Pełne porównanie jednego projektu (`compare_project_totals.py`).** Narzędzia
-wyżej liczą zadania najwyższego poziomu i bezpośrednie podzadania, więc nie widzą
-braków od drugiego poziomu w dół ani zadań w złym miejscu. Ten skrypt liczy
-wszystkie poziomy rekurencyjnie, każde zadanie raz, i porównuje po identyfikatorach
-ze stanu (zduplikowane tytuły nie mylą wyniku). Tylko odczyt:
+**Full comparison of one project (`compare_project_totals.py`).** The tools above count
+top-level tasks and direct subtasks, so they do not see gaps from the second level down
+or tasks in the wrong place. This script counts all levels recursively, each task once,
+and compares by the IDs in the state (duplicate titles do not confuse the result).
+Read-only:
 ```bash
 python compare_project_totals.py PROJ5
-python compare_project_totals.py PROJ5,PROJ11 --details --attachments   # z treścią i liczbą załączników
-python compare_project_totals.py --all --top-level                        # szybki przegląd całego arkusza (bez podzadań)
-python compare_project_totals.py --all --shard 1/3                        # pełne porównanie wszystkich, równolegle (osobny CSV na część)
+python compare_project_totals.py PROJ5,PROJ11 --details --attachments   # with content and attachment counts
+python compare_project_totals.py --all --top-level                        # quick overview of the whole sheet (no subtasks)
+python compare_project_totals.py --all --shard 1/3                        # full comparison of everything, in parallel (separate CSV per part)
 ```
-Kategorie rozbieżności: niezmigrowane (z poziomem zagnieżdżenia), w stanie ale
-brak w Jirze, oznaczone jako usunięte, w Jirze bez powiązania, brak w Asanie.
-Szczegóły w `compare_project_totals_report.csv`. Jedno zapytanie do Asany na
-zadanie, więc duży projekt zajmuje kilka minut.
+Discrepancy categories: not migrated (with nesting level), in the state but missing in
+Jira, marked as deleted, in Jira without a link, missing in Asana. Details in
+`compare_project_totals_report.csv`. One Asana request per task, so a large project takes
+a few minutes.
 
-Jak czytać wynik:
+How to read the result:
 
-| Wzorzec | Znaczenie | Naprawa |
+| Pattern | Meaning | Fix |
 |---|---|---|
-| niezmigrowane na poziomie 1 = bez powiązania (np. 742 i 742) | stan **zgubił powiązania**, zgłoszenia są w Jirze | 15f; **nie synchronizować** przed naprawą (utworzy duplikaty) |
-| Jira ma więcej niż Asana, dużo bez powiązania | ponowne synchronizacje już utworzyły **duplikaty** | 15f i 15g |
-| niezmigrowane tylko od poziomu 2, bez powiązania 0 | brak głębokich podzadań (stary błąd rekurencji) | 15e, potem synchronizacja |
-| W stanie, ale brak w Jirze | zgłoszenia usunięte albo przeniesione w Jirze | 14h |
-| kilka bez powiązania, bez odpowiednika w Asanie | zgłoszenia utworzone przez zespół wprost w Jirze | nic (synchronizacja ich nie dotyka) |
+| not migrated at level 1 = without a link (e.g. 742 and 742) | the state **lost the links**, the issues are in Jira | 15f; **do not sync** before the fix (it will create duplicates) |
+| Jira has more than Asana, many without a link | repeated syncs already created **duplicates** | 15f and 15g |
+| not migrated only from level 2, without a link 0 | missing deep subtasks (the old recursion bug) | 15e, then sync |
+| In the state, but missing in Jira | issues deleted or moved in Jira | 14h |
+| a few without a link, no counterpart in Asana | issues created by the team directly in Jira | nothing (the sync does not touch them) |
 
-Zgłoszenia skopiowane z innej instancji Jiry są pomijane (linia `Pomijam N
-zgłoszeń skopiowanych z innej instancji Jiry`), a projekty z
-`protected_projects.txt` w ogóle nie są widoczne.
+Issues copied from another Jira instance are skipped (the line `Pomijam N zgłoszeń
+skopiowanych z innej instancji Jiry`), and projects from `protected_projects.txt` are not
+visible at all.
 
-### 14b. Wykrywanie i usuwanie zdublowanych zadań (`resolve_duplicates.py`)
+### 14b. Detecting and deleting duplicate tasks (`resolve_duplicates.py`)
 
-Duplikaty powstają, gdy `task_sync_state.json` straci wpis dla już
-zsynchronizowanego zadania (np. po `Ctrl+C` w złym momencie, przed naprawą
-atomowego zapisu — sekcja 11) — kolejny przebieg synchronizacji tworzy
-WTEDY drugą kopię tego samego zadania w Jirze, bo nie znajduje śladu
-pierwszej.
+Duplicates appear when `task_sync_state.json` loses the entry for an already synced
+task (e.g. after `Ctrl+C` at the wrong moment, before the atomic-write fix — section 11)
+— the next sync run THEN creates a second copy of the same task in Jira, because it
+finds no trace of the first one.
 
-**Wykrywanie:** grupuje zadania w obrębie JEDNEGO projektu po identycznym
-tytule, potem klasyfikuje każdą grupę do jednej z trzech kategorii,
-krzyżując z `task_sync_state.json` oraz porównując treść (opis, załączniki,
-komentarze):
+**Detection:** groups tasks within ONE project by identical title, then classifies each
+group into one of three categories, cross-checking with `task_sync_state.json` and
+comparing content (description, attachments, comments):
 
-- **Bezpieczne do usunięcia** — dokładnie jeden klucz z grupy jest aktualnie
-  śledzony w stanie (reszta to jego osierocone kopie o identycznej treści),
-  ALBO żaden nie jest śledzony, ale wszystkie kopie mają identyczną treść
-  (wtedy zachowywana jest kopia z najwyższym numerem — najnowsza).
-- **Do przeglądu** — treść się różni w sposób, którego nie da się jednoznacznie
-  rozstrzygnąć automatycznie. To jedyna kategoria wymagająca ręcznej uwagi;
-  w praktyce zwykle to niewielki ułamek wszystkich duplikatów.
-- **Potwierdzone różne (bez akcji)** — każdy klucz w grupie ma WŁASNY,
-  niezależny wpis w stanie, czyli z definicji odpowiada innemu zadaniu w
-  Asanie (np. powtarzające się nazwy szablonowych pozycji w różnych fazach
-  tego samego wdrożenia, albo cykliczne zadania jak "Weekly Statusbericht").
-  Czysto informacyjne.
+- **Safe to delete** — exactly one key of the group is currently tracked in the state
+  (the rest are its orphaned copies with identical content), OR none is tracked but all
+  copies have identical content (then the copy with the highest number — the newest —
+  is kept).
+- **To review** — the content differs in a way that cannot be resolved unambiguously
+  automatically. This is the only category that needs manual attention; in practice it
+  is usually a small fraction of all duplicates.
+- **Confirmed different (no action)** — every key in the group has its OWN, independent
+  entry in the state, i.e. by definition corresponds to a different task in Asana (e.g.
+  recurring names of template items in different phases of the same rollout, or recurring
+  tasks like "Weekly Statusbericht"). Purely informational.
 
 ```bash
-python resolve_duplicates.py                    # wszystkie projekty, tylko raport
-python resolve_duplicates.py --project KLUCZ     # tylko jeden projekt
-python resolve_duplicates.py --delete            # wszystkie projekty, usuwa (z JEDNYM potwierdzeniem)
+python resolve_duplicates.py                    # all projects, report only
+python resolve_duplicates.py --project KEY       # one project only
+python resolve_duplicates.py --delete            # all projects, deletes (with ONE confirmation)
 ```
 
-**Równolegle** (skanowanie, najwolniejsza część — przechodzi przez każde
-zadanie w każdym projekcie):
+**In parallel** (scanning, the slowest part — it goes through every task in every project):
 ```bash
 python resolve_duplicates.py --shard 1/5 &
 python resolve_duplicates.py --shard 2/5 &
@@ -1564,131 +1592,121 @@ python resolve_duplicates.py --shard 3/5 &
 python resolve_duplicates.py --shard 4/5 &
 python resolve_duplicates.py --shard 5/5 &
 wait
-python resolve_duplicates.py --collect            # zbiera wyniki wszystkich shardów, raport
-python resolve_duplicates.py --collect --delete   # jak wyżej, plus usuwanie
+python resolve_duplicates.py --collect            # collects the results of all shards, report
+python resolve_duplicates.py --collect --delete   # as above, plus deleting
 ```
-`--delete` **nie łączy się** z `--shard` bezpośrednio (świadome ograniczenie
-bezpieczeństwa — usuwanie to zawsze jeden, końcowy krok z jednym potwierdzeniem,
-po `--collect`).
+`--delete` **does not combine** with `--shard` directly (a deliberate safety limitation —
+deleting is always one final step with one confirmation, after `--collect`).
 
-Usuwanie idzie przez oficjalny **Bulk Delete API** Jiry (do 1000 zadań na
-zapytanie, asynchroniczne — skrypt odpytuje o postęp aż do zakończenia,
-maks. godzinę; dla dużych partii Jira usuwa zadania jednowątkowo po swojej
-stronie, więc to bywa wolne niezależnie od naszego podejścia).
+Deletion goes through Jira's official **Bulk Delete API** (up to 1000 issues per request,
+asynchronous — the script polls for progress until it finishes, max. one hour; for large
+batches Jira deletes issues single-threaded on its side, so it can be slow regardless of
+our approach).
 
-Pełny raport (wszystkie trzy kategorie, bez obcinania) zawsze zapisywany do
+The full report (all three categories, untruncated) is always saved to
 `duplicate_resolution_report.json`.
 
-### 14c. Zdublowane komentarze/załączniki WEWNĄTRZ zadania
+### 14c. Duplicate comments/attachments INSIDE a task
 
-Osobny, subtelniejszy przypadek: zadanie może mieć tylko JEDEN klucz Jiry
-(żaden duplikat całego zadania), a mimo to mieć te same komentarze/załączniki
-dodane wielokrotnie do TEGO SAMEGO zadania — bo stan śledzi OSOBNO, które
-konkretne komentarze/załączniki już zsynchronizowano.
+A separate, subtler case: a task may have only ONE Jira key (no duplicate of the whole
+task) and still have the same comments/attachments added several times to THE SAME task
+— because the state tracks SEPARATELY which specific comments/attachments have been synced.
 
 ```bash
-python find_duplicate_comments_attachments.py --project KLUCZ
-python find_duplicate_comments_attachments.py               # wszystkie projekty
+python find_duplicate_comments_attachments.py --project KEY
+python find_duplicate_comments_attachments.py               # all projects
 ```
 
-Tylko wykrywanie — nic nie usuwa (raport: `duplicate_comments_attachments_report.json`).
+Detection only — deletes nothing (report: `duplicate_comments_attachments_report.json`).
 
-### 14d. Diagnostyka dla nietypowych przypadków
+### 14d. Diagnostics for unusual cases
 
-- **`check_duplicate_sheet_rows.py [KLUCZ]`** — czy jakiś klucz Jiry ma więcej
-  niż jeden wiersz w arkuszu (z różnymi linkami Asany). Uruchamiane
-  automatycznie na starcie `jira_sync.py` (sekcja 9) — ten skrypt to
-  ręczna wersja do sprawdzenia w dowolnym momencie.
-- **`diagnose_jira_asana_gap.py KLUCZ`** — dla jednego projektu, pokazuje
-  DOKŁADNIE które tytuły zadań istnieją tylko w Jirze (nie tylko liczbę,
-  jak `--compare-asana`) — rozróżnia "prawdziwe nadmiarowe duplikaty" od
-  "unikalne zadanie, którego odpowiednik zniknął z Asany" (np. usunięty
-  po zakończeniu etapu — to może być oczekiwane, nie błąd).
-- **`trace_task_origins.py KLUCZ`** *(skrypt nie jest dołączony do tego repozytorium)* — gdy jeden klucz Jiry ma dwa różne
-  źródła Asany w arkuszu (patrz `check_duplicate_sheet_rows.py`), ustala,
-  ile zadań w Jirze pochodzi z którego źródła, i czy któreś nie pasuje do
-  żadnego z obecnie istniejących zadań w obu.
+- **`check_duplicate_sheet_rows.py [KEY]`** — whether any Jira key has more than one row
+  in the sheet (with different Asana links). Runs automatically at the start of
+  `jira_sync.py` (section 9) — this script is the manual version to check at any time.
+- **`diagnose_jira_asana_gap.py KEY`** — for one project, shows EXACTLY which task titles
+  exist only in Jira (not just the number, like `--compare-asana`) — distinguishes "real
+  surplus duplicates" from "a unique task whose counterpart disappeared from Asana" (e.g.
+  deleted after a stage ended — this may be expected, not an error).
+- **`trace_task_origins.py KEY`** *(script not included in this repository)* — when one
+  Jira key has two different Asana sources in the sheet (see `check_duplicate_sheet_rows.py`),
+  determines how many tasks in Jira come from which source, and whether any of them
+  matches none of the currently existing tasks in either.
 
-### 14e. Niespójności między stanem a Jirą
+### 14e. Inconsistencies between the state and Jira
 
-- **`mark_deleted_as_skipped.py`**: zadania usunięte ręcznie w Jirze oznacza
-  w stanie flagą `deleted_in_jira`, dzięki czemu synchronizacja nie próbuje ich
-  aktualizować (błędy `404`) ani tworzyć ponownie. Traktuje usunięcie jako
-  świadomą decyzję. `asana_jira_sync.py` ustawia tę flagę także sam, gdy przy
-  aktualizacji dostanie `404`.
-- **`repair_missing_state_entries.py`**: gdy zadanie istnieje w Jirze, ale
-  stan nie ma dla niego wpisu (co przy następnej synchronizacji skończyłoby się
-  duplikatem), odtwarza wpis, dopasowując zadania po tytule. Dla większych
-  przypadków (zgubione powiązania, serie duplikatów) używaj `relink_state.py`
-  i `resolve_relink_duplicates.py` (sekcje 15f-15g).
-- **`clean_stale_task_state.py`**: odwrotny przypadek: usuwa ze stanu wpisy
-  wskazujące na zadania, których w Jirze już nie ma.
-- **`diagnose_cross_project_contamination.py`**: wykrywa zadania, które
-  w stanie danego projektu mają klucz Jiry z **innego** projektu.
-- **`diagnose_missing_projects_in_state.py`**: projekty z arkusza, dla których
-  stan nie ma żadnych wpisów (np. synchronizacja nigdy się dla nich nie odbyła).
-- **`diagnose_subtask_gap.py`**, **`diagnose_attachment_gap.py`**: jak
-  `diagnose_jira_asana_gap.py`, ale dla podzadań i dla załączników.
-- **`diff_two_issues.py`**: porównuje dokładną treść dwóch zgłoszeń Jiry
-  (przydatne przy podejrzanych duplikatach z kategorii "Do przeglądu").
+- **`mark_deleted_as_skipped.py`**: marks tasks deleted by hand in Jira with the
+  `deleted_in_jira` flag in the state, so the sync does not try to update them (`404`
+  errors) or recreate them. It treats deletion as a deliberate decision.
+  `asana_jira_sync.py` also sets this flag itself when it gets a `404` while updating.
+- **`repair_missing_state_entries.py`**: when a task exists in Jira but the state has no
+  entry for it (which would end in a duplicate on the next sync), restores the entry by
+  matching tasks by title. For bigger cases (lost links, series of duplicates) use
+  `relink_state.py` and `resolve_relink_duplicates.py` (sections 15f-15g).
+- **`clean_stale_task_state.py`**: the opposite case: removes entries from the state that
+  point to tasks no longer in Jira.
+- **`diagnose_cross_project_contamination.py`**: detects tasks that in a given project's
+  state have a Jira key from **another** project.
+- **`diagnose_missing_projects_in_state.py`**: projects from the sheet for which the state
+  has no entries at all (e.g. the sync never ran for them).
+- **`diagnose_subtask_gap.py`**, **`diagnose_attachment_gap.py`**: like
+  `diagnose_jira_asana_gap.py`, but for subtasks and for attachments.
+- **`diff_two_issues.py`**: compares the exact content of two Jira issues (useful for
+  suspected duplicates in the "To review" category).
 
-Opcje każdego z nich: `--help`.
+Options for each of them: `--help`.
 
-### 14f. Podzadania pod zakończonymi zadaniami (`close_children_of_done.py`)
+### 14f. Subtasks under completed tasks (`close_children_of_done.py`)
 
-Zamyka w Jirze wszystko, co jest otwarte pod **ukończonym** zadaniem. Domyślnie
-tylko raport.
+Closes in Jira everything that is open under a **completed** task. Report only by default.
 
-| Opcja | Działanie |
+| Option | Effect |
 |---|---|
-| (bez opcji) | raport: otwarte zgłoszenia pod ukończonymi zadaniami |
-| `--apply` | zamyka je **w Jirze** (status końcowy: `__ukonczone__` z mapy projektu albo głównej, inaczej `Fertig`; albo `--done-status`) |
-| `--apply --also-asana` | dodatkowo odhacza odpowiadające im zadania **w Asanie** (tylko po udanej zmianie w Jirze) |
-| `--source asana` (domyślnie) | drzewo i "ukończone" według Asany; spłaszczenie w Jirze nie ma znaczenia; wymaga projektu w arkuszu |
-| `--source jira` | hierarchia i status końcowy według Jiry |
-| `--only-keys A-1,A-2` | test na wybranych zgłoszeniach |
+| (no option) | report: open issues under completed tasks |
+| `--apply` | closes them **in Jira** (final status: `__ukonczone__` from the project or main map, otherwise `Fertig`; or `--done-status`) |
+| `--apply --also-asana` | additionally checks off the corresponding tasks **in Asana** (only after a successful change in Jira) |
+| `--source asana` (default) | tree and "completed" according to Asana; flattening in Jira does not matter; requires the project to be in the sheet |
+| `--source jira` | hierarchy and final status according to Jira |
+| `--only-keys A-1,A-2` | test on selected issues |
 
 ```bash
-python close_children_of_done.py --project-keys PROJ4                # raport
-python close_children_of_done.py --project-keys PROJ4 --apply        # tylko Jira
+python close_children_of_done.py --project-keys PROJ4                # report
+python close_children_of_done.py --project-keys PROJ4 --apply        # Jira only
 ```
-Od wprowadzenia dziedziczenia statusów (sekcja 11) synchronizacja robi to sama;
-narzędzie służy głównie do kontroli (oczekiwane: 0 do zamknięcia). Nie używaj
-`--source jira` w projektach skopiowanych z innej instancji Jiry: ich statusy
-wynikają ze źródła.
+Since status inheritance was introduced (section 11), the sync does this itself; the tool
+is mainly for checking (expected: 0 to close). Do not use `--source jira` in projects
+copied from another Jira instance: their statuses come from the source.
 
-### 14g. Przekreślone klucze w otwartych zgłoszeniach (`fix_stale_resolution.py`)
+### 14g. Struck-through keys in open issues (`fix_stale_resolution.py`)
 
-Zgłoszenie ma status otwarty, ale ustawione pole **Rozwiązanie** (Resolution),
-więc Jira pokazuje je jako zamknięte (przekreślony klucz, wypada z filtrów
-"unresolved"). Powstaje, gdy zgłoszenie było zamknięte, a potem przestawione
-z powrotem (np. przez synchronizację), a przejście w workflow nie czyści
-rozwiązania.
+An issue has an open status but the **Resolution** field set, so Jira shows it as closed
+(struck-through key, it drops out of "unresolved" filters). This happens when an issue was
+closed and then moved back (e.g. by the sync), and the workflow transition does not clear
+the resolution.
 ```bash
-python fix_stale_resolution.py --project-keys PROJ3,PROJ4           # raport z podziałem na typy
-python fix_stale_resolution.py --project-keys PROJ3,PROJ4 --apply   # czyszczenie, bez powiadomień
+python fix_stale_resolution.py --project-keys PROJ3,PROJ4           # report broken down by type
+python fix_stale_resolution.py --project-keys PROJ3,PROJ4 --apply   # clean up, without notifications
 ```
-Czyszczenie idzie przez edycję zgłoszenia, więc pole Resolution musi być na
-ekranie edycji danego typu (często nie ma go dla Epików). Skrypt sprawdza to
-dla każdego typu i typy bez pola tylko zgłasza. Wtedy administrator może
-tymczasowo dodać Resolution do ekranu edycji. **Trwała naprawa** jest
-w workflow: przejścia wychodzące ze statusów końcowych powinny mieć funkcję
-końcową "Update Issue Field: Resolution = None".
+The cleanup goes through editing the issue, so the Resolution field must be on the edit
+screen of the given type (it often is not for Epics). The script checks this for each type
+and only reports types without the field. An administrator can then temporarily add
+Resolution to the edit screen. **The permanent fix** is in the workflow: transitions out of
+final statuses should have the post-function "Update Issue Field: Resolution = None".
 
-### 14h. Zgłoszenia usunięte przez zespół w Jirze
+### 14h. Issues deleted by the team in Jira
 
-Gdy zespół usuwa w Jirze zadania, które nadal istnieją w Asanie (np. sprzątanie
-starych szablonów), porównanie pokazuje je jako "W stanie, ale zgłoszenia NIE MA
-w Jirze". Najpierw sprawdź, czy są usunięte (404), czy przeniesione do innego
-projektu (Jira zachowuje stary klucz jako przekierowanie):
+When the team deletes tasks in Jira that still exist in Asana (e.g. cleaning up old
+templates), the comparison shows them as "W stanie, ale zgłoszenia NIE MA w Jirze" (in the
+state, but the issue is NOT in Jira). First check whether they were deleted (404) or moved
+to another project (Jira keeps the old key as a redirect):
 ```bash
-for k in KLUCZ-2 KLUCZ-519; do
+for k in KEY-2 KEY-519; do
   curl -s -u "$JIRA_EMAIL:$JIRA_API_TOKEN" "$JIRA_BASE_URL/rest/api/3/issue/$k?fields=project" \
-    | python3 -c "import sys,json; d=json.load(sys.stdin); print('$k ->', d.get('key', 'USUNIĘTE (404)'), d.get('fields', {}).get('project', {}).get('key', ''))"
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print('$k ->', d.get('key', 'DELETED (404)'), d.get('fields', {}).get('project', {}).get('key', ''))"
 done
 ```
-**Usunięte** oznacz w stanie, żeby synchronizacja ich nie odtwarzała (lista
-z raportu porównania, każde sprawdzane jeszcze raz w Jirze):
+Mark **deleted** ones in the state so the sync does not recreate them (the list from the
+comparison report, each one checked again in Jira):
 ```bash
 python3 - << 'PY'
 import csv, shutil
@@ -1706,416 +1724,401 @@ for r in rows:
         ps[gid]["deleted_in_jira"] = True
         marked.append(key)
 ajs.save_state({KEY: ps})
-print(f"Oznaczono jako usunięte w Jirze: {len(marked)} z {len(rows)}")
+print(f"Marked as deleted in Jira: {len(marked)} of {len(rows)}")
 PY
 ```
-Porównanie pokaże je potem w "Oznaczone jako usunięte w Jirze (celowo pomijane)".
-**Przeniesione** do innego projektu synchronizacja nadal aktualizowałaby pod
-starym kluczem (czyli w nowym projekcie); jeśli to niepożądane, odłącz je
-(`deleted_in_jira` albo `jira_master`). Zespołom warto przekazać: zadanie
-usunięte w Jirze najlepiej usunąć też w Asanie albo dopisać tam "migriert zu Jira".
+The comparison will then show them under "Oznaczone jako usunięte w Jirze (celowo
+pomijane)" (marked as deleted in Jira, deliberately skipped). Issues **moved** to another
+project would still be updated by the sync under the old key (i.e. in the new project); if
+that is not wanted, detach them (`deleted_in_jira` or `jira_master`). Worth telling the
+teams: a task deleted in Jira is best also deleted in Asana, or marked "migriert zu Jira" there.
 
-## 15. Naprawa hierarchii w już zmigrowanych projektach
+## 15. Repairing the hierarchy in already migrated projects
 
-Hierarchia jest ustawiana przy tworzeniu zgłoszeń, więc błąd w wykryciu
-kandydatów albo zmiana struktury w Asanie wymaga osobnej naprawy. Wszystkie
-narzędzia z tej sekcji mają tryb raportu (domyślny) i zmieniają Jirę dopiero
-z `--apply`.
+The hierarchy is set when issues are created, so a mistake in candidate detection or a
+structure change in Asana requires a separate repair. All tools in this section have a
+report mode (the default) and change Jira only with `--apply`.
 
-### 15a. Projekty zmigrowane przed obsługą Epików (`retrofit_epics.py`)
+### 15a. Projects migrated before Epic support (`retrofit_epics.py`)
 
-Konwertuje zadania, które zostały zmigrowane jako zwykłe Taski, na pełną
-strukturę: Task → Epic, jego Sub-taski → Taski pod Epikiem, wnuki → Sub-taski.
-`asana_jira_sync.py` sam kieruje do tego skryptu, gdy trafi na kandydata na
-Epic z już zmigrowanymi podzadaniami:
+Converts tasks that were migrated as plain Tasks into the full structure: Task → Epic, its
+Sub-tasks → Tasks under the Epic, grandchildren → Sub-tasks. `asana_jira_sync.py` itself
+points to this script when it hits an Epic candidate with already migrated subtasks:
 ```bash
-python retrofit_epics.py --project-keys KLUCZ
+python retrofit_epics.py --project-keys KEY
 ```
-Wspiera `--shard`. Niskopoziomowe operacje (zmiana typu, przepinanie, Bulk
-Move dla typów, których nie da się zmienić zwykłą edycją) są w
-`convert_to_epic.py` i są współdzielone przez narzędzia z tej sekcji.
+Supports `--shard`. The low-level operations (changing the type, re-parenting, Bulk Move
+for types that cannot be changed by a regular edit) are in `convert_to_epic.py` and are
+shared by the tools in this section.
 
-Retrofit jest **opcjonalny**: nic nie ginie bez niego, zmienia się tylko struktura
-(spłaszczone Sub-taski stają się Taskami pod Epikiem). Ponieważ zmienia typy
-zgłoszeń, na których zespół może już pracować (inny widok na tablicy i w
-filtrach, klucze i treść bez zmian), decyzję warto uzgodnić z PM-em projektu.
-Kandydatów najprościej zbierać z podsumowań synchronizacji (linie `[POMINIĘTO]
-... jest kandydatem na Epic`) i zdecydować na koniec dla wszystkich projektów.
-Po retroficie: `refresh_state_flags.py --project-keys KLUCZ --apply` i
-`audit_hierarchy.py --project-keys KLUCZ --full`. Zmiana Sub-taska na Taska
-korzysta z tego samego mechanizmu co audyt, łącznie z wymaganym polem "Type".
+The retrofit is **optional**: nothing is lost without it, only the structure changes
+(flattened Sub-tasks become Tasks under an Epic). Since it changes the types of issues the
+team may already be working on (a different view on the board and in filters, keys and
+content unchanged), it is worth agreeing on the decision with the project's PM. Candidates
+are easiest to collect from the sync summaries (lines `[POMINIĘTO] ... jest kandydatem na
+Epic` = skipped, is an Epic candidate) and decide at the end for all projects. After the
+retrofit: `refresh_state_flags.py --project-keys KEY --apply` and
+`audit_hierarchy.py --project-keys KEY --full`. Changing a Sub-task to a Task uses the same
+mechanism as the audit, including the required "Type" field.
 
-### 15b. Fałszywe Epiki
+### 15b. False Epics
 
-Przed wprowadzeniem filtra z sekcji 11 podzadanie dodane dodatkowo do projektu
-w Asanie mogło zostać Epikiem (np. `PROJ11-127`, w Asanie podzadanie
-`PROJ11-107`). Procedura naprawy, w tej kolejności:
+Before the filter from section 11 was introduced, a subtask additionally added to the
+project in Asana could become an Epic (e.g. `PROJ11-127`, in Asana a subtask of
+`PROJ11-107`). The repair procedure, in this order:
 
-1. **Audyt** (tylko odczyt, zapisuje `epic_candidates_audit.csv`):
+1. **Audit** (read-only, saves `epic_candidates_audit.csv`):
    ```bash
    python audit_epic_candidates.py
    ```
-2. **Ponowne wykrycie kandydatów** dla dotkniętych projektów, żeby synchronizacja
-   nie odtworzyła fałszywych Epików:
+2. **Re-detect candidates** for the affected projects, so the sync does not recreate the
+   false Epics:
    ```bash
-   python detect_epic_candidates.py --project-keys KLUCZ1,KLUCZ2 --force
+   python detect_epic_candidates.py --project-keys KEY1,KEY2 --force
    ```
-3. **Raport, co trzeba zrobić** (stan sprawdzany na żywo w Jirze, nie z CSV):
+3. **Report of what needs to be done** (state checked live in Jira, not from the CSV):
    ```bash
    python revert_false_epics.py --csv epic_candidates_audit.csv
    ```
-   | Status | Znaczenie | Naprawa |
+   | Status | Meaning | Fix |
    |---|---|---|
-   | `OK_JUZ_POPRAWNY` | typ i rodzic się zgadzają | nic |
-   | `OK_SPLASZCZONE` | zadanie wisi pod przodkiem, bo docelowy rodzic jest Sub-taskiem (po 15c) | nic |
-   | `NAPRAWIALNE_SAM_RODZIC` | typ poprawny, brak rodzica (Epik) | `--apply` |
-   | `NAPRAWIALNE_TYP_I_RODZIC` | Epic bez dzieci, rodzic jest Epikiem: zmiana na Task | `--apply` |
-   | `NAPRAWIALNE_SUBTASK_I_RODZIC` | rodzic jest zwykłym zadaniem: zmiana na Sub-task | `--apply` |
-   | `WYMAGA_RECZNEJ_DECYZJI` | Epic z dziećmi, rodzic jest Epikiem | `--apply-cascade` |
-   | `WYMAGA_RECZNEJ_DECYZJI_GLEBOKA` | powinien być Sub-taskiem, ale ma własne dzieci (4+ poziomy) | krok 5 |
-   | `CEL_JEST_SUBTASKIEM`, `CEL_NIE_ISTNIEJE`, `KANDYDAT_NIE_ISTNIEJE` | nietypowe dane | ręcznie |
+   | `OK_JUZ_POPRAWNY` (already correct) | type and parent match | nothing |
+   | `OK_SPLASZCZONE` (flattened) | the task hangs under an ancestor because the target parent is a Sub-task (after 15c) | nothing |
+   | `NAPRAWIALNE_SAM_RODZIC` (fixable: parent only) | type correct, no parent (Epic) | `--apply` |
+   | `NAPRAWIALNE_TYP_I_RODZIC` (fixable: type and parent) | Epic without children, parent is an Epic: change to Task | `--apply` |
+   | `NAPRAWIALNE_SUBTASK_I_RODZIC` (fixable: subtask and parent) | parent is a regular task: change to Sub-task | `--apply` |
+   | `WYMAGA_RECZNEJ_DECYZJI` (needs a manual decision) | Epic with children, parent is an Epic | `--apply-cascade` |
+   | `WYMAGA_RECZNEJ_DECYZJI_GLEBOKA` (needs a manual decision, deep) | should be a Sub-task but has its own children (4+ levels) | step 5 |
+   | `CEL_JEST_SUBTASKIEM`, `CEL_NIE_ISTNIEJE`, `KANDYDAT_NIE_ISTNIEJE` | unusual data | by hand |
 
-   Pełny wynik: `revert_false_epics_report.csv`.
-4. **Naprawa:**
+   Full result: `revert_false_epics_report.csv`.
+4. **Fix:**
    ```bash
    python revert_false_epics.py --csv epic_candidates_audit.csv --apply
-   python revert_false_epics.py --csv epic_candidates_audit.csv --apply-cascade --only-keys KLUCZ-1   # test na jednym
+   python revert_false_epics.py --csv epic_candidates_audit.csv --apply-cascade --only-keys KEY-1   # test on one
    python revert_false_epics.py --csv epic_candidates_audit.csv --apply-cascade
    ```
-   Kaskada najpierw zmienia typ i rodzica samego zadania, dopiero potem
-   przepina jego dzieci jako Sub-taski (odwrotna kolejność jest niemożliwa:
-   Sub-task nie może wisieć pod Epikiem). Błąd jednego dziecka nie blokuje
-   pozostałych. `--dry-run` pokazuje operacje bez zapisu.
-5. **Łańcuchy 4+ poziomów** (`WYMAGA_RECZNEJ_DECYZJI_GLEBOKA`) są spłaszczane:
-   zadanie i wszystkie jego dzieci stają się Sub-taskami najbliższego stabilnego
-   przodka. Skrypt sam śledzi łańcuchy (np. `92 → 97 → 106`) i dociąga z Jiry
-   także dzieci spoza CSV:
+   The cascade first changes the type and parent of the task itself, and only then
+   re-parents its children as Sub-tasks (the reverse order is impossible: a Sub-task
+   cannot hang under an Epic). An error on one child does not block the others.
+   `--dry-run` shows the operations without writing.
+5. **Chains of 4+ levels** (`WYMAGA_RECZNEJ_DECYZJI_GLEBOKA`) are flattened: the task and
+   all its children become Sub-tasks of the nearest stable ancestor. The script follows the
+   chains itself (e.g. `92 → 97 → 106`) and also pulls in children from Jira that are not
+   in the CSV:
    ```bash
-   python diagnose_deep_chains.py --report revert_false_epics_report.csv   # co ucierpi (tylko odczyt)
+   python diagnose_deep_chains.py --report revert_false_epics_report.csv   # what will be affected (read-only)
    python resolve_deep_chains.py --csv epic_candidates_audit.csv                              # plan
-   python resolve_deep_chains.py --csv epic_candidates_audit.csv --apply --only-roots KLUCZ-1 # test
+   python resolve_deep_chains.py --csv epic_candidates_audit.csv --apply --only-roots KEY-1   # test
    python resolve_deep_chains.py --csv epic_candidates_audit.csv --apply
    ```
-   Świadomy kompromis: w Jirze znika jeden poziom grupowania z Asany. Treść,
-   komentarze i załączniki zostają.
-6. **Kontrola:** ponownie `revert_false_epics.py --csv ...` bez `--apply`.
-   Wszystkie wiersze powinny mieć `OK_JUZ_POPRAWNY` albo `OK_SPLASZCZONE`.
-7. **Odświeżenie flag w stanie** (sekcja 15c).
+   A deliberate compromise: one level of Asana grouping disappears in Jira. Content,
+   comments and attachments remain.
+6. **Check:** run `revert_false_epics.py --csv ...` again without `--apply`. All rows
+   should have `OK_JUZ_POPRAWNY` or `OK_SPLASZCZONE`.
+7. **Refresh the flags in the state** (section 15c).
 
-### 15c. Odświeżenie flag w stanie (`refresh_state_flags.py`)
+### 15c. Refreshing the flags in the state (`refresh_state_flags.py`)
 
-Po każdej zmianie hierarchii bezpośrednio w Jirze (15a, 15b, ręcznie) flagi
-`is_epic` / `is_subtask` / `top_level_ancestor_key` w `task_sync_state.json`
-są nieaktualne. Skutki: nowe podzadania z Asany trafiają pod złego rodzica
-albo kończą się błędem, a podział "zaktualizowane" w podsumowaniu jest
-niedokładny. Skrypt ustawia flagi zgodnie z Jirą (typy pobierane hurtowo przez
-JQL, 100 zgłoszeń na zapytanie):
+After any hierarchy change made directly in Jira (15a, 15b, by hand), the `is_epic` /
+`is_subtask` / `top_level_ancestor_key` flags in `task_sync_state.json` are out of date.
+Consequences: new subtasks from Asana go under the wrong parent or end in an error, and the
+"updated" breakdown in the summary is inaccurate. The script sets the flags according to
+Jira (types fetched in bulk via JQL, 100 issues per request):
 ```bash
-python refresh_state_flags.py --project-keys KLUCZ1,KLUCZ2            # raport
-python refresh_state_flags.py --project-keys KLUCZ1,KLUCZ2 --apply    # zapis
-python refresh_state_flags.py --apply                                 # wszystkie projekty ze stanu
+python refresh_state_flags.py --project-keys KEY1,KEY2            # report
+python refresh_state_flags.py --project-keys KEY1,KEY2 --apply    # write
+python refresh_state_flags.py --apply                             # all projects in the state
 ```
-Przed zapisem tworzy kopię `task_sync_state.backup_<data>.json`. Zmienia
-wyłącznie te trzy flagi, pełna lista zmian w `refresh_state_flags_report.csv`.
-**Nie uruchamiaj równolegle z synchronizacją** w żadnym kierunku.
+Before writing it creates a `task_sync_state.backup_<date>.json` copy. It changes only these
+three flags; the full list of changes is in `refresh_state_flags_report.csv`. **Do not run it
+in parallel with a sync** in either direction.
 
-Po naprawach pierwsze uruchomienie `jira_asana_sync.py` potraktuje wszystkie
-przestawione zgłoszenia jako zmienione (zmieniło się ich pole `updated` w
-Jirze) i jednorazowo wypchnie ich treść do Asany. Treść się nie zmieniła,
-więc to nieszkodliwe.
+After repairs, the first run of `jira_asana_sync.py` will treat all re-arranged issues as
+changed (their `updated` field in Jira changed) and push their content to Asana once. The
+content did not change, so this is harmless.
 
-### 15d. Diagnostyka Bulk Move
+### 15d. Bulk Move diagnostics
 
-Zmiana typu na Sub-task (albo z typu, którego nie da się zmienić zwykłą
-edycją) idzie przez Bulk Move API. Przy przenoszeniu **na typ Sub-task**
-rodzic musi być trzecim członem klucza mapowania,
-`"PROJEKT,id_typu,KLUCZ-RODZICA"`, a nie polem `targetParentId` (inaczej Jira
-zwraca ogólnikowe `Invalid request payload`). Ten format jest wbudowany
-w `convert_to_epic.py`.
+Changing the type to Sub-task (or from a type that cannot be changed by a regular edit) goes
+through the Bulk Move API. When moving **to the Sub-task type**, the parent must be the third
+part of the mapping key, `"PROJECT,type_id,PARENT-KEY"`, not the `targetParentId` field
+(otherwise Jira returns a vague `Invalid request payload`). This format is built into
+`convert_to_epic.py`.
 
-- `diagnose_subtask_types.py --project-keys KLUCZ`: jakie typy podzadań
-  istnieją w projekcie (tylko odczyt).
-- `diagnose_bulk_move_variants.py --key KLUCZ-1 --parent KLUCZ-2`: próbuje
-  kilku wariantów payloadu na jednym zgłoszeniu. **Uwaga:** pierwszy wariant,
-  który zadziała, naprawdę przenosi zgłoszenie. Nieudane warianty niczego nie
-  zmieniają.
+- `diagnose_subtask_types.py --project-keys KEY`: which subtask types exist in the project
+  (read-only).
+- `diagnose_bulk_move_variants.py --key KEY-1 --parent KEY-2`: tries several payload
+  variants on one issue. **Note:** the first variant that works really moves the issue.
+  Failed variants change nothing.
 
-### 15e. Audyt i naprawa hierarchii (`audit_hierarchy.py`)
+### 15e. Hierarchy audit and repair (`audit_hierarchy.py`)
 
-Sprawdza, czy każde zmigrowane zgłoszenie stoi w Jirze tam, gdzie wynika to
-z drzewa Asany (te same reguły co w sekcji 11). Rozpoznaje też jako poprawne
-struktury po naprawach z sekcji 15b. Projekty bez podzadań dodanych do listy
-projektu są pomijane jednym tanim zapytaniem (`--full` wymusza pełne sprawdzenie).
+Checks whether every migrated issue sits in Jira where the Asana tree says it should (the
+same rules as in section 11). It also recognizes structures after the repairs from section
+15b as correct. Projects without subtasks added to the project list are skipped with one
+cheap query (`--full` forces a full check).
 
-| Status | Znaczenie | Naprawa |
+| Status | Meaning | Fix |
 |---|---|---|
-| `OK` | zgodne | nic |
-| `SAMODZIELNY_TASK` | powinien być Sub-taskiem, jest samodzielnym Taskiem | `--apply` (jego Sub-taski przechodzą razem z nim) |
-| `ZLY_RODZIC_SUBTASK` | Sub-task pod złym rodzicem | `--apply` |
-| `TASK_BEZ_EPIKA` | powinien być Taskiem pod Epikiem, nie ma rodzica | `--apply` |
-| `SUBTASK_POD_EPIKIEM` | powinien być Taskiem pod Epikiem, jest Sub-taskiem pod nim | `--apply` |
-| `WYMAGA_PRZEGLADU` | inna niezgodność, np. podzadanie wyciągnięte w Asanie na najwyższy poziom | ręcznie (np. Jira: `•••` → Konwertuj na zgłoszenie) |
-| `RODZIC_NIEZMIGROWANY` | rodzica nie ma w Jirze | dociągnie go synchronizacja |
+| `OK` | consistent | nothing |
+| `SAMODZIELNY_TASK` (standalone task) | should be a Sub-task, is a standalone Task | `--apply` (its Sub-tasks move with it) |
+| `ZLY_RODZIC_SUBTASK` (wrong parent, subtask) | Sub-task under the wrong parent | `--apply` |
+| `TASK_BEZ_EPIKA` (task without Epic) | should be a Task under an Epic, has no parent | `--apply` |
+| `SUBTASK_POD_EPIKIEM` (subtask under Epic) | should be a Task under the Epic, is a Sub-task under it | `--apply` |
+| `WYMAGA_PRZEGLADU` (needs review) | another mismatch, e.g. a subtask pulled up to the top level in Asana | by hand (e.g. Jira: `•••` → Convert to issue) |
+| `RODZIC_NIEZMIGROWANY` (parent not migrated) | the parent is not in Jira | the sync will pull it in |
 
-Naprawy idą w ustalonej kolejności (najpierw Sub-taski pod Epikiem stają się
-Taskami, potem przepinanie Sub-tasków, potem samodzielne Taski), a przed każdą
-zmianą stan jest sprawdzany na żywo.
+Repairs run in a fixed order (first Sub-tasks under an Epic become Tasks, then Sub-tasks
+are re-parented, then standalone Tasks), and the state is checked live before every change.
 ```bash
-python audit_hierarchy.py                                          # raport, projekty z arkusza
-python audit_hierarchy.py --project-keys A,B --apply --only-keys A-12   # test na jednym zgłoszeniu
+python audit_hierarchy.py                                          # report, projects from the sheet
+python audit_hierarchy.py --project-keys A,B --apply --only-keys A-12   # test on one issue
 python audit_hierarchy.py --project-keys A,B --apply
 python refresh_state_flags.py --project-keys A,B --apply
-python audit_hierarchy.py --project-keys A,B                       # kontrola: same OK
+python audit_hierarchy.py --project-keys A,B                       # check: all OK
 ```
-Zmiany typu idą przez zwykłą edycję, a dla starych, zmigrowanych typów (np.
-`Subtask` o id 10059, którego edycja jest odrzucana) przez **Bulk Move**. Przy
-Bulk Move wymagane pola docelowego typu (u nas pole **"Type"**, wymagane dla
-Tasków i Sub-tasków) są uzupełniane tak jak przy tworzeniu: `DEFAULT_TYPE_FIELD_VALUE`
-z `.env` (domyślnie `NONBILLABLE`) oraz pola z jedną dozwoloną wartością
-(Jira wymaga wtedy `inferFieldDefaults = false`, co narzędzie ustawia samo).
-Komunikat `Bulk Move nie zakończyło się w ciągu 60s` oznacza zwykle tylko
-wolną kolejkę po stronie Jiry: operacja najczęściej wykonuje się chwilę później,
-a jeśli nie, zgłoszenie pojawi się w kolejnym raporcie i ponowne `--apply` je
-dokończy. Długi przebieg można wstrzymać `kill -STOP <PID>` i wznowić
-`kill -CONT <PID>` (operacja w toku może wtedy trafić do błędów).
+Type changes go through a regular edit, and for old, migrated types (e.g. `Subtask` with
+id 10059, whose edit is rejected) through **Bulk Move**. With Bulk Move, the required fields
+of the target type (in our case the **"Type"** field, required for Tasks and Sub-tasks) are
+filled in the same way as on creation: `DEFAULT_TYPE_FIELD_VALUE` from `.env` (default
+`NONBILLABLE`) and fields with a single allowed value (Jira then requires
+`inferFieldDefaults = false`, which the tool sets itself). The message `Bulk Move nie
+zakończyło się w ciągu 60s` (Bulk Move did not finish within 60s) usually just means a slow
+queue on Jira's side: the operation most often completes a moment later, and if not, the
+issue will appear in the next report and another `--apply` will finish it. A long run can be
+paused with `kill -STOP <PID>` and resumed with `kill -CONT <PID>` (the operation in progress
+may then end up among the errors).
 
-Raport w `audit_hierarchy_report.csv` (przy `--shard` każdy proces nadpisuje
-ten sam plik). Naprawa zmienia widok tablic: przepięte zgłoszenia pokazują się
-pod rodzicem zamiast jako osobne karty, więc warto uprzedzić zespół. Projektów
-zarchiwizowanych nie naprawiamy (są tylko do odczytu i zostały przyjęte w
-obecnej postaci).
+Report in `audit_hierarchy_report.csv` (with `--shard` each process overwrites the same
+file). The repair changes the board view: re-parented issues show up under their parent
+instead of as separate cards, so it is worth warning the team. We do not repair archived
+projects (they are read-only and were accepted as they are).
 
-### 15f. Odtwarzanie zgubionych powiązań (`relink_state.py`)
+### 15f. Restoring lost links (`relink_state.py`)
 
-Dla zgłoszeń, które są w Jirze, ale nie mają wpisu w stanie (zgubione przez
-dawny błąd zapisu stanu, sekcja 11), szuka odpowiadającego zadania w Asanie.
-**Przed naprawą projekt musi być w `sync_exclude.txt`**: synchronizacja
-z niepełnym stanem utworzyłaby wszystko drugi raz.
+For issues that are in Jira but have no entry in the state (lost through the old
+state-saving bug, section 11), it looks for the matching task in Asana. **Before the repair
+the project must be in `sync_exclude.txt`**: a sync with an incomplete state would create
+everything a second time.
 
-Przebiegi dopasowania (kolejno, każdy działa na tym, czego nie dopasowały poprzednie):
+Matching passes (in order, each working on what the previous ones did not match):
 
-| Kategoria | Reguła | Zapis |
+| Category | Rule | Written with |
 |---|---|---|
-| `LINK` | zgłoszenie ma link zdalny `asana:task:<gid>` | `--apply` |
-| `PEWNE` | identyczny tytuł, jednoznaczna para, rodzic zgodny | `--apply` |
-| `KOLEJNOSC` | ten sam tytuł powtórzony (np. szablony "TODOs:"); rozstrzygane po kolejności tworzenia, osobno dla każdej grupy o identycznym zbiorze kandydatów (w praktyce: pod tym samym rodzicem). Gdy kopii jest **więcej** niż zadań (ponowne synchronizacje utworzyły serie duplikatów, także niepełne po przerwanym przebiegu), najstarsza seria jest wiązana, a dalsze serie trafiają do `DUPLIKAT` | `--include-order` |
-| `PODOBNE` | tytuł podobny, rodzic musi się zgadzać | `--include-similar` |
-| `TRESC` | punktacja: tytuł, opis, termin, przypisany, ukończenie, rodzic; próg 5 pkt z przewagą 1,5 | `--include-content` |
-| `DUPLIKAT` | druga (kolejna) kopia zadania, które ma już powiązanie | usuwa 15g |
-| `NADMIAROWA_KOPIA` | kolejna kopia zadania z powtarzanym tytułem | usuwa 15g |
-| `NIEJEDNOZNACZNE` | kilku kandydatów; w uwagach przyczyna: "rodzic też nierozstrzygnięty" albo "mniej kopii niż zadań" (wtedy nic nie jest zgadywane) | ręcznie |
-| `BRAK_W_ASANIE` | zgłoszenie bez odpowiednika (utworzone w Jirze albo stara kopia przemianowanego zadania) | `--explain`, ewentualnie 15g `--include-orphans` |
-| `NIEZMIGROWANE` | zadanie z Asany bez zgłoszenia | dociągnie synchronizacja |
+| `LINK` | the issue has a remote link `asana:task:<gid>` | `--apply` |
+| `PEWNE` (certain) | identical title, unambiguous pair, matching parent | `--apply` |
+| `KOLEJNOSC` (order) | the same title repeated (e.g. "TODOs:" templates); resolved by creation order, separately for each group with an identical set of candidates (in practice: under the same parent). When there are **more** copies than tasks (repeated syncs created series of duplicates, including incomplete ones after an interrupted run), the oldest series is linked and further series go to `DUPLIKAT` | `--include-order` |
+| `PODOBNE` (similar) | similar title, the parent must match | `--include-similar` |
+| `TRESC` (content) | scoring: title, description, due date, assignee, completion, parent; threshold 5 points with a 1.5 lead | `--include-content` |
+| `DUPLIKAT` (duplicate) | a second (further) copy of a task that already has a link | removed by 15g |
+| `NADMIAROWA_KOPIA` (surplus copy) | a further copy of a task with a repeated title | removed by 15g |
+| `NIEJEDNOZNACZNE` (ambiguous) | several candidates; the notes give the reason: "parent also unresolved" or "fewer copies than tasks" (then nothing is guessed) | by hand |
+| `BRAK_W_ASANIE` (missing in Asana) | an issue without a counterpart (created in Jira or an old copy of a renamed task) | `--explain`, possibly 15g `--include-orphans` |
+| `NIEZMIGROWANE` (not migrated) | an Asana task without an issue | the sync will pull it in |
 
-**Reguła "podobne"** (zaostrzona po błędnych dopasowaniach krótkich niemieckich
-tytułów): podobne są tytuły, w których wszystkie słowa krótszego występują
-w dłuższym, a dłuższy ma najwyżej tyle **dodatkowych** słów, ile słów ma krótszy
-(min. 1), albo tytuły prawie identyczne (co najmniej 85%).
+**The "similar" rule** (tightened after wrong matches of short German titles): titles are
+similar if all words of the shorter one occur in the longer one, and the longer one has at
+most as many **extra** words as the shorter one has words (min. 1), or the titles are almost
+identical (at least 85%).
 
-| Para | Wynik |
+| Pair | Result |
 |---|---|
-| "NB" ~ "GoLive NB" | podobne (1 słowo dodane) |
-| "DEV Breadcrumbs auf Collection-Pages" ~ "Breadcrumbs auf Collection-Pages" | podobne |
-| "Show breadcrumbs aktivieren" ~ "Show breadcrumb links aktivieren" | podobne (92%) |
-| "Artikel ... archiviert (mirgiert zu Jira)" ~ "Artikel ... archiviert" | podobne |
-| "[Produkte]" ~ "[Produkte] Produkte anlegen" | **nie** (jednowyrazowy nagłówek + 2 słowa) |
-| "Sale Bilder sind nicht lokalisiert" ~ "Newsletter Widget lokalisieren" | **nie** |
-| "Projekt-Beschreibung anpassen" ~ "Float Projekt anpassen" | **nie** |
+| "NB" ~ "GoLive NB" | similar (1 word added) |
+| "DEV Breadcrumbs auf Collection-Pages" ~ "Breadcrumbs auf Collection-Pages" | similar |
+| "Show breadcrumbs aktivieren" ~ "Show breadcrumb links aktivieren" | similar (92%) |
+| "Artikel ... archiviert (mirgiert zu Jira)" ~ "Artikel ... archiviert" | similar |
+| "[Produkte]" ~ "[Produkte] Produkte anlegen" | **not** (one-word heading + 2 words) |
+| "Sale Bilder sind nicht lokalisiert" ~ "Newsletter Widget lokalisieren" | **not** |
+| "Projekt-Beschreibung anpassen" ~ "Float Projekt anpassen" | **not** |
 
-**Zawsze przejrzyj `PODOBNE` i `TRESC` przed zapisem:**
+**Always review `PODOBNE` and `TRESC` before writing:**
 ```bash
-grep -E "^(PODOBNE|TRESC)" relink_state_report.csv | cut -d, -f3,5,7     # tytuł Asany, zgłoszenie, tytuł w Jirze / punktacja
-python relink_state.py --project-key KLUCZ --explain KLUCZ-509            # kandydaci i punktacja dla jednego zgłoszenia
+grep -E "^(PODOBNE|TRESC)" relink_state_report.csv | cut -d, -f3,5,7     # Asana title, issue, Jira title / score
+python relink_state.py --project-key KEY --explain KEY-509                # candidates and scoring for one issue
 ```
 
-Komendy:
+Commands:
 ```bash
-python relink_state.py --project-key KLUCZ                                  # raport
-python relink_state.py --project-key KLUCZ --apply                          # LINK + PEWNE
-python relink_state.py --project-key KLUCZ --apply --include-order --include-similar --include-content
-python relink_state.py --project-key KLUCZ --report-file raporty/KLUCZ.csv  # własny plik raportu
+python relink_state.py --project-key KEY                                  # report
+python relink_state.py --project-key KEY --apply                          # LINK + PEWNE
+python relink_state.py --project-key KEY --apply --include-order --include-similar --include-content
+python relink_state.py --project-key KEY --report-file raporty/KEY.csv    # custom report file
 ```
-Po zapisie każde odtworzone powiązanie dostaje link do Asany, a wpis ma
-wyczyszczoną datę zmiany, więc najbliższa synchronizacja odświeży treść
-zgłoszenia z Asany. Flagi `already_synced` sprawdzają komentarze i załączniki
-już obecne w zgłoszeniu, więc nie powstaną drugi raz. Narzędzie na starcie
-sprawdza wersję `asana_jira_sync.py` (stara wersja zapisu stanu = odmowa),
-pomija zgłoszenia skopiowane z innej instancji i projekty chronione.
+After writing, every restored link gets a link to Asana, and the entry has its modification
+date cleared, so the next sync refreshes the issue content from Asana. The `already_synced`
+flags check comments and attachments already present in the issue, so they will not be
+created a second time. At startup the tool checks the version of `asana_jira_sync.py` (an old
+state-saving version = refusal), and skips issues copied from another instance and protected
+projects.
 
-### 15g. Usuwanie duplikatów z raportu (`resolve_relink_duplicates.py`)
+### 15g. Removing duplicates from the report (`resolve_relink_duplicates.py`)
 
-Usuwa zgłoszenia z kategorii `DUPLIKAT` i `NADMIAROWA_KOPIA` ostatniego raportu
-`relink_state.py`. Zasady:
+Deletes issues in the `DUPLIKAT` and `NADMIAROWA_KOPIA` categories of the latest
+`relink_state.py` report. Rules:
 
-- wszystkie kopie jednego zadania są grupowane (bywa ich więcej niż dwie),
-- **zostaje najstarsza** kopia (data utworzenia); stan i link do Asany są na nią
-  przepinane, a data zmiany czyszczona (synchronizacja odświeży jej treść),
-- przed usunięciem sprawdzana jest **praca zespołu** (komentarze i zmiany
-  w historii od osoby innej niż konto synchronizacji). Kopia z pracą trafia do
-  `DO_DECYZJI` i nie jest usuwana,
-- podzadania usuwanej kopii, których nie ma zachowywane zgłoszenie, są
-  **przenoszone** pod nie przed usunięciem (Bulk Move); gdy przeniesienie nie
-  zostanie potwierdzone, kopia nie jest usuwana,
-- usuwanie od najgłębszego poziomu w górę,
-- **nigdy** nie usuwa zgłoszeń skopiowanych z innej instancji Jiry (`POMINIĘTE`).
+- all copies of one task are grouped (there can be more than two),
+- **the oldest** copy (by creation date) **is kept**; the state and the Asana link are moved
+  to it, and the modification date is cleared (the sync will refresh its content),
+- before deleting, **team work** is checked (comments and history changes by someone other
+  than the sync account). A copy with work goes to `DO_DECYZJI` (to decide) and is not deleted,
+- subtasks of the deleted copy that the kept issue does not have are **moved** under it before
+  deletion (Bulk Move); if the move is not confirmed, the copy is not deleted,
+- deletion goes from the deepest level upwards,
+- it **never** deletes issues copied from another Jira instance (`POMINIĘTE` = skipped).
 
 ```bash
-python resolve_relink_duplicates.py --project-key KLUCZ                          # plan
-python resolve_relink_duplicates.py --project-key KLUCZ --apply --limit 3        # test
-python resolve_relink_duplicates.py --project-key KLUCZ --apply                  # pyta o TAK
-grep "^DO_DECYZJI" resolve_relink_duplicates_plan.csv | cut -d, -f3,6            # powody wstrzymania
+python resolve_relink_duplicates.py --project-key KEY                          # plan
+python resolve_relink_duplicates.py --project-key KEY --apply --limit 3        # test
+python resolve_relink_duplicates.py --project-key KEY --apply                  # asks for TAK (yes)
+grep "^DO_DECYZJI" resolve_relink_duplicates_plan.csv | cut -d, -f3,6          # reasons for holding back
 ```
-`--include-orphans` usuwa dodatkowo `BRAK_W_ASANIE`, ale **tylko** gdy raport
-potwierdza, że każde zadanie z Asany ma już zgłoszenie (zero `NIEZMIGROWANE`,
-`NIEJEDNOZNACZNE` i niezapisanych dopasowań); w przeciwnym razie odmawia.
-Kopia, która ma podzadania powiązane z Asaną, trafia do `DO_DECYZJI`.
-`--relink-report` i `--plan-file` wskazują pliki projektu (używa ich 15i).
+`--include-orphans` additionally deletes `BRAK_W_ASANIE`, but **only** when the report confirms
+that every Asana task already has an issue (zero `NIEZMIGROWANE`, `NIEJEDNOZNACZNE` and unsaved
+matches); otherwise it refuses. A copy that has subtasks linked to Asana goes to `DO_DECYZJI`.
+`--relink-report` and `--plan-file` point to the project's files (used by 15i).
 
-Typowe powody w `DO_DECYZJI` i co z nimi zrobić:
+Typical reasons in `DO_DECYZJI` and what to do with them:
 
-| Powód | Co zrobić |
+| Reason | What to do |
 |---|---|
-| komentarze/zmiany osób z zespołu | zespół pracował na tym zgłoszeniu: nie usuwać; często to przypadek z 15h |
-| zmiany automatyzacji albo Twoje z testów | można usunąć ręcznie |
-| podzadania powiązane z Asaną | sprawdzić strukturę, zwykle naprawi to 15e |
+| comments/changes by team members | the team worked on this issue: do not delete; often this is the case from 15h |
+| changes by automation or your own from tests | can be deleted by hand |
+| subtasks linked to Asana | check the structure, usually 15e fixes it |
 
-### 15h. Zadania przeniesione ręcznie do Jiry (`handle_migrated_to_jira.py`)
+### 15h. Tasks moved to Jira by hand (`handle_migrated_to_jira.py`)
 
-Porządkuje zadania z dopiskiem "migriert zu Jira" (sekcja 11) i ich poddrzewa.
-Dla każdego zadania szuka **zgłoszenia zespołu** (bez powiązania, tytuł jak
-w Asanie bez dopisku; dla podzadań pod zgłoszeniem zespołu rodzica) i **kopii**
-z synchronizacji (tej, na którą wskazuje stan):
+Tidies up tasks marked "migriert zu Jira" (section 11) and their subtrees. For each task it
+looks for the **team's issue** (without a link, title as in Asana without the note; for
+subtasks under the parent's team issue) and the **copy** from the sync (the one the state
+points to):
 
-| Akcja | Kiedy | Skutek |
+| Action | When | Result |
 |---|---|---|
-| `USUŃ_KOPIĘ` | jest zgłoszenie zespołu, na kopii nikt nie pracował | kopia usunięta, stan na zgłoszenie zespołu |
-| `PRZEPNIJ` | jest zgłoszenie zespołu, kopii brak | stan na zgłoszenie zespołu |
-| `OZNACZ` | brak osobnego zgłoszenia zespołu | zostaje istniejące zgłoszenie |
-| `DO_DECYZJI` | na kopii też ktoś pracował | nic nie jest zmieniane |
+| `USUŃ_KOPIĘ` (delete copy) | there is a team issue, nobody worked on the copy | copy deleted, state pointed to the team issue |
+| `PRZEPNIJ` (re-point) | there is a team issue, no copy | state pointed to the team issue |
+| `OZNACZ` (mark) | no separate team issue | the existing issue stays |
+| `DO_DECYZJI` (to decide) | someone also worked on the copy | nothing is changed |
 
-We wszystkich przypadkach poza `DO_DECYZJI` wpis dostaje flagę `jira_master`:
-synchronizacja już nigdy go nie tworzy ani nie aktualizuje.
+In all cases except `DO_DECYZJI` the entry gets the `jira_master` flag: the sync will never
+create or update it again.
 ```bash
-python handle_migrated_to_jira.py --project-key KLUCZ            # plan
-python handle_migrated_to_jira.py --project-key KLUCZ --apply
+python handle_migrated_to_jira.py --project-key KEY            # plan
+python handle_migrated_to_jira.py --project-key KEY --apply
 ```
-Plan wypisuje też pozostałe zgłoszenia bez powiązania, niezwiązane z dopiskiem.
-Narzędzie ich nie rusza (najczęściej to zgłoszenia utworzone przez zespół wprost
-w Jirze).
+The plan also lists the remaining issues without a link that are unrelated to the note. The
+tool does not touch them (most often these are issues created by the team directly in Jira).
 
-### 15i. Naprawa wielu projektów naraz (`repair_batch.py`)
+### 15i. Repairing many projects at once (`repair_batch.py`)
 
-Uruchamia narzędzia 15f-15h dla listy projektów **po kolei** (nigdy równolegle
-na tym samym projekcie), z osobnym folderem raportów na projekt
-(`repair_reports/<KLUCZ>/`: `relink.csv`, `dup_plan.csv`, `migrated_plan.csv`
-i pełne logi każdego kroku), pokazuje wyjście narzędzi na bieżąco i kończy
-jedną tabelą.
+Runs the 15f-15h tools for a list of projects **one after another** (never in parallel on the
+same project), with a separate report folder per project (`repair_reports/<KEY>/`:
+`relink.csv`, `dup_plan.csv`, `migrated_plan.csv` and full logs of each step), shows the tools'
+output live and ends with one table.
 ```bash
-python repair_batch.py relink   --keys-file partia.txt                       # raport + tabela kategorii
+python repair_batch.py relink   --keys-file partia.txt                       # report + category table
 python repair_batch.py relink   --keys-file partia.txt --apply --include-order --include-similar --include-content
-python repair_batch.py dup      --keys-file partia.txt                       # plany + tabela
-python repair_batch.py dup      --keys-file partia.txt --apply               # pyta raz o TAK
+python repair_batch.py dup      --keys-file partia.txt                       # plans + table
+python repair_batch.py dup      --keys-file partia.txt --apply               # asks for TAK (yes) once
 python repair_batch.py migrated --keys-file partia.txt [--apply]
-python repair_batch.py relink   --keys-file partia.txt --shard 1/3           # i 2/3, 3/3 w osobnych terminalach
+python repair_batch.py relink   --keys-file partia.txt --shard 1/3           # and 2/3, 3/3 in separate terminals
 ```
-Plik partii: jeden klucz w linii, `#` = komentarz. `--project-keys A,B` zamiast
-pliku. `--quiet` pokazuje samą tabelę. Projekty z `protected_projects.txt` są
-pomijane. Przy podziale na części każdy projekt trafia do dokładnie jednej
-części, a narzędzia zapisujące zakładają blokadę projektu; więcej niż 3 procesy
-naraz nie przyspieszą pracy (limity zapytań Asany i Jiry).
+Batch file: one key per line, `#` = comment. `--project-keys A,B` instead of a file. `--quiet`
+shows just the table. Projects from `protected_projects.txt` are skipped. When split into parts,
+each project goes to exactly one part, and the writing tools take a project lock; more than 3
+processes at once will not speed things up (Asana and Jira rate limits).
 
-**Czas pracy:** raport `relink` to jedno zapytanie do Asany na zadanie plus
-jedno do Jiry na zgłoszenie bez powiązania (duży projekt: kilka tysięcy zapytań,
-kilkanaście minut). Zapis jest wolniejszy, bo dla każdego odtwarzanego powiązania
-sprawdza komentarze i załączniki.
+**Running time:** the `relink` report is one Asana request per task plus one Jira request per
+issue without a link (a large project: several thousand requests, a dozen or so minutes).
+Writing is slower, because for each restored link it checks comments and attachments.
 
-**Procedura dla partii** (punkty **⏸**: wynik do przejrzenia przed zapisem):
+**Procedure for a batch** (**⏸** points: review the result before writing):
 ```bash
 PARTIA=partia_00.txt
 KEYS=$(sed 's/#.*//' "$PARTIA" | tr -d ' \t' | grep -v '^$' | paste -sd, -)
 cp task_sync_state.json "task_sync_state.backup_$(date +%Y%m%d_%H%M%S)_${PARTIA%.txt}.json"
 
-# 1. powiązania
-python repair_batch.py relink --keys-file "$PARTIA"                         # ⏸ tabela, przegląd PODOBNE/TRESC
+# 1. links
+python repair_batch.py relink --keys-file "$PARTIA"                         # ⏸ table, review PODOBNE/TRESC
 python repair_batch.py relink --keys-file "$PARTIA" --apply --include-order --include-similar --include-content
-# 2. duplikaty (świeży raport po zapisie)
+# 2. duplicates (fresh report after writing)
 python repair_batch.py relink --keys-file "$PARTIA"
-python repair_batch.py dup --keys-file "$PARTIA"                            # ⏸ "do decyzji" = 0?
+python repair_batch.py dup --keys-file "$PARTIA"                            # ⏸ "to decide" = 0?
 python repair_batch.py dup --keys-file "$PARTIA" --apply
 # 3. "migriert zu Jira"
-python repair_batch.py migrated --keys-file "$PARTIA"                       # jeśli coś pokaże: --apply
-# 4. struktura
+python repair_batch.py migrated --keys-file "$PARTIA"                       # if it shows anything: --apply
+# 4. structure
 python refresh_state_flags.py --project-keys "$KEYS" --apply
 python audit_hierarchy.py --project-keys "$KEYS" --full                     # ⏸ WYMAGA_PRZEGLADU = 0?
 python audit_hierarchy.py --project-keys "$KEYS" --full --apply
 python refresh_state_flags.py --project-keys "$KEYS" --apply
-python fix_stale_resolution.py --project-keys "$KEYS"                       # jeśli coś pokaże: --apply
-# 5. synchronizacja (zdjęcie partii z sync_exclude.txt - skrypt w sekcji 11)
+python fix_stale_resolution.py --project-keys "$KEYS"                       # if it shows anything: --apply
+# 5. sync (remove the batch from sync_exclude.txt - script in section 11)
 python detect_epic_candidates.py --project-keys "$KEYS" --force
-python asana_jira_sync.py --project-keys "$KEYS"                            # ⏸ podsumowanie
-# 6. kontrola
+python asana_jira_sync.py --project-keys "$KEYS"                            # ⏸ summary
+# 6. check
 python compare_project_totals.py "$KEYS"
 python audit_hierarchy.py --project-keys "$KEYS" --full
 ```
-Zmienne `PARTIA` i `KEYS` trzeba ustawić w każdym nowym terminalu. Przy wielu
-partiach krok 5 można uruchomić przez `run_full_pipeline.py --only sync
---parallel 3`: projekty jeszcze nienaprawione są w `sync_exclude.txt`, więc
-zostaną pominięte. Projekty, które mają tylko braki od poziomu 2 (bez zgubionych
-powiązań), przechodzą kroki 1-3 bez zmian, a naprawia je dopiero krok 5.
+The `PARTIA` and `KEYS` variables have to be set in every new terminal. With many batches,
+step 5 can be run through `run_full_pipeline.py --only sync --parallel 3`: projects not yet
+repaired are in `sync_exclude.txt`, so they will be skipped. Projects that only have gaps from
+level 2 (no lost links) pass steps 1-3 unchanged and are fixed only by step 5.
 
-### 15j. Ręczna konwersja na Epik (`convert_to_epic.py`)
+### 15j. Manual conversion to an Epic (`convert_to_epic.py`)
 
 ```bash
-python convert_to_epic.py --keys KLUCZ-1,KLUCZ-2 --dry-run
-python convert_to_epic.py --keys KLUCZ-1 --convert-subtasks
+python convert_to_epic.py --keys KEY-1,KEY-2 --dry-run
+python convert_to_epic.py --keys KEY-1 --convert-subtasks
 ```
 
-Zamienia wskazane zadania na Epic i jawnie ustawia *Epic Name*. Jira przy
-zmianie typu zostawia to pole puste, choć jest wymagane. Z
-`--convert-subtasks` dodatkowo zamienia bezpośrednie podzadania na Task
-pod nowym Epikiem. To narzędzie do pojedynczych przypadków, niezależne od
-automatycznej synchronizacji.
+Turns the given tasks into Epics and explicitly sets *Epic Name*. When changing the type, Jira
+leaves this field empty, even though it is required. With `--convert-subtasks` it also turns
+the direct subtasks into Tasks under the new Epic. This is a tool for individual cases,
+independent of the automatic sync.
 
-Przy zmianie typu przez Bulk Move (typy, których nie da się zmienić zwykłą
-edycją) wymagane pola docelowego typu, w tym "Type", są uzupełniane
-automatycznie (sekcja 15e).
+When changing the type via Bulk Move (types that cannot be changed by a regular edit), the
+required fields of the target type, including "Type", are filled in automatically (section 15e).
 
-## 16. Pliki stanu i cache (nie kasować bez potrzeby)
+## 16. State and cache files (do not delete without a reason)
 
-| Plik | Tworzy | Rola | Czy można skasować |
+| File | Created by | Role | Can it be deleted |
 |---|---|---|---|
-| `task_sync_state.json` | `asana_jira_sync.py` i narzędzia naprawcze | powiązania Asana ↔ Jira, flagi hierarchii (`is_epic`, `is_subtask`, `top_level_ancestor_key`), `status_applied`, `asana_link`, `deleted_in_jira`, `jira_master`, zsynchronizowane komentarze i załączniki (oba kierunki) | **nie**: następna synchronizacja utworzy duplikaty |
-| `task_sync_state.backup_*.json` | `refresh_state_flags.py`, `relink_state.py`, `resolve_relink_duplicates.py`, `handle_migrated_to_jira.py`, ręcznie | kopie zapasowe stanu (w nazwie data i powód, np. `_relink_KLUCZ`, `_dupl_KLUCZ`, `_migriert_KLUCZ`) | tak, gdy nie są już potrzebne |
-| `sync_exclude.txt` | ręcznie | projekty **tymczasowo** wyłączone z synchronizacji (sekcja 11) | tak, gdy nic nie jest naprawiane |
-| `protected_projects.txt` | ręcznie | projekty **trwale** wyłączone z synchronizacji i wszystkich narzędzi zmieniających dane | nie, dopóki ma obowiązywać |
-| `section_status_map.json` | ręcznie | główna mapa sekcja Asany → status Jiry | **nie** |
-| `section_status_map.<KLUCZ>.json` | ręcznie | mapa sekcji dla jednego projektu, z `__ukonczone__` | tak, wtedy projekt wraca do głównej mapy |
-| `project_key_cache.json` | `jira_sync.py` | przydzielone klucze projektów (po GID Asany) | nie zalecane |
-| `asana_project_gids.json` | narzędzia kontrolne | cache GID projektów Asany spoza arkusza | tak |
-| `epic_candidates.json` | `detect_epic_candidates.py` | kandydaci na Epic per projekt | tak, ale przed synchronizacją trzeba go odtworzyć |
-| `workflow_graph_cache.json` | `asana_jira_sync.py` | mapa przejść workflow do zmiany statusów | tak |
-| `auth_state.json` | `save_login_session.py` | sesja przeglądarki (kolumny tablic) | tak, wtedy trzeba zalogować się ponownie |
-| `user_map.json` | ręcznie | użytkownicy **Asany** → konta Jiry | **nie**; nie nadpisywać mapą z innej instancji |
-| `wt_user_map.json` (lub inna nazwa) | ręcznie | osoby z cudzej instancji Jiry → nasze konta | tak, po zakończeniu kopiowania przyrostowego |
-| `status_map_projekt1.json`, `status_map_projekt2.json` | ręcznie | mapy statusów dla kopiowania z innej instancji | nie, dopóki dociągane są nowości |
-| `cross_instance_copy_state.json` | `copy_project_cross_instance.py` | powiązania źródło → cel (klucze `ŹRÓDŁO` albo `ŹRÓDŁO>CEL`), `status_applied` | **nie**, dopóki kopia ma być wznawialna, a zwłaszcza dopóki projekt docelowy jest synchronizowany z Asaną (narzędzia z sekcji 14-15 na jego podstawie pomijają te zgłoszenia) |
-| `repair_reports/<KLUCZ>/` | `repair_batch.py` | raporty, plany i logi kroków naprawy projektu | tak, po zakończonej naprawie |
-| `relink_state_report.csv`, `resolve_relink_duplicates_plan.csv`, `handle_migrated_to_jira_plan.csv` | narzędzia 15f-15h (uruchamiane bez `repair_batch.py`) | ostatni raport/plan; `resolve_relink_duplicates.py` czyta raport relink | tak, ale przed `dup` trzeba odświeżyć raport relink |
-| `audit_hierarchy_report.csv`, `compare_project_totals_report.csv`, `refresh_state_flags_report.csv` | narzędzia kontrolne | raporty | tak |
-| `projekty_all.txt`, `pilot.txt`, `partia_*.txt` | ręcznie | listy projektów do naprawy partiami | tak |
-| `jira_schema_state.json` | `build_jira_schema.py` | mapowanie nazwa → ID obiektów konfiguracji (tylko podgląd; skrypt i tak sprawdza Jirę) | tak |
-| `jira_schema_<klucz>.yaml`, `status_map_<klucz>.json` | `export_source_workflows.py` | workflow źródła i mapa statusów 1:1 | tak, po odtworzeniu workflow i skopiowaniu zadań |
-| `epics_stories_state.json` | `create_epics_stories_from_sheet.py` | utworzone Epiki i Story | tak; **trzeba** go usunąć po skasowaniu zgłoszeń testowych w Jirze |
-| `pipeline_summaries/`, `logs/` | skrypty | podsumowania i logi | tak |
-| `__pycache__/` | Python | skompilowane moduły | tak, zawsze (Python odbuduje) |
+| `task_sync_state.json` | `asana_jira_sync.py` and the repair tools | Asana ↔ Jira links, hierarchy flags (`is_epic`, `is_subtask`, `top_level_ancestor_key`), `status_applied`, `asana_link`, `deleted_in_jira`, `jira_master`, synced comments and attachments (both directions) | **no**: the next sync will create duplicates |
+| `task_sync_state.backup_*.json` | `refresh_state_flags.py`, `relink_state.py`, `resolve_relink_duplicates.py`, `handle_migrated_to_jira.py`, by hand | state backups (the name contains the date and reason, e.g. `_relink_KEY`, `_dupl_KEY`, `_migriert_KEY`) | yes, when no longer needed |
+| `sync_exclude.txt` | by hand | projects **temporarily** excluded from sync (section 11) | yes, when nothing is being repaired |
+| `protected_projects.txt` | by hand | projects **permanently** excluded from sync and all data-changing tools | no, as long as it should apply |
+| `section_status_map.json` | panel ("Status mapping") or by hand | main map Asana section → Jira status, with `__ukonczone__` | **no** |
+| `section_status_map.<KEY>.json` | by hand | section map for one project, with `__ukonczone__` | yes, the project then goes back to the main map |
+| `project_key_cache.json` | `jira_sync.py` | assigned project keys (by Asana GID) | not recommended |
+| `asana_project_gids.json` | check tools | cache of GIDs of Asana projects outside the sheet | yes |
+| `epic_candidates.json` | `detect_epic_candidates.py` | Epic candidates per project | yes, but it must be recreated before the sync |
+| `workflow_graph_cache.json` | `asana_jira_sync.py` | workflow transition map for status changes | yes |
+| `auth_state.json` | `save_login_session.py` | browser session (board columns) | yes, then you have to log in again |
+| `user_map.json` | panel ("People mapping"), `generate_user_map.py` or by hand | **Asana** users → Jira accounts | **no**; do not overwrite with a map from another instance |
+| `asana_users_not_in_jira.json` | panel | Asana people deliberately without a Jira account; their issues have no assignee and are not counted as differences | yes, the panel then shows them as unmapped again |
+| `service_account.json` | panel (Start, pasted key) | Google service account key - **a secret** | yes, but it has to be pasted again |
+| `migration_app/cache/` | panel | read results: sheet, people, sections and statuses, connection test, project-copy role selection | yes (the sheet read then takes a few minutes) |
+| `migration_app/runs/`, `checks/`, `backups/` | panel | run history, "Statuses and people" results, file backups from before each save | yes |
+| `wt_user_map.json` (or another name) | by hand | people from someone else's Jira instance → our accounts | yes, once incremental copying is finished |
+| `status_map_projekt1.json`, `status_map_projekt2.json` | by hand | status maps for copying from another instance | no, as long as new items are being pulled in |
+| `cross_instance_copy_state.json` | `copy_project_cross_instance.py` | source → target links (keys `SOURCE` or `SOURCE>TARGET`), `status_applied` | **no**, as long as the copy should be resumable, and especially as long as the target project is synced with Asana (the tools from sections 14-15 skip these issues based on it) |
+| `repair_reports/<KEY>/` | `repair_batch.py` | reports, plans and logs of a project's repair steps | yes, after the repair is finished |
+| `relink_state_report.csv`, `resolve_relink_duplicates_plan.csv`, `handle_migrated_to_jira_plan.csv` | tools 15f-15h (run without `repair_batch.py`) | the latest report/plan; `resolve_relink_duplicates.py` reads the relink report | yes, but the relink report must be refreshed before `dup` |
+| `audit_hierarchy_report.csv`, `compare_project_totals_report.csv`, `refresh_state_flags_report.csv` | check tools | reports | yes |
+| `projekty_all.txt`, `pilot.txt`, `partia_*.txt` | by hand | lists of projects to repair in batches | yes |
+| `jira_schema_state.json` | `build_jira_schema.py` | name → ID mapping of configuration objects (preview only; the script checks Jira anyway) | yes |
+| `jira_schema_<key>.yaml`, `status_map_<key>.json` | `export_source_workflows.py` | source workflow and 1:1 status map | yes, after the workflow is recreated and the tasks are copied |
+| `epics_stories_state.json` | `create_epics_stories_from_sheet.py` | created Epics and Stories | yes; it **must** be deleted after deleting test issues in Jira |
+| `pipeline_summaries/`, `logs/` | scripts | summaries and logs | yes |
+| `__pycache__/` | Python | compiled modules | yes, always (Python rebuilds it) |
 
-## 17. Konfiguracja Jiry z pliku YAML (`build_jira_schema.py`)
+## 17. Jira configuration from a YAML file (`build_jira_schema.py`)
 
-Buduje konfigurację projektu company-managed na podstawie deklaratywnego
-pliku YAML: pola niestandardowe, typy zgłoszeń, statusy, workflow, ekrany i
-wszystkie schematy. Przykład pełnej konfiguracji: `jira_schema_klient.yaml` (konfiguracja klienta,
-nie jest publikowana; punkt wyjścia do własnej: szablon `jira_schema.yaml`)
-(odtworzenie konfiguracji KlientX).
+Builds the configuration of a company-managed project from a declarative YAML file: custom
+fields, issue types, statuses, workflows, screens and all the schemes. Example of a full
+configuration: `jira_schema_klient.yaml` (a client's configuration, not published; a starting
+point for your own: the `jira_schema.yaml` template) (a recreation of the KlientX configuration).
 
 ```bash
 python build_jira_schema.py --schema jira_schema_klient.yaml --dry-run
@@ -2124,56 +2127,54 @@ python build_jira_schema.py --schema jira_schema_klient.yaml --only statuses_wor
 python build_jira_schema.py --schema jira_schema_klient.yaml --include-incomplete
 ```
 
-Wymaga uprawnienia **Administer Jira**. Skrypt jest **idempotentny**: obiekt
-o danej nazwie, który już istnieje, jest używany ponownie zamiast tworzenia
-duplikatu. Mapowanie nazwa → ID zapisuje w `jira_schema_state.json`, ale ten
-plik jest tylko podglądem: skrypt i tak sprawdza stan w Jirze przy każdym
-uruchomieniu. Log trafia do `logs/`, błędy i ostrzeżenia na Slacka (jeśli
-skonfigurowany).
+Requires the **Administer Jira** permission. The script is **idempotent**: an object with the
+given name that already exists is reused instead of creating a duplicate. It saves the name → ID
+mapping in `jira_schema_state.json`, but this file is only a preview: the script checks the
+state in Jira on every run anyway. The log goes to `logs/`, errors and warnings to Slack (if
+configured).
 
-**Skąd bierze się plik YAML:** z dokumentacji klienta przez parsery
-`parse_jira_pdfs.py`, `parse_jira_workflow.py`, `parse_jira_pptx.py`
-i `merge_jira_sources.py` (np. `jira_schema_klient.yaml`: 47 pól, 6 ekranów,
-46 statusów, 7 workflow), albo z innej instancji Jiry przez
-`export_source_workflows.py` (sekcja 4a, kopiowanie z innej instancji).
+**Where the YAML file comes from:** from client documentation via the parsers
+`parse_jira_pdfs.py`, `parse_jira_workflow.py`, `parse_jira_pptx.py` and `merge_jira_sources.py`
+(e.g. `jira_schema_klient.yaml`: 47 fields, 6 screens, 46 statuses, 7 workflows), or from another
+Jira instance via `export_source_workflows.py` (section 4a, copying from another instance).
 
-Workflow oznaczone w YAML jako `incomplete: true` (np. brakujące przejścia)
-są pomijane, chyba że podasz `--include-incomplete`.
+Workflows marked in the YAML as `incomplete: true` (e.g. missing transitions) are skipped unless
+you pass `--include-incomplete`.
 
-**Znane pułapki:** statusy w starszych instancjach mają numeryczne ID, a
-`statusReference` w definicji workflow musi być UUID, więc skrypt generuje go
-lokalnie i wskazuje istniejący status przez `id`. Kategoria statusu jest brana
-z Jiry, nie z YAML, a statusy o zakresie projektowym są pomijane przy budowaniu
-workflow globalnych.
+**Known pitfalls:** statuses in older instances have numeric IDs, while `statusReference` in the
+workflow definition must be a UUID, so the script generates it locally and points to the existing
+status by `id`. The status category is taken from Jira, not from the YAML, and project-scoped
+statuses are skipped when building global workflows.
 
-### 17a. Kroki (`--only`)
+### 17a. Steps (`--only`)
 
-Wykonywane w tej kolejności. `--only` przyjmuje jeden krok albo kilka po przecinku, np. `--only screens,screen_scheme,issue_type_screen_scheme` — kolejność wykonania i tak jest zawsze taka jak w tabeli:
+Executed in this order. `--only` takes one step or several separated by commas, e.g.
+`--only screens,screen_scheme,issue_type_screen_scheme` — the execution order is always the one
+in the table anyway:
 
-| Krok | Co robi | Co robi z istniejącym obiektem |
+| Step | What it does | What it does with an existing object |
 |---|---|---|
-| `custom_fields` | pola niestandardowe, dla list także kontekst i opcje | dokłada brakujące opcje |
-| `issue_types` | brakujące **globalne** typy zgłoszeń | nie zmienia |
-| `issue_type_scheme` | schemat typów (w UI: *Work type scheme*) | dokłada brakujące typy |
-| `statuses_workflow` | statusy i workflow | **nie zmienia** workflow |
-| `screens` | ekrany, zakładki, pola (sekcja 17h) | dokłada brakujące zakładki i pola, ustawia kolejność zakładek; niczego nie usuwa |
-| `screen_scheme` | screen schemes (ekran per operacja) | nie zmienia |
-| `issue_type_screen_scheme` | typ zgłoszenia → screen scheme (*Work type screen scheme*) | dokłada brakujące mapowania |
-| `workflow_scheme` | typ zgłoszenia → workflow | dokłada brakujące mapowania |
-| `apply` | podpina ITSS i workflow scheme do projektów z `apply_to_projects` | — |
-| `workflow_layout` | przelicza układ diagramu istniejących workflow (sekcja 17f); **tylko na żądanie**, nie w pełnym przebiegu | zmienia wyłącznie pozycje statusów |
-| `workflow_update` | doprowadza istniejące workflow do stanu z YAML: przejścia, układ, START (sekcja 17g); **tylko na żądanie** | dodaje/zmienia/usuwa przejścia, dokłada statusy, zachowuje reguły |
+| `custom_fields` | custom fields, for lists also the context and options | adds missing options |
+| `issue_types` | missing **global** issue types | does not change it |
+| `issue_type_scheme` | issue type scheme (in the UI: *Work type scheme*) | adds missing types |
+| `statuses_workflow` | statuses and workflows | **does not change** the workflow |
+| `screens` | screens, tabs, fields (section 17h) | adds missing tabs and fields, sets the tab order; removes nothing |
+| `screen_scheme` | screen schemes (a screen per operation) | does not change it |
+| `issue_type_screen_scheme` | issue type → screen scheme (*Work type screen scheme*) | adds missing mappings |
+| `workflow_scheme` | issue type → workflow | adds missing mappings |
+| `apply` | attaches the ITSS and workflow scheme to the projects in `apply_to_projects` | — |
+| `workflow_layout` | recalculates the diagram layout of existing workflows (section 17f); **on request only**, not in a full run | changes status positions only |
+| `workflow_update` | brings existing workflows to the state in the YAML: transitions, layout, START (section 17g); **on request only** | adds/changes/removes transitions, adds statuses, keeps rules |
 
-Dzięki dokładaniu mapowań można budować konfigurację etapami: np. gdy
-później powstanie workflow albo screen scheme dla kolejnego typu, ponowne
-uruchomienie kroku dopisze go do istniejącego schematu. Działa to, dopóki
-workflow scheme nie jest podpięty do projektu. Później Jira wymaga szkicu i
-migracji statusów, a to trzeba zrobić w UI.
+Because mappings are added, the configuration can be built in stages: e.g. when a workflow
+or screen scheme for another type is created later, re-running the step adds it to the
+existing scheme. This works as long as the workflow scheme is not attached to a project.
+After that Jira requires a draft and a status migration, which has to be done in the UI.
 
-### 17b. Format pliku YAML
+### 17b. YAML file format
 
 ```yaml
-prefix: ''                        # opcjonalny prefiks nazw wszystkich obiektów
+prefix: ''                        # optional prefix for the names of all objects
 
 custom_fields:
 - name: Wycena [MD]
@@ -2182,9 +2183,9 @@ custom_fields:
   type: multiselect
   options: [eCommerce]
 
-issue_types:                      # tylko typy spoza standardu Jiry
+issue_types:                      # only types outside the Jira standard
 - name: Deployment
-  type: standard                  # albo: subtask
+  type: standard                  # or: subtask
 
 issue_type_scheme:
   name: eCommerce Sync – Work Type Scheme
@@ -2195,205 +2196,195 @@ statuses:
 - name: Nowy
   category: TODO                  # TODO / IN_PROGRESS / DONE
 
-workflows:                        # obsługiwane też: 'workflow:' i '_pozostale_workflow:'
+workflows:                        # also supported: 'workflow:' and '_pozostale_workflow:'
 - name: Workflow-Story
-  initial_status: Nowy            # status po utworzeniu zgłoszenia
-  incomplete: false               # true = pomijany bez --include-incomplete
+  initial_status: Nowy            # status after the issue is created
+  incomplete: false               # true = skipped without --include-incomplete
   statuses: [Nowy, W trakcie analizy (PL), Done]
-  start_layout: [80, 40]          # opcjonalnie: pozycja punktu START
-  layout:                         # opcjonalnie: lewy górny róg każdego statusu
-    Nowy: [200, 100]              # (brak = układ wyliczany automatycznie)
+  start_layout: [80, 40]          # optional: position of the START point
+  layout:                         # optional: top-left corner of each status
+    Nowy: [200, 100]              # (missing = layout calculated automatically)
     W trakcie analizy (PL): [200, 210]
     Done: [200, 320]
   transitions:
   - name: Do analizy
-    id: '511'                     # opcjonalnie: id przejścia (np. z KlientX)
-    from: [Nowy]                  # lista statusów albo ANY (przejście globalne)
+    id: '511'                     # optional: transition id (e.g. from KlientX)
+    from: [Nowy]                  # a list of statuses or ANY (global transition)
     to: W trakcie analizy (PL)
 
 screens:
 - name: Story Create Screen
-  tabs:                           # kolejność = kolejność zakładek w Jirze (17h)
+  tabs:                           # order = order of tabs in Jira (17h)
   - name: Zakładka główna
-    fields: [Podsumowanie, Opis, Wycena [MD], customfield_11977]   # nazwa albo ID pola
+    fields: [Podsumowanie, Opis, Wycena [MD], customfield_11977]   # field name or ID
 
 screen_schemes:
 - name: Story Screen Scheme
-  default: Story Edit Screen      # wymagany
-  create: Story Create Screen     # opcjonalnie: create / edit / view
+  default: Story Edit Screen      # required
+  create: Story Create Screen     # optional: create / edit / view
 
 issue_type_screen_scheme:
   name: eCommerce Sync – Work Type Screen Scheme
-  default_screen_scheme: Task Screen Scheme   # dla typów bez własnego wiersza
+  default_screen_scheme: Task Screen Scheme   # for types without their own row
   mappings:
   - issue_types: [Story]
     screen_scheme: Story Screen Scheme
 
 workflow_scheme:
   name: eCommerce Sync – Workflow Scheme
-  default_workflow: Workflow-Task  # opcjonalnie; bez tego systemowy 'jira'
+  default_workflow: Workflow-Task  # optional; without it the system 'jira' workflow
   mappings:
   - issue_types: [Task, Sub-Task, Dev-Task]
     workflow: Workflow-Task
 
-apply_to_projects: []             # klucze projektów dla kroku 'apply'
+apply_to_projects: []             # project keys for the 'apply' step
 ```
 
-Typy pól: `textfield`, `textarea`, `select`, `multiselect`, `datepicker`
-(alias `date`), `datetime`, `float`, `userpicker` (alias `user`),
-`multiuserpicker`, `labels`, `url`. Typy `issuelink` i `issuelist` są w
-mapie, ale Jira Cloud odrzuca tworzenie takich pól przez API.
+(The example names are Polish: "Nowy" = New, "W trakcie analizy" = In analysis, "Do analizy"
+= To analysis, "Zakładka główna" = Main tab, "Podsumowanie" = Summary, "Opis" = Description,
+"Wycena [MD]" = Estimate [man-days].)
 
-### 17c. Dopasowywanie nazw
+Field types: `textfield`, `textarea`, `select`, `multiselect`, `datepicker` (alias `date`),
+`datetime`, `float`, `userpicker` (alias `user`), `multiuserpicker`, `labels`, `url`. The
+`issuelink` and `issuelist` types are in the map, but Jira Cloud rejects creating such fields
+via the API.
 
-- **Pola na ekranach** są szukane po nazwie (bez względu na wielkość liter),
-  a pola systemowe także po polskich nazwach z UI („Podsumowanie”, „Opis”,
-  „Osoba przypisana”, „Termin”, „Wersje do poprawienia”…), więc schemat po
-  polsku działa także na koncie z językiem angielskim. Pola Jira Software
-  (Sprint, Epic Name, Łącze epiku, Target start/end…) są rozpoznawane po typie.
-- **Pole można też podać po ID** (`customfield_12083`) — trafia wtedy dokładnie
-  w to pole, nawet jeśli w Jirze jest kilka o tej samej nazwie. Obecność pola na
-  zakładce jest sprawdzana także po ID, więc pola, których nazwę API zwraca po
-  angielsku, nie są dodawane drugi raz.
-- **„Wersja bazowa” to w KlientX własne pole tekstowe**, nie systemowe Fix
-  Version/s — skrypt nie tłumaczy już tej nazwy na `fixVersions`.
-- **Typy zgłoszeń** są porównywane bez myślników i spacji: `Sub-Task`
-  obejmuje zarówno `Sub-task`, jak i legacy `Subtask` (10059). To celowe:
-  zmigrowane zadania używają legacy typu, a Jira nie podepnie schematu bez
-  typu, który mają istniejące zgłoszenia.
-- **Statusy i typy z projektów team-managed są pomijane.** Mogą mieć tę samą
-  nazwę co globalne. Potwierdzone: istnieją dwa statusy „Done” (globalny
-  10001 i projektowy 10233), a workflow globalny nie widzi projektowego
-  (błąd „Status does not exist or is not visible to the workflow”). Nazwy
-  wskazujące na kilka obiektów są oznaczane w logu jako `[UWAGA]`.
-- **Kategoria istniejącego statusu** jest brana z Jiry, nie z YAML.
-  Rozbieżność jest zgłaszana w logu.
+### 17c. Name matching
 
-### 17d. Zasady i ograniczenia workflow
+- **Fields on screens** are looked up by name (case-insensitive), and system fields also by
+  their Polish UI names ("Podsumowanie", "Opis", "Osoba przypisana", "Termin", "Wersje do
+  poprawienia"…), so a schema in Polish also works on an account set to English. Jira
+  Software fields (Sprint, Epic Name, Epic Link, Target start/end…) are recognized by type.
+- **A field can also be given by ID** (`customfield_12083`) — it then hits exactly that
+  field, even if Jira has several with the same name. Whether a field is on a tab is also
+  checked by ID, so fields whose name the API returns in English are not added a second time.
+- **"Wersja bazowa" (base version) is a custom text field in KlientX**, not the system Fix
+  Version/s — the script no longer translates this name to `fixVersions`.
+- **Issue types** are compared without hyphens and spaces: `Sub-Task` covers both `Sub-task`
+  and the legacy `Subtask` (10059). This is deliberate: migrated tasks use the legacy type,
+  and Jira will not attach a scheme without a type that existing issues have.
+- **Statuses and types from team-managed projects are skipped.** They may have the same name
+  as global ones. Confirmed: there are two "Done" statuses (global 10001 and project 10233),
+  and a global workflow cannot see the project one (error "Status does not exist or is not
+  visible to the workflow"). Names pointing to several objects are marked in the log as
+  `[UWAGA]` (warning).
+- **The category of an existing status** is taken from Jira, not from the YAML. A mismatch is
+  reported in the log.
 
-- **`initial_status`** wskazuje status po utworzeniu zgłoszenia. Bez niego
-  skrypt bierze pierwszy status z listy i ostrzega, bo kolejność w YAML
-  rzadko odpowiada diagramowi (w Workflow-Story pierwszy był `Closed`).
-- **Nazwy przejść mogą się powtarzać** (w KlientX są np. trzy „Need more
-  info” w Deployment i dwa „Gotowe” w Story). Wcześniejsze założenie, że
-  muszą być unikalne, było błędne — prawdziwą przyczyną ówczesnego błędu był
-  status „Done” z projektu team-managed.
-- **`from: ANY`** to przejście globalne z dowolnego statusu **do** `to`.
-  Globalnej pętli „dowolny status → ten sam status” (np. „Przypisz
-  Analityka” z post-function) nie da się tak wyrazić. Skonfiguruj ją
-  ręcznie w edytorze workflow.
-- Wirtualny punkt startowy z diagramów (`Początek`, `Start`) jest pomijany,
-  bo przejście INITIAL generuje skrypt.
-- **Krok `statuses_workflow` nie zmienia istniejącego workflow** (tylko
-  tworzy brakujące). Do aktualizacji istniejących służy `workflow_update`
-  (sekcja 17g), a do samego układu `workflow_layout` (sekcja 17f).
-- **Układ diagramu** jest brany z `layout` w YAML (w `jira_schema_klient.yaml`
-  to pozycje z diagramów KlientX, więc diagramy wyglądają 1:1). Bez `layout`
-  jest liczony automatycznie, pionowo jak w KlientX:
-  START i status początkowy na górze, kolejne wiersze według odległości od
-  niego w grafie przejść, statusy w wierszu ułożone obok siebie tak, żeby
-  strzałki mniej się krzyżowały. Łańcuchy dłuższe niż 16 wierszy zawijają
-  się do pasa po prawej. Przejścia globalne (`ANY`) nie wpływają na układ.
+### 17d. Workflow rules and limitations
 
-### 17e. Podpinanie do projektów
+- **`initial_status`** gives the status after an issue is created. Without it the script takes
+  the first status from the list and warns, because the order in the YAML rarely matches the
+  diagram (in Workflow-Story the first one was `Closed`).
+- **Transition names may repeat** (KlientX has e.g. three "Need more info" in Deployment and
+  two "Gotowe" (Ready) in Story). The earlier assumption that they must be unique was wrong —
+  the real cause of that error was the "Done" status from a team-managed project.
+- **`from: ANY`** is a global transition from any status **to** `to`. A global loop "any status
+  → the same status" (e.g. "Przypisz Analityka" = Assign Analyst, with a post-function) cannot
+  be expressed this way. Configure it by hand in the workflow editor.
+- The virtual start point from the diagrams (`Początek`, `Start`) is skipped, because the script
+  generates the INITIAL transition.
+- **The `statuses_workflow` step does not change an existing workflow** (it only creates missing
+  ones). Existing ones are updated by `workflow_update` (section 17g), and the layout alone by
+  `workflow_layout` (section 17f).
+- **The diagram layout** is taken from `layout` in the YAML (in `jira_schema_klient.yaml` these
+  are the positions from the KlientX diagrams, so the diagrams look 1:1). Without `layout` it is
+  calculated automatically, vertically as in KlientX: START and the initial status at the top,
+  further rows by distance from it in the transition graph, statuses in a row placed side by side
+  so that the arrows cross less. Chains longer than 16 rows wrap to a lane on the right. Global
+  transitions (`ANY`) do not affect the layout.
 
-Krok `apply` przypisuje ITSS i workflow scheme, ale endpoint przypisania
-workflow scheme działa **tylko dla projektów bez zgłoszeń**. Projekty po
-migracji podepnij ręcznie w ustawieniach projektu, w tej kolejności:
-1. **Work type scheme** (typy zgłoszeń),
-2. **Work type screen scheme** (ekrany),
-3. **Workflow scheme**. Jira poprosi tu o wskazanie, na jaki nowy status
-   trafia każdy stary status każdego typu.
+### 17e. Attaching to projects
 
-Pełna kolejność dla nowego projektu na konfiguracji eCommerce Sync:
+The `apply` step assigns the ITSS and the workflow scheme, but the endpoint for assigning a
+workflow scheme works **only for projects without issues**. Attach migrated projects by hand in
+the project settings, in this order:
+1. **Work type scheme** (issue types),
+2. **Work type screen scheme** (screens),
+3. **Workflow scheme**. Jira will ask here which new status each old status of each type goes to.
+
+The full order for a new project on the eCommerce Sync configuration:
 
 ```bash
-python build_jira_schema.py --schema jira_schema_klient.yaml --dry-run       # podgląd całości
-python build_jira_schema.py --schema jira_schema_klient.yaml                 # pola, typy, workflow, ekrany, schematy
-# podpięcie schematów do projektu (krok apply albo ręcznie, jak wyżej)
-python associate_fields_to_field_scheme.py --schema jira_schema_klient.yaml --project KLUCZ   # sekcja 17i
-python set_transition_groups.py --dry-run && python set_transition_groups.py                  # sekcja 17j
+python build_jira_schema.py --schema jira_schema_klient.yaml --dry-run       # preview of everything
+python build_jira_schema.py --schema jira_schema_klient.yaml                 # fields, types, workflows, screens, schemes
+# attach the schemes to the project (apply step or by hand, as above)
+python associate_fields_to_field_scheme.py --schema jira_schema_klient.yaml --project KEY   # section 17i
+python set_transition_groups.py --dry-run && python set_transition_groups.py                # section 17j
 ```
 
-Po każdej późniejszej zmianie ekranów: `--only screens` (ew. z
-`custom_fields`), a potem ponownie `associate_fields_to_field_scheme.py`.
+After any later change to the screens: `--only screens` (possibly with `custom_fields`), and then
+`associate_fields_to_field_scheme.py` again.
 
-### 17f. Układ diagramów istniejących workflow (`--only workflow_layout`)
+### 17f. Diagram layout of existing workflows (`--only workflow_layout`)
 
-Workflow utworzone starszą wersją skryptu mają wszystkie statusy w jednym
-rzędzie, a punkt START bywa na drugim końcu diagramu. Ten krok przelicza
-układ tym samym algorytmem i stawia START nad statusem początkowym. Graf przejść
-bierze z Jiry, nie z YAML, więc uwzględnia też przejścia dodane ręcznie w
-edytorze. Zmienia **wyłącznie pozycje statusów**: statusy, przejścia i
-reguły są odsyłane bez zmian.
+Workflows created by an older version of the script have all statuses in one row, and the START
+point is sometimes at the other end of the diagram. This step recalculates the layout with the
+same algorithm and puts START above the initial status. It takes the transition graph from Jira,
+not from the YAML, so it also takes into account transitions added by hand in the editor. It
+changes **only the status positions**: statuses, transitions and rules are sent back unchanged.
 
 ```bash
-# podgląd: kolumny + walidacja Jiry, nic nie jest zapisywane
+# preview: columns + Jira validation, nothing is saved
 python build_jira_schema.py --schema jira_schema_klient.yaml --only workflow_layout \
     --workflow Workflow-Epic --dry-run
-# zapis dla jednego workflow
+# save for one workflow
 python build_jira_schema.py --schema jira_schema_klient.yaml --only workflow_layout \
     --workflow Workflow-Epic
-# wszystkie workflow z YAML
+# all workflows from the YAML
 python build_jira_schema.py --schema jira_schema_klient.yaml --only workflow_layout
 ```
 
-Krok nie wchodzi w pełny przebieg (bez `--only`), żeby nie nadpisywać
-układu poprawionego ręcznie w edytorze. Jeśli workflow ma w YAML sekcję
-`layout` (tak jest we wszystkich workflow `jira_schema_klient.yaml` — pozycje
-odczytane z diagramów KlientX), krok używa jej i diagram wygląda jak w KlientX;
-bez `layout` układ jest wyliczany automatycznie.
+The step is not part of a full run (without `--only`), so as not to overwrite a layout corrected
+by hand in the editor. If the workflow has a `layout` section in the YAML (as all workflows in
+`jira_schema_klient.yaml` do — positions read from the KlientX diagrams), the step uses it and the
+diagram looks as in KlientX; without `layout` the layout is calculated automatically.
 
-**Porty strzałek.** Jira nie dokumentuje, który numer `fromPort`/`toPort`
-oznacza którą krawędź prostokąta statusu, więc strzałki tworzone przez API
-wychodzą z przypadkowych boków. `diagnose_workflow_ports.py` (tylko odczyt)
-ustala tę numerację na podstawie workflow narysowanych ręcznie w edytorze:
+**Arrow ports.** Jira does not document which `fromPort`/`toPort` number means which edge of the
+status rectangle, so arrows created via the API leave from random sides.
+`diagnose_workflow_ports.py` (read-only) works out this numbering from workflows drawn by hand in
+the editor:
 ```bash
 python diagnose_workflow_ports.py
 python diagnose_workflow_ports.py --limit 300
 ```
-Wynik wpisz do `LAYOUT_PORTS` w `build_jira_schema.py` (domyślnie pusty —
-porty nie są wtedy ustawiane) i uruchom ponownie `workflow_layout` albo
-`workflow_update`.
+Put the result in `LAYOUT_PORTS` in `build_jira_schema.py` (empty by default — ports are then not
+set) and run `workflow_layout` or `workflow_update` again.
 
-### 17g. Aktualizacja istniejących workflow (`--only workflow_update`)
+### 17g. Updating existing workflows (`--only workflow_update`)
 
-Doprowadza workflow, które już są w Jirze, do stanu z YAML: przejścia (nazwy,
-źródła, cele, id), układ diagramu i punkt START. Wypisuje, które strzałki
-dochodzą (`+`), a które znikają (`-`).
+Brings workflows that already exist in Jira to the state in the YAML: transitions (names, sources,
+targets, ids), the diagram layout and the START point. It prints which arrows are added (`+`) and
+which disappear (`-`).
 
 ```bash
-# podgląd zmian + walidacja Jiry, nic nie jest zapisywane
+# preview of the changes + Jira validation, nothing is saved
 python build_jira_schema.py --schema jira_schema_klient.yaml --only workflow_update \
     --workflow Workflow-Epic --dry-run
-# zapis
+# save
 python build_jira_schema.py --schema jira_schema_klient.yaml --only workflow_update
 ```
 
-- Statusy są dopasowywane po nazwie (bez względu na wielkość liter).
-  Brakujące są **dodawane** do workflow.
-- **Statusu nie usuwa**: wymagałoby to przeniesienia zgłoszeń. Jeśli YAML
-  nie zawiera statusu obecnego w workflow, workflow jest pomijany z
-  komunikatem.
-- **Reguły** (akcje, warunki, walidatory) istniejącego przejścia o tej samej
-  nazwie i celu są przenoszone, więc konfiguracja dodana ręcznie w edytorze
-  nie znika.
-- Nie wchodzi w pełny przebieg — uruchamiaj świadomie, najpierw z `--dry-run`.
+- Statuses are matched by name (case-insensitive). Missing ones are **added** to the workflow.
+- **It does not remove statuses**: that would require moving issues. If the YAML does not contain
+  a status present in the workflow, the workflow is skipped with a message.
+- **Rules** (actions, conditions, validators) of an existing transition with the same name and
+  target are carried over, so configuration added by hand in the editor does not disappear.
+- It is not part of a full run — run it deliberately, first with `--dry-run`.
 
-Workflow w `jira_schema_klient.yaml` zostały odtworzone z PDF-ów edytora KlientX
-(widok Tekst i Diagram). Nazwy przejść globalnych Bug („To Do”, „Anulowane”),
-Story („Anulowane”) i Task („On hold”, „Rejected”) są przyjęte, bo Jira nie
-pokazuje ich na diagramie — do potwierdzenia przez KlientX. Widok Tekst był
-kompletny tylko dla Epic, Acceptance, Question i Deployment; dla Bug i Story
-częściowy, dla Task go nie było — resztę odczytano z diagramu. Globalne pętle
-z post-function (np. „Przypisz Analityka”) są pominięte — skonfiguruj je ręcznie.
+The workflows in `jira_schema_klient.yaml` were recreated from PDFs of the KlientX editor (Text and
+Diagram views). The names of the global transitions of Bug ("To Do", "Anulowane" = Cancelled),
+Story ("Anulowane") and Task ("On hold", "Rejected") are assumed, because Jira does not show them
+on the diagram — to be confirmed by KlientX. The Text view was complete only for Epic, Acceptance,
+Question and Deployment; partial for Bug and Story, and missing for Task — the rest was read from
+the diagram. Global loops with a post-function (e.g. "Przypisz Analityka") are skipped — configure
+them by hand.
 
-### 17h. Ekrany: pola po ID, kolejność zakładek, usuwanie pól
+### 17h. Screens: fields by ID, tab order, removing fields
 
-**Pole po ID.** Na liście pól zakładki można zamiast nazwy podać ID pola
-(`customfield_11977`). Przydaje się, gdy w Jirze jest kilka pól o tej samej
-nazwie (np. dwa „Environment.”) i trzeba wskazać konkretne. Komentarz za
-`#` jest ignorowany:
+**Field by ID.** In a tab's field list you can give the field ID (`customfield_11977`) instead of
+the name. Useful when Jira has several fields with the same name (e.g. two "Environment.") and you
+need to point to a specific one. A comment after `#` is ignored:
 
 ```yaml
 - name: System Project Deployment Edit/View Issue Screen-KlientX(v1)
@@ -2401,108 +2392,105 @@ nazwie (np. dwa „Environment.”) i trzeba wskazać konkretne. Komentarz za
   - name: Zakładka główna
     fields:
     - Podsumowanie
-    - customfield_11977   # Data wdrożenia
+    - customfield_11977   # Data wdrożenia (deployment date)
 ```
 
-**Kolejność zakładek.** Krok `screens` ustawia zakładki w kolejności z YAML.
-Pierwsza zakładka to ta, którą Jira pokazuje od razu po otwarciu zgłoszenia,
-więc pola takie jak Podsumowanie i Opis powinny być w pierwszej. Jira
-dopisuje nowe zakładki na końcu, dlatego skrypt po dodaniu brakujących
-przestawia je na właściwe miejsca. Zakładki spoza YAML zostają na końcu.
-W `jira_schema_klient.yaml` pierwsza jest „Zakładka główna” (Acceptance:
-„General”, Question: „Field Tab”). Eksport PDF z KlientX podawał zakładki
-alfabetycznie, przez co opis lądował w ostatniej.
+**Tab order.** The `screens` step sets the tabs in the order from the YAML. The first tab is the
+one Jira shows right after opening an issue, so fields like Summary and Description should be on
+the first one. Jira appends new tabs at the end, so after adding the missing ones the script moves
+them to the right places. Tabs not in the YAML stay at the end. In `jira_schema_klient.yaml` the
+first one is "Zakładka główna" (Acceptance: "General", Question: "Field Tab"). The KlientX PDF
+export listed the tabs alphabetically, which put the description in the last one.
 
-**Zakładka domyślna nowego ekranu.** Jira tworzy każdy nowy ekran z pustą
-zakładką „Field Tab”. Skrypt zmienia jej nazwę na pierwszą zakładkę z YAML,
-chyba że YAML sam przewiduje „Field Tab” (tak jest na ekranie Question).
+**The default tab of a new screen.** Jira creates every new screen with an empty "Field Tab" tab.
+The script renames it to the first tab from the YAML, unless the YAML itself expects "Field Tab"
+(as on the Question screen).
 
-**Jedno pole może być na ekranie tylko raz.** Jeśli pole przenosisz w YAML do
-innej zakładki tego samego ekranu, skrypt go nie przeniesie (dodaje tylko
-brakujące). Przeciągnij je ręcznie w edytorze ekranu.
+**A field can be on a screen only once.** If you move a field in the YAML to another tab of the
+same screen, the script will not move it (it only adds missing ones). Drag it by hand in the
+screen editor.
 
-**`--dry-run` przy istniejących ekranach niczego nie zapisuje.** Starsza
-wersja skryptu w trybie podglądu dokładała do istniejących ekranów zakładki
-i pola. Jeśli uruchamiałeś `screens` z `--dry-run` przed tą poprawką, zmiany
-mogły już wejść.
+**`--dry-run` saves nothing on existing screens.** An older version of the script added tabs and
+fields to existing screens in preview mode. If you ran `screens` with `--dry-run` before this fix,
+the changes may already have been applied.
 
-**Usuwanie pól z ekranów (`remove_field_from_screens.py`).** `build_jira_schema.py`
-tylko dodaje. Do zdejmowania pola służy osobny skrypt. Pole i jego wartości w
-zgłoszeniach zostają, znika tylko z ekranów:
+**Removing fields from screens (`remove_field_from_screens.py`).** `build_jira_schema.py` only
+adds. A separate script removes a field. The field and its values in issues stay; it only
+disappears from the screens:
 
 ```bash
 python remove_field_from_screens.py --field "Nr zgłoszenia u Dostawcy" --schema jira_schema_klient.yaml --dry-run
 python remove_field_from_screens.py --field "Nr zgłoszenia u Dostawcy" --schema jira_schema_klient.yaml
-python remove_field_from_screens.py --field customfield_11972 --all-screens --dry-run   # wszystkie ekrany w Jirze
+python remove_field_from_screens.py --field customfield_11972 --all-screens --dry-run   # all screens in Jira
 ```
 
-`--schema` ogranicza się do ekranów z YAML (zalecane), `--all-screens`
-przechodzi po wszystkich ekranach instancji, także innych projektów. Przy
-kilku polach o tej samej nazwie skrypt odmawia i prosi o ID. Pamiętaj, żeby
-usunąć pole także z YAML, inaczej następne `--only screens` doda je z powrotem.
+`--schema` limits itself to the screens from the YAML (recommended), `--all-screens` goes through
+all screens of the instance, including other projects. With several fields of the same name the
+script refuses and asks for the ID. Remember to remove the field from the YAML too, otherwise the
+next `--only screens` will add it back.
 
-### 17i. Field schemes — pole jest na ekranie, a go nie widać
+### 17i. Field schemes — the field is on the screen but cannot be seen
 
-Jira Cloud zastępuje „field configurations” nowym mechanizmem **field
-schemes**. Na instancji FIRMA jest już włączony. Pole, które jest na ekranie,
-ale **nie jest powiązane z field scheme projektu**, jest niewidoczne i nie da
-się go edytować — także przez API i automatyzację. Tworzenie pól i ekranów w
-`build_jira_schema.py` tego powiązania **nie robi**. Objaw: w „Find your field”
-(⋯ w zgłoszeniu → Find your field) pozycja „Field scheme association: The
-field … is not included in the 'Default Field Scheme'”.
+Jira Cloud is replacing "field configurations" with a new mechanism, **field schemes**. It is
+already enabled on the FIRMA instance. A field that is on a screen but **is not associated with
+the project's field scheme** is invisible and cannot be edited — also via the API and automation.
+Creating fields and screens in `build_jira_schema.py` **does not create** this association.
+Symptom: in "Find your field" (⋯ in the issue → Find your field) the entry "Field scheme
+association: The field … is not included in the 'Default Field Scheme'".
 
-`associate_fields_to_field_scheme.py` zbiera ID wszystkich pól niestandardowych
-z ekranów w YAML i dokłada brakujące do field scheme projektu. Zdejmuje też
-ograniczenie pola do wybranych typów pracy, jeśli takie znajdzie:
+`associate_fields_to_field_scheme.py` collects the IDs of all custom fields from the screens in
+the YAML and adds the missing ones to the project's field scheme. It also removes a restriction of
+the field to selected work types, if it finds one:
 
 ```bash
 python associate_fields_to_field_scheme.py --schema jira_schema_klient.yaml --project PROJ --dry-run
 python associate_fields_to_field_scheme.py --schema jira_schema_klient.yaml --project PROJ
 python associate_fields_to_field_scheme.py --project PROJ --fields customfield_11977,customfield_11973
 python associate_fields_to_field_scheme.py --schema jira_schema_klient.yaml --project PROJ \
-    --dry-run --show-raw customfield_11977          # surowy wpis pola w field scheme
+    --dry-run --show-raw customfield_11977          # raw entry of the field in the field scheme
 ```
 
-- **Uruchamiaj po każdym dodaniu pola do ekranów** (`--only screens`), dla
-  każdego projektu, który korzysta ze schematów eCommerce Sync.
-- Projekty FIRMA zwykle mają wspólny **„Default Field Scheme”**. Dodane pola
-  stają się w nich dostępne, ale pokazują się tylko tam, gdzie są na ekranach.
-- API field schemes jest nowe (format zapytań wg [RFC-105](https://community.developer.atlassian.com/t/rfc-105-new-field-scheme-model-apis-for-field-configuration-backup-restoration-and-management/94206)).
-  Przy błędzie zapisu skrypt wypisuje pełną odpowiedź Jiry.
+- **Run it after every time a field is added to screens** (`--only screens`), for every project
+  that uses the eCommerce Sync schemes.
+- FIRMA projects usually share a common **"Default Field Scheme"**. The added fields become
+  available in them, but show up only where they are on the screens.
+- The field schemes API is new (request format according to
+  [RFC-105](https://community.developer.atlassian.com/t/rfc-105-new-field-scheme-model-apis-for-field-configuration-backup-restoration-and-management/94206)).
+  On a write error the script prints Jira's full response.
 
-**Diagnostyka: `diagnose_field_on_screen.py`** (tylko odczyt). Dla jednego
-pola sprawdza po kolei: czy istnieje (i czy nie ma duplikatów nazwy), kontekst
-pola, na jakich ekranach jest, jakich ekranów projekt faktycznie używa dla danego
-typu (create/edit/view), czy pole jest edytowalne w konkretnym zgłoszeniu,
-field configuration oraz tabelę wszystkich pól ekranu edycji z kolumnami
-„edytowalne / w field configuration / kontekst / typ”:
+**Diagnostics: `diagnose_field_on_screen.py`** (read-only). For one field it checks in turn:
+whether it exists (and whether there are no duplicate names), the field context, which screens it
+is on, which screens the project actually uses for the given type (create/edit/view), whether the
+field is editable in a specific issue, the field configuration, and a table of all fields of the
+edit screen with the columns "editable / in field configuration / context / type":
 
 ```bash
 python diagnose_field_on_screen.py --field customfield_11977 --issue PROJ-11
 python diagnose_field_on_screen.py --field "Wersja wdrożenia" --project PROJ --issue-type Deployment
 ```
 
-Kolejność sprawdzania, gdy pola nie widać w zgłoszeniu:
-1. czy pole istnieje i ma kontekst obejmujący projekt i typ (sekcja 2 wyniku),
-2. czy jest na ekranie, którego projekt używa dla tego typu (sekcja 4),
-3. czy jest w field scheme projektu („Find your field” albo `--show-raw`),
-4. czy nie jest po prostu puste — Jira chowa puste pola pod „Więcej pól”.
+Order of checks when a field cannot be seen in an issue:
+1. whether the field exists and has a context covering the project and type (section 2 of the output),
+2. whether it is on a screen the project uses for this type (section 4),
+3. whether it is in the project's field scheme ("Find your field" or `--show-raw`),
+4. whether it is simply empty — Jira hides empty fields under "More fields".
 
-### 17j. Kto może wykonać przejście — grupy (`set_transition_groups.py`)
+### 17j. Who may perform a transition — groups (`set_transition_groups.py`)
 
-Zakłada grupy i ustawia na przejściach workflow warunek „Restrict transition”
-(`system:restrict-issue-transition`) z listą grup. Konfiguracja jest w
-`transition_groups.yaml` (plik nie jest w repozytorium — utwórz go według wzoru):
+Creates groups and sets the "Restrict transition" condition
+(`system:restrict-issue-transition`) with a list of groups on workflow transitions. The
+configuration is in `transition_groups.yaml` (the file is not in the repository — create it
+following the pattern):
 
 ```yaml
-groups:                               # alias ze slajdu -> grupa w Jirze
-  SX-Dev:    {name: "SX-Dev"}         # tworzona, jeśli nie istnieje
+groups:                               # alias from the slide -> group in Jira
+  SX-Dev:    {name: "SX-Dev"}         # created if it does not exist
   PL-Admins: {name: "PL-Admins"}
-  Admins:    {name: "Backbone-superuser", existing: true}   # tylko sprawdzana
+  Admins:    {name: "Backbone-superuser", existing: true}   # only checked
 
-always_allowed: [Admins]              # dopisywana do KAŻDEGO warunku
+always_allowed: [Admins]              # added to EVERY condition
 
-propagate:                            # te same reguły w innych workflow
+propagate:                            # the same rules in other workflows
 - from: Workflow-Deployment
   to_workflows: [Workflow-Story, Workflow-Task, Workflow-Bug, Workflow-Epic]
 
@@ -2512,206 +2500,206 @@ workflows:
 ```
 
 ```bash
-python set_transition_groups.py --dry-run                 # podgląd + walidacja Jiry
+python set_transition_groups.py --dry-run                 # preview + Jira validation
 python set_transition_groups.py
 python set_transition_groups.py --workflow Workflow-Deployment
 ```
 
-- Przejście jest identyfikowane po **nazwie i statusie docelowym** (bez
-  względu na wielkość liter), bo nazwy się powtarzają (3× „Need more info”).
-- **`propagate`** nakłada reguły na przejścia o tej samej nazwie i celu w
-  innych workflow; brak takiego przejścia nie jest błędem. Uwaga: status
-  źródłowy nie jest porównywany, np. „Deployed To Test” w Bug/Task (z Done)
-  dostaje grupy z „Deployed to TEST” w Deployment (z Deploying (Test)).
-- Poprzedni warunek grupowy jest **zastępowany**, inne warunki przejścia
-  zostają — skrypt można uruchamiać wielokrotnie.
-  `build_jira_schema.py --only workflow_update` tych warunków nie kasuje
-  (przenosi reguły przejść o tej samej nazwie i celu).
-- **Nowe grupy są puste.** Zanim zapiszesz warunki, dodaj do grup ludzi —
-  inaczej przejścia wykona tylko `always_allowed` (Backbone-superuser).
-- Walidacja Jiry w `--dry-run` działa dopiero, gdy grupy już istnieją.
-- Źródło grup: slajd 13 prezentacji KlientX v1.5 (tylko Deployment). Pominięte
-  celowo: Create (warunków nie przyjmuje — tworzenie reguluje schemat
-  uprawnień), przejścia „Auto.” (wykonuje je automatyzacja) i przejścia bez
-  grup na slajdzie. Skróty rozwinięto: „An” → PL-An, „PM” bez prefiksu →
-  SX-PM + PL-PM, „SX, PL” → SX-Dev, SX-PM, PL-PM, PL-An. Popraw w YAML,
-  jeśli rozumiesz je inaczej.
+- A transition is identified by **name and target status** (case-insensitive), because names
+  repeat (3× "Need more info").
+- **`propagate`** applies the rules to transitions with the same name and target in other
+  workflows; a missing transition is not an error. Note: the source status is not compared, e.g.
+  "Deployed To Test" in Bug/Task (from Done) gets the groups of "Deployed to TEST" in Deployment
+  (from Deploying (Test)).
+- The previous group condition is **replaced**, other transition conditions stay — the script can
+  be run many times. `build_jira_schema.py --only workflow_update` does not delete these
+  conditions (it carries over the rules of transitions with the same name and target).
+- **New groups are empty.** Before you save the conditions, add people to the groups — otherwise
+  only `always_allowed` (Backbone-superuser) can perform the transitions.
+- Jira validation in `--dry-run` works only once the groups already exist.
+- Source of the groups: slide 13 of the KlientX v1.5 presentation (Deployment only). Deliberately
+  skipped: Create (it does not accept conditions — creation is governed by the permission scheme),
+  "Auto." transitions (performed by automation) and transitions without groups on the slide.
+  Abbreviations were expanded: "An" → PL-An, "PM" without a prefix → SX-PM + PL-PM, "SX, PL" →
+  SX-Dev, SX-PM, PL-PM, PL-An. Correct them in the YAML if you read them differently.
 
-## 18. Procedura pracy
+## 18. Working procedure
 
-### Zasady
+### A new migration
 
-- **Najpierw raport, potem zapis.** Każde narzędzie zmieniające dane ma tryb
-  raportu; `--apply` dopiero po przejrzeniu wyniku (zwłaszcza `PODOBNE`, `TRESC`,
-  `DO_DECYZJI`, `WYMAGA_PRZEGLADU`).
-- **Kopia stanu** przed każdą większą operacją:
-  `cp task_sync_state.json "task_sync_state.backup_$(date +%Y%m%d_%H%M%S)_<powód>.json"`.
-- **Nigdy dwa procesy na tym samym projekcie.** Różne projekty równolegle są
-  bezpieczne (blokady projektów, zapis stanu tylko zmienionych wpisów), ale
-  najwyżej 3 procesy naraz.
-- **Synchronizacja dopiero po naprawie** projektu z zgubionymi powiązaniami;
-  do tego czasu projekt jest w `sync_exclude.txt`.
-- Projekty, w których zespół pracuje już tylko w Jirze, są w `protected_projects.txt`.
-- Arkusz zawiera projekty do synchronizacji; wszystkie kroki domyślnie działają
-  na arkuszu.
+The **Start** tab in the panel (part I). Start with a sheet tab containing 1-2 test
+projects (`GOOGLE_SHEET_RANGE`), ask a Jira administrator to switch off notifications and
+automation for the new projects before creating issues in bulk, and after the migration
+check the projects in "Statuses and people" and with the task count comparison (14a).
 
-### Naprawa projektów zsynchronizowanych starszą wersją
+### Rules
 
-Rozpoznanie: `python compare_project_totals.py --all --top-level` (szybko) albo
-pełne `--all --shard K/N`. Wzorce i ich znaczenie: sekcja 14a.
+- **Report first, then write.** Every data-changing tool has a report mode; `--apply` only after
+  reviewing the result (especially `PODOBNE`, `TRESC`, `DO_DECYZJI`, `WYMAGA_PRZEGLADU`).
+- **A copy of the state** before every bigger operation:
+  `cp task_sync_state.json "task_sync_state.backup_$(date +%Y%m%d_%H%M%S)_<reason>.json"`.
+- **Never two processes on the same project.** Different projects in parallel are safe (project
+  locks, the state saves only changed entries), but at most 3 processes at once.
+- **Sync only after repairing** a project with lost links; until then the project is in
+  `sync_exclude.txt`.
+- Projects where the team now works only in Jira are in `protected_projects.txt`.
+- The sheet contains the projects to sync; all steps work on the sheet by default.
 
-**Krok 0, jednorazowo:**
+### Repairing projects synced with an older version
+
+Diagnosis: `python compare_project_totals.py --all --top-level` (fast) or the full
+`--all --shard K/N`. Patterns and their meaning: section 14a.
+
+**Step 0, once:**
 ```bash
 cp task_sync_state.json "task_sync_state.backup_$(date +%Y%m%d_%H%M%S)_przed_naprawa_wszystkich.json"
 python3 -c "import jira_sync as c; print('\n'.join(sorted({r.jira_key for r in c.get_sheet_rows() if r.jira_key})))" > projekty_all.txt
-cat projekty_all.txt >> sync_exclude.txt          # żaden projekt nie jest synchronizowany do czasu naprawy
+cat projekty_all.txt >> sync_exclude.txt          # no project is synced until it is repaired
 ```
-Do tego u administratora Jiry: **wyłączenie powiadomień** (np. pusty schemat
-powiadomień dla projektów) i wstrzymanie automatyzacji na czas dociągania
-brakujących zgłoszeń, bo Jira wysyła maile przy każdym utworzeniu przez API.
+In addition, ask the Jira administrator to **turn off notifications** (e.g. an empty notification
+scheme for the projects) and pause automation while missing issues are being pulled in, because
+Jira sends e-mails on every creation via the API.
 
-**Partia pilotażowa** z różnymi przypadkami (duży projekt ze zgubionymi
-powiązaniami, mały, tylko brak głębokich poziomów, Jira > Asana), potem reszta
-partiami po ok. 50 projektów:
+**A pilot batch** with different cases (a large project with lost links, a small one, only missing
+deep levels, Jira > Asana), then the rest in batches of about 50 projects:
 ```bash
 grep -v -x -f pilot.txt projekty_all.txt | split -l 50 -d - partia_
 ```
-Każda partia przechodzi kroki 1-6 z sekcji 15i. Projekty pilne można wydzielić
-do osobnego pliku i przeprowadzić tymi samymi krokami poza kolejnością.
+Each batch goes through steps 1-6 of section 15i. Urgent projects can be put into a separate file
+and taken through the same steps out of order.
 
-### Rutynowo, przy każdej synchronizacji
+### Routinely, on every sync
 
 ```bash
 python run_full_pipeline.py --only epics --parallel 3
 python run_full_pipeline.py --only sync --parallel 3
 ```
-Jeden projekt: `python asana_jira_sync.py --project-keys KLUCZ` (przed nowym
-projektem albo po zmianie struktury w Asanie także
-`python detect_epic_candidates.py --project-keys KLUCZ --force`). Nowy projekt
-z innym workflow: najpierw `section_status_map.<KLUCZ>.json` (sekcja 11),
-podgląd `--dry-run` i sprawdzenie listy sekcji bez mapowania.
+One project: `python asana_jira_sync.py --project-keys KEY` (before a new project or after a
+structure change in Asana also `python detect_epic_candidates.py --project-keys KEY --force`). A
+new project with a different workflow: first `section_status_map.<KEY>.json` (section 11), a
+`--dry-run` preview, and a check of the list of sections without a mapping.
 
-Reakcja na podsumowanie (konsola albo Slack):
+Reacting to the summary (console or Slack):
 
-| Sygnał | Co zrobić |
+| Signal | What to do |
 |---|---|
-| `Sekcje BEZ wpisu w section_status_map.json` | dopisać sekcję do głównej mapy albo mapy projektu (także warianty z literówkami) |
-| `Statusy błąd` > 0 | ostrzeżenie w logu wskazuje zgłoszenie i brakujące przejście; workflow albo ręczna zmiana |
-| `kandydaci na Epic do retrofit_epics.py` > 0 | opcjonalnie retrofit (15a), po uzgodnieniu z PM-em |
-| `pominięte usunięte w jirze` rośnie bez powodu | sekcja 14h |
-| `[CHRONIONE] Pomijam ...` | oczekiwane dla projektów z `protected_projects.txt` |
-| `Utworzono` dużo większe niż nowych zadań w Asanie | **zatrzymać**; możliwe zgubione powiązania (sekcja 14a) |
-| błędy połączenia (`Temporary failure in name resolution`) | sekcja 19 |
+| `Sekcje BEZ wpisu w section_status_map.json` | add the section to the main map or the project map (also variants with typos) |
+| `Statusy błąd` > 0 | the warning in the log points to the issue and the missing transition; workflow or manual change |
+| `kandydaci na Epic do retrofit_epics.py` > 0 | optionally a retrofit (15a), after agreeing with the PM |
+| `pominięte usunięte w jirze` grows for no reason | section 14h |
+| `[CHRONIONE] Pomijam ...` | expected for projects in `protected_projects.txt` |
+| `Utworzono` much higher than the number of new tasks in Asana | **stop**; possibly lost links (section 14a) |
+| connection errors (`Temporary failure in name resolution`) | section 19 |
 
-### Okresowo (np. raz w miesiącu)
+### Periodically (e.g. once a month)
 
 ```bash
-python compare_project_totals.py --all --top-level      # szybki przegląd kompletności
-python audit_hierarchy.py                                # zmiany struktury robione w Asanie
-python fix_stale_resolution.py --project-keys ...        # przekreślone klucze
+python compare_project_totals.py --all --top-level      # quick completeness overview
+python audit_hierarchy.py                                # structure changes made in Asana
+python fix_stale_resolution.py --project-keys ...        # struck-through keys
 ```
-Synchronizacja nie przestawia hierarchii już zmigrowanych zgłoszeń (typ i rodzic
-ustawiane są przy tworzeniu), więc zmiany struktury w Asanie wyłapuje audyt.
+The sync does not rearrange the hierarchy of already migrated issues (type and parent are set on
+creation), so structure changes in Asana are caught by the audit.
 
-### Dociąganie nowości z innej instancji Jiry
+### Pulling in new items from another Jira instance
 
-Ta sama komenda co przy pierwszym kopiowaniu, z `--update-status` (sekcja 4a,
-"Kopiowanie przyrostowe"); najpierw `--dry-run` dla każdego projektu docelowego.
+The same command as for the first copy, with `--update-status` (section 4a, "Incremental copy");
+first `--dry-run` for each target project.
 
-### Zawsze
+### Always
 
-Po ręcznych zmianach hierarchii w Jirze albo po dowolnym narzędziu naprawczym:
+After manual hierarchy changes in Jira or after any repair tool:
 `python refresh_state_flags.py --project-keys ... --apply`.
 
-### Procesy
+### Processes
 
-Podgląd działających skryptów: `pgrep -af python`. Wstrzymanie i wznowienie:
-`kill -STOP <PID>` / `kill -CONT <PID>` (albo `Ctrl+Z` i `fg`); operacja w toku
-w chwili wstrzymania może po wznowieniu przekroczyć czas oczekiwania i trafić
-do błędów. Zatrzymanie: `kill <PID>` albo `Ctrl+C` (zapis stanu jest atomowy;
-ponowne uruchomienie tej samej komendy pomija zrobione). Po zatrzymaniu
-`run_full_pipeline.py` sprawdź, czy nie zostały procesy shardów.
+Running scripts: `pgrep -af python`. Pause and resume: `kill -STOP <PID>` / `kill -CONT <PID>`
+(or `Ctrl+Z` and `fg`); an operation in progress at the moment of pausing may exceed its timeout
+after resuming and end up among the errors. Stop: `kill <PID>` or `Ctrl+C` (the state write is
+atomic; re-running the same command skips what is done). After stopping `run_full_pipeline.py`,
+check that no shard processes are left.
 
-## 19. Rozwiązywanie problemów
+## 19. Troubleshooting
 
-### 19a. Synchronizacja, naprawy, kopiowanie
+### 19a. Sync, repairs, copying
 
-| Objaw | Przyczyna | Co zrobić |
+| Symptom | Cause | What to do |
 |---|---|---|
-| `Temporary failure in name resolution`, serie `[PONAWIAM n/4]` | przerwa w sieci albo DNS po Twojej stronie | sprawdzić `ping -c 3 app.asana.com`; przy dłuższej przerwie przerwać, po powrocie sieci uruchomić tę samą komendę ponownie (już zrobione są pomijane), na końcu `compare_project_totals.py` |
-| `copy_project_cross_instance.py`: `0 zadań` albo `odrzuca logowanie: HTTP 401` | token do instancji źródłowej wygasł albo został cofnięty, konto straciło dostęp, instancja zmieniła adres | nowy token (zwykły, nie "z zakresami") w `SOURCE_JIRA_API_TOKEN`; sprawdzenie: `curl -u "$SOURCE_JIRA_EMAIL:$SOURCE_JIRA_API_TOKEN" "$SOURCE_JIRA_BASE_URL/rest/api/3/myself"` |
-| `AttributeError: module 'jira_sync' has no attribute ...` albo raport z identycznymi liczbami mimo nowej wersji | w folderze jest stara wersja pliku (pobrana nowa zapisała się jako `plik (1).py`) albo nieaktualny `__pycache__` | `ls -la nazwa*.py`, przenieść nową wersję na właściwą nazwę, `rm -rf __pycache__`; pliki z jednej paczki podmieniać razem |
-| `repair_batch.py: error: podaj --project-keys albo --keys-file` | pusta zmienna `$PARTIA` (nowy terminal) | ustawić `PARTIA` i `KEYS` ponownie |
-| `GRUPA:: nie znaleziono polecenia` przy `source .env` | wartość ze spacją bez cudzysłowu | `DEVELOPER_GROUP_NAME="MOJA GRUPA: Staff"` |
-| `sesja przeglądarki wygasła` / `UNAUTHENTICATED` / pusta odpowiedź GraphQL | sesja, przeciążenie, zmiana skrótu zapytania | sekcja 4a, "Gdy zapis kolumn przestaje działać" |
-| `Bulk Move nie zakończyło się w ciągu 60s` | wolna kolejka po stronie Jiry | ponowne `--apply` dokończy brakujące (sekcja 15e) |
-| `For issue X Type is required` | wymagane pole "Type" przy zmianie typu | obsługiwane automatycznie przez `convert_to_epic.py`; jeśli wraca, sprawdzić `DEFAULT_TYPE_FIELD_ID`/`DEFAULT_TYPE_FIELD_VALUE` w `.env` |
-| `The priority selected is invalid` przy kopiowaniu | priorytet spoza schematu priorytetów projektu | obsługiwane automatycznie (pole pomijane, reszta zapisywana) |
-| przekreślony klucz w otwartym zgłoszeniu | pozostawione pole Resolution | sekcja 14g |
-| setki maili/powiadomień o usunięciach i zmianach | zgłoszenia tworzone są z konta synchronizacji, które jest zgłaszającym | osobiste ustawienia powiadomień w profilu Jiry; przy masowym tworzeniu wyłączenie powiadomień przez administratora |
-| liczba w `Zdjęto z wykluczeń` większa niż liczba projektów | podwójne wpisy w `sync_exclude.txt` | nieszkodliwe; deduplikacja: sekcja 11 |
-| podgląd synchronizacji nic nie pokazuje dla projektu | projekt w `sync_exclude.txt` albo `protected_projects.txt` | `grep KLUCZ sync_exclude.txt protected_projects.txt` |
+| `Temporary failure in name resolution`, series of `[PONAWIAM n/4]` (retrying) | a network or DNS outage on your side | check `ping -c 3 app.asana.com`; for a longer outage abort, and when the network is back run the same command again (finished items are skipped), at the end `compare_project_totals.py` |
+| `copy_project_cross_instance.py`: `0 zadań` (0 tasks) or `odrzuca logowanie: HTTP 401` | the token for the source instance expired or was revoked, the account lost access, the instance changed its address | a new token (regular, not "scoped") in `SOURCE_JIRA_API_TOKEN`; check: `curl -u "$SOURCE_JIRA_EMAIL:$SOURCE_JIRA_API_TOKEN" "$SOURCE_JIRA_BASE_URL/rest/api/3/myself"` |
+| `AttributeError: module 'jira_sync' has no attribute ...` or a report with identical numbers despite a new version | the folder has an old version of the file (the downloaded new one was saved as `file (1).py`) or a stale `__pycache__` | `ls -la name*.py`, move the new version to the right name, `rm -rf __pycache__`; replace files from one package together |
+| `repair_batch.py: error: podaj --project-keys albo --keys-file` | empty `$PARTIA` variable (new terminal) | set `PARTIA` and `KEYS` again |
+| `GRUPA:: nie znaleziono polecenia` (command not found) on `source .env` | a value with a space, without quotes | `DEVELOPER_GROUP_NAME="MOJA GRUPA: Staff"` |
+| `sesja przeglądarki wygasła` / `UNAUTHENTICATED` / empty GraphQL response | session, overload, changed query hash | section 4a, "When saving columns stops working" |
+| `Bulk Move nie zakończyło się w ciągu 60s` | slow queue on Jira's side | another `--apply` will finish the missing ones (section 15e) |
+| `For issue X Type is required` | the required "Type" field when changing the type | handled automatically by `convert_to_epic.py`; if it comes back, check `DEFAULT_TYPE_FIELD_ID`/`DEFAULT_TYPE_FIELD_VALUE` in `.env` |
+| `The priority selected is invalid` when copying | a priority outside the project's priority scheme | handled automatically (the field is skipped, the rest is saved) |
+| a struck-through key in an open issue | a leftover Resolution field | section 14g |
+| hundreds of e-mails/notifications about deletions and changes | issues are created from the sync account, which is the reporter | personal notification settings in the Jira profile; for bulk creation, notifications turned off by an administrator |
+| the number in `Zdjęto z wykluczeń` (removed from exclusions) is higher than the number of projects | duplicate entries in `sync_exclude.txt` | harmless; deduplication: section 11 |
+| the sync preview shows nothing for a project | the project is in `sync_exclude.txt` or `protected_projects.txt` | `grep KEY sync_exclude.txt protected_projects.txt` |
+| `./start.sh`: `Address already in use` | port 8765 is taken (e.g. a running panel) | open the running panel or `./start.sh --port 9000` |
+| steps 2-3 don't start the browser | missing system libraries for Chromium (Linux) | `sudo .venv/bin/python -m playwright install-deps chromium` |
+| panel: empty project list | the sheet is loaded only on request | Start → step 3 or Projects → "Refresh from sheet" |
+| connection test: no access to the sheet (403) | the sheet is not shared with the service account | share it with the address shown in step 1 |
+| issues without an assignee although the person is in `user_map.json` | the person's role lacks "Assignable User" in the permission scheme | "Statuses and people" → People (scheme and roles with the permission) |
+| checked-off issues don't get the final status | no `__ukonczone__`, and the project has no `Fertig` status | set the status in "Status mapping" |
+| project copy: "pominięto uprawnienia…" (permissions skipped) | Jira does not accept some permissions when creating a scheme (Product Discovery, `COPY_PROJECT`) | add them by hand in the copy's scheme if needed |
 
-### 19b. Konfiguracja Jiry w praktyce: znane problemy i rozwiązania
+### 19b. Jira configuration in practice: known problems and solutions
 
-**Pole jest na ekranie, ale go nie widać / nie da się edytować.** Patrz
-sekcja 17i (field scheme) — to najczęstsza przyczyna na FIRMA. Szybki test w
-UI: ⋯ w zgłoszeniu → **Find your field**.
+**The field is on the screen but cannot be seen / edited.** See section 17i (field scheme) — the
+most common cause on FIRMA. Quick test in the UI: ⋯ in the issue → **Find your field**.
 
-**Nie da się edytować nazwy Story.** Story ma dwa ekrany: Create (tworzenie)
-i Edit (edycja i podgląd). Ekran Edit z eksportu KlientX nie miał Podsumowania
-ani Opisu. W `jira_schema_klient.yaml` dodano mu „Zakładkę główną” (16.10.2026)
-— wystarczy `--only screens`. Ta sama przyczyna sprawiała, że pole Components
-Story było niewidoczne.
+**A Story's name cannot be edited.** A Story has two screens: Create and Edit (edit and view). The
+Edit screen from the KlientX export had neither Summary nor Description. In
+`jira_schema_klient.yaml` a "Zakładka główna" (main tab) was added to it (16.10.2026) — running
+`--only screens` is enough. The same cause made the Story Components field invisible.
 
-**Zmiana typu Task → Story z ikony typu nie działa** („You cannot edit this
-work type in this space”). Task i Story mają różne workflow, a zmiana typu z
-ikony działa tylko przy wspólnym workflow. Użyj **⋯ → Przenieś (Move)**,
-zostaw projekt, wybierz typ i zmapuj status. Wiele zgłoszeń naraz: wyszukiwanie
-→ **Bulk change → Move**. Klucz, komentarze i historia zostają.
+**Changing the type Task → Story from the type icon does not work** ("You cannot edit this work
+type in this space"). Task and Story have different workflows, and changing the type from the icon
+works only with a shared workflow. Use **⋯ → Move**, keep the project, choose the type and map the
+status. Many issues at once: search → **Bulk change → Move**. The key, comments and history remain.
 
-**Automatyzacja „Work item created” nie działa na części zgłoszeń.**
-Zgłoszenia **przeniesione** z innego projektu (Move, np. RED-28 → PROJ-450)
-nie wywołują zdarzenia „created”. Dla pól ustawianych automatycznie (np.
-Key_txt = `{{issue.key}}`) dodaj:
-- regułę z wyzwalaczem **Work item moved** (projekt docelowy) i tą samą akcją —
-  zawsze nadpisuje, bo przy przeniesieniu zmienia się klucz,
-- albo regułę **Scheduled** z JQL `project = PROJ AND "Key_txt[Short text]" is EMPTY`
-  (lub `cf[12083] is EMPTY`) i **bez** „Only include work items that have
-  changed since the last time…”. Łapie każde zgłoszenie z pustym polem,
-  niezależnie od tego, jak trafiło do projektu, i uzupełnia też stare.
+**The "Work item created" automation does not work on some issues.** Issues **moved** from another
+project (Move, e.g. RED-28 → PROJ-450) do not fire the "created" event. For fields set
+automatically (e.g. Key_txt = `{{issue.key}}`) add:
+- a rule with the **Work item moved** trigger (target project) and the same action — it always
+  overwrites, because the key changes on a move,
+- or a **Scheduled** rule with the JQL `project = PROJ AND "Key_txt[Short text]" is EMPTY` (or
+  `cf[12083] is EMPTY`) and **without** "Only include work items that have changed since the last
+  time…". It catches every issue with an empty field, regardless of how it got into the project,
+  and also fills in old ones.
 
-Rozpoznanie: dziennik audytu reguły (⋯ → Audit log). Brak wpisu = reguła się
-nie uruchomiła (zakres albo sposób powstania zgłoszenia), wpis z błędem = pole
-(field scheme), „Success” a pole puste = coś nadpisało wartość (sprawdź
-Historię zgłoszenia, np. synchronizację Backbone).
+Diagnosis: the rule's audit log (⋯ → Audit log). No entry = the rule did not run (scope or the way
+the issue was created), an entry with an error = the field (field scheme), "Success" but the field
+is empty = something overwrote the value (check the issue History, e.g. the Backbone sync).
 
-**Zmiana klucza projektu (PROJT → PROJ).** Reguły automatyzacji trzymają
-się projektu, nie klucza — działają dalej. W skryptach podawaj nowy klucz
-(`--project PROJ`); stare klucze zgłoszeń przekierowują w UI. Pliki stanu
-zapisane pod starym kluczem (np. `epics_stories_state.json`) zaczną od nowa,
-ale skrypty i tak szukają istniejących zgłoszeń w Jirze, więc nie dublują.
-Pola z zapisanym kluczem (Key_txt) mogą zawierać stary klucz.
+**Changing the project key (PROJT → PROJ).** Automation rules are tied to the project, not the
+key — they keep working. In the scripts use the new key (`--project PROJ`); old issue keys redirect
+in the UI. State files saved under the old key (e.g. `epics_stories_state.json`) will start from
+scratch, but the scripts look for existing issues in Jira anyway, so they do not create duplicates.
+Fields with a saved key (Key_txt) may contain the old key.
 
-**Synchronizacja Backbone — „Analityk u Klienta” = `Bacbone-Issue-Sync (${user.emailAddress})`.**
-To niepodstawiony szablon w mapowaniu Backbone; do poprawienia w
-konfiguracji synchronizacji, nie w Jirze.
+**Backbone sync — "Analityk u Klienta" (client-side analyst) = `Bacbone-Issue-Sync (${user.emailAddress})`.**
+This is an unsubstituted template in the Backbone mapping; to be fixed in the sync configuration,
+not in Jira.
 
-## 20. Epiki i Story z arkusza „Zakres MVP”
+## 20. Epics and Stories from the "Zakres MVP" (MVP scope) sheet
 
-### 20a. Tworzenie (`create_epics_stories_from_sheet.py`)
+### 20a. Creating (`create_epics_stories_from_sheet.py`)
 
-Źródło: plik `.xlsx` (Google Sheets: Plik → Pobierz → Microsoft Excel).
+Source: an `.xlsx` file (Google Sheets: File → Download → Microsoft Excel).
 
-| Zakładka | Kolumna | Trafia do |
+| Tab | Column | Goes to |
 |---|---|---|
-| Lista Epiców | D | tytuł Epika (gdy pusta lub formuła bez wartości: B + „ - ” + C) |
-| Lista Epiców | E | opis Epika |
-| Biznesowy zakres MVP | D (Funkcja) | tytuł Story |
-| Biznesowy zakres MVP | F (Opis kontekstowy) | opis Story |
-| Biznesowy zakres MVP | G (Uwagi) | dopisywane do opisu jako „Uwagi: …” (przy pustym F opis = same Uwagi) |
-| Biznesowy zakres MVP | E (Status: MVP / POST-MVP) | **komponent** Story (pole Components) |
-| Biznesowy zakres MVP | B + „ - ” + C | Epik nadrzędny (dopasowany do kolumny D „Listy Epiców”) |
+| Lista Epiców (Epic list) | D | Epic title (when empty or a formula without a value: B + " - " + C) |
+| Lista Epiców | E | Epic description |
+| Biznesowy zakres MVP (business MVP scope) | D (Funkcja = Feature) | Story title |
+| Biznesowy zakres MVP | F (Opis kontekstowy = context description) | Story description |
+| Biznesowy zakres MVP | G (Uwagi = Notes) | appended to the description as "Uwagi: …" (with an empty F the description = just the notes) |
+| Biznesowy zakres MVP | E (Status: MVP / POST-MVP) | Story **component** (the Components field) |
+| Biznesowy zakres MVP | B + " - " + C | parent Epic (matched to column D of "Lista Epiców") |
 
 ```bash
 python create_epics_stories_from_sheet.py --file "Zakres MVP.xlsx" --project PROJ --dry-run
@@ -2719,98 +2707,96 @@ python create_epics_stories_from_sheet.py --file "Zakres MVP.xlsx" --project PRO
 python create_epics_stories_from_sheet.py --file "Zakres MVP.xlsx" --project PROJ
 ```
 
-| Opcja | Działanie |
+| Option | Effect |
 |---|---|
-| `--limit N` | test: N pierwszych Story i tylko ich Epiki; pełne uruchomienie potem dokończy resztę bez duplikatów |
-| `--status MVP` | tylko Story o tym statusie |
-| `--only-epics` | tylko Epiki |
-| `--no-status-component` | bez komponentów ze statusu |
-| `--strip-epic-components` | zdejmuje MVP/POST-MVP z istniejących Epików (ustawione przez starszą wersję skryptu) |
-| `--epic-sheet`, `--story-sheet`, `--story-type` | inne nazwy zakładek / typu Story |
+| `--limit N` | test: the first N Stories and only their Epics; a full run then finishes the rest without duplicates |
+| `--status MVP` | only Stories with this status |
+| `--only-epics` | Epics only |
+| `--no-status-component` | no components from the status |
+| `--strip-epic-components` | removes MVP/POST-MVP from existing Epics (set by an older version of the script) |
+| `--epic-sheet`, `--story-sheet`, `--story-type` | other tab names / Story type |
 
-**Zasady:**
-- **Dopasowanie Story → Epik** nie zależy od wielkości liter, nadmiarowych
-  spacji ani rodzaju myślnika. Gdy pełny tytuł się nie zgadza, skrypt łączy
-  po numerze obszaru („2.”) i nazwie Epika (kolumna C) — tak obsługuje
-  „2. Hub ofertowy / Backoffice (panel administracyjny)” vs „2. Hub ofertowy /
-  Backoffice”. Pary dopasowane w ten sposób wypisuje w bloku `[INFO]`.
-  Tytuł Epika zawsze pochodzi z kolumny D „Listy Epiców”.
-- **Story bez Epika** (B + C nie pasuje do niczego) są pomijane i wypisywane
-  na początku — zwykle to literówka w arkuszu.
-- **Pusty opis w arkuszu = pusty opis w Jirze** (pole nie jest wysyłane).
-- **Komponenty dostają tylko Story.** Brakujące komponenty (MVP, POST-MVP)
-  skrypt zakłada w projekcie.
-- **Weryfikacja po zapisie:** po utworzeniu skrypt odczytuje zgłoszenie i,
-  jeśli Jira pominęła opis albo komponent, dopisuje go osobną aktualizacją.
-  Przy istniejących zgłoszeniach uzupełnia pusty opis i brakujący komponent
-  (wypełnionego opisu nie nadpisuje). Odrzucenie przez Jirę jest wypisywane
-  z pełnym komunikatem.
-- **Pole „Epic Name”**, jeśli Jira go wymaga przy tworzeniu, dostaje tytuł Epika.
-- **Duplikaty:** przed utworzeniem skrypt szuka w projekcie Epika o tym samym
-  tytule i Story o tym samym tytule pod tym Epikiem. Stan zapisuje w
-  `epics_stories_state.json`. Po usunięciu zgłoszeń testowych w Jirze usuń też
-  ten plik, inaczej skrypt uzna je za istniejące.
+**Rules:**
+- **Story → Epic matching** ignores case, extra spaces and the kind of dash. When the full title
+  does not match, the script matches by the area number ("2.") and the Epic name (column C) — this
+  is how it handles "2. Hub ofertowy / Backoffice (panel administracyjny)" vs "2. Hub ofertowy /
+  Backoffice". Pairs matched this way are printed in an `[INFO]` block. The Epic title always comes
+  from column D of "Lista Epiców".
+- **Stories without an Epic** (B + C matches nothing) are skipped and listed at the start — usually
+  a typo in the sheet.
+- **An empty description in the sheet = an empty description in Jira** (the field is not sent).
+- **Only Stories get components.** The script creates missing components (MVP, POST-MVP) in the project.
+- **Verification after writing:** after creating, the script reads the issue back and, if Jira
+  dropped the description or component, adds it with a separate update. For existing issues it fills
+  in an empty description and a missing component (it does not overwrite a filled description). A
+  rejection by Jira is printed with the full message.
+- **The "Epic Name" field**, if Jira requires it on creation, gets the Epic title.
+- **Duplicates:** before creating, the script looks in the project for an Epic with the same title
+  and a Story with the same title under that Epic. It saves the state in `epics_stories_state.json`.
+  After deleting test issues in Jira, delete this file too, otherwise the script will consider them
+  existing.
 
-### 20b. Eksport z powrotem do arkusza (`export_stories_to_sheet.py`)
+### 20b. Exporting back to the sheet (`export_stories_to_sheet.py`)
 
-Pobiera Story z Jiry i zapisuje do zakładki „Jira” z kolumnami
-**Klucz | Epik (klucz) | Epik | Tytuł | Opis** (klucze są linkami, opis jako
-zwykły tekst, wiersze posortowane po kluczu):
+Fetches Stories from Jira and writes them to a "Jira" tab with the columns
+**Klucz (Key) | Epik (klucz) (Epic key) | Epik (Epic) | Tytuł (Title) | Opis (Description)** (keys are
+links, the description as plain text, rows sorted by key):
 
 ```bash
-# nowa zakładka w KOPII arkusza: "<plik> - eksport Jira.xlsx" (oryginał nietknięty)
+# a new tab in a COPY of the sheet: "<file> - eksport Jira.xlsx" (the original untouched)
 python export_stories_to_sheet.py --project PROJ --file "Zakres MVP.xlsx"
-# osobny plik
+# a separate file
 python export_stories_to_sheet.py --project PROJ --out stories_PROJ.xlsx
-# własny filtr
+# a custom filter
 python export_stories_to_sheet.py --project PROJ --jql 'project = PROJ AND component = MVP'
 ```
 
-## 21. Pliki panelu (`migration_app/`)
+## 21. Panel files (`migration_app/`)
 
-Obsługę panelu opisuje część I. Pliki:
+Using the panel is described in part I. Files:
 
-| Ścieżka | Co to |
+| Path | What it is |
 |---|---|
-| `../start.sh` | instalacja (`.venv`, zależności, przeglądarka) i start panelu; `panel.sh` tylko go wywołuje |
-| `server.py` | serwer HTTP i API |
-| `catalog.py` | katalog narzędzi: grupy, parametry formularzy, kiedy narzędzie zapisuje |
-| `runner.py` | podprocesy, logi, wejście dla pytań skryptów, przerywanie |
-| `asana_check.py` | sprawdzenie statusów i przypisań (można też uruchomić ręcznie) |
-| `sheet_projects.py` | odczyt projektów z arkusza do `cache/sheet.json` |
-| `setup_check.py` | testy połączeń i konfiguracji (Start, krok 2) |
-| `people_source.py` | osoby z Asany i grup Jiry z propozycjami dopasowań |
-| `status_source.py` | sekcje Asany i statusy projektu wzorcowego do mapowania |
-| `cache/` | wyniki odczytów (arkusz, osoby, sekcje, testy) — nie jest w repozytorium |
-| `static/` | interfejs (HTML, JS, CSS) |
-| `runs/` | historia uruchomień (metadane i log) — nie jest w repozytorium |
-| `checks/` | wyniki sprawdzeń statusów i osób — nie jest w repozytorium |
-| `backups/` | kopie plików sprzed każdego zapisu z panelu — nie jest w repozytorium |
+| `../start.sh` | installation (`.venv`, dependencies, browser) and panel start; `panel.sh` just calls it |
+| `server.py` | HTTP server and API |
+| `catalog.py` | tool catalogue: groups, form parameters, when a tool writes |
+| `runner.py` | subprocesses, logs, input for script prompts, stopping |
+| `asana_check.py` | status and assignment check (can also be run by hand) |
+| `sheet_projects.py` | reads projects from the sheet into `cache/sheet.json` |
+| `setup_check.py` | connection and configuration tests (Start, step 2) |
+| `people_source.py` | people from Asana and Jira groups with suggested matches |
+| `status_source.py` | Asana sections and template project statuses for mapping |
+| `jira_lookup.py` | roles, people and groups for the "Copy project" tab |
+| `cache/` | read results (sheet, people, sections, tests) — not in the repository |
+| `static/` | the user interface (HTML, JS, CSS) |
+| `runs/` | run history (metadata and log) — not in the repository |
+| `checks/` | results of status and people checks — not in the repository |
+| `backups/` | copies of files from before every save in the panel — not in the repository |
 
-**Nowy skrypt w panelu** dodaje się jednym wpisem w liście `TOOLS` w
-`catalog.py`: grupa, ścieżka skryptu, parametry formularza (rodzaje opisane na
-początku pliku: `bool`, `str`/`int`, `keys`, `choice`, `pos`, `repeat`) i pole
-`writes` (`never`, `always`, `unless:--dry-run`, `with:--apply`), od którego
-zależy, czy panel poprosi o potwierdzenie.
+**A new script in the panel** is added with one entry in the `TOOLS` list in
+`catalog.py`: the group, the script path, the form parameters (kinds described at the
+top of the file: `bool`, `str`/`int`, `keys`, `choice`, `pos`, `repeat`) and the
+`writes` field (`never`, `always`, `unless:--dry-run`, `with:--apply`), which decides
+whether the panel asks for confirmation.
 
-## 22. Pozostałe skrypty pomocnicze
+## 22. Other helper scripts
 
-| Skrypt | Do czego służy |
+| Script | What it is for |
 |---|---|
-| `add_admin_to_projects.py` | dodaje jedną osobę (accountId) do roli Administrator w istniejących projektach |
-| `add_group_to_projects.py` | dodaje grupę do jednej lub wielu ról w istniejących projektach |
-| `assign_category_to_projects.py` | przypisuje istniejącą kategorię projektu do podanych projektów |
-| `copy_permission_scheme.py` | kopiuje schemat uprawnień pod nową nazwą i opcjonalnie podpina go do projektu |
-| `empty_notification.py` | podpina wskazany schemat powiadomień do listy projektów (klucze w `RAW_PROJECT_KEYS`, dane logowania ze zmiennych środowiskowych `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`) |
-| `atlassian_suspend_to_deactivate.py` | dezaktywuje konta o statusie „suspended” w organizacji Atlassian (Lifecycle API) |
-| `backfill_jira_links.py` | jednorazowo uzupełnia kolumnę `jira_link` w arkuszu dla wierszy z `jira_key` |
-| `list_sheet_tabs.py` | wypisuje dokładne nazwy zakładek arkusza Google |
-| `check_jira_project_access.py` | sprawdza, czy e-mail i token API mają dostęp do odczytu w Jirze |
-| `check_project_level_attachments.py` | wykrywa pliki przypięte do projektu w Asanie (nie do zadań), których synchronizacja nie przenosi |
-| `migrate_project_level_attachments.py` | przenosi te pliki do Jiry jako załączniki zadania-kontenera „Zasoby projektu” |
-| `bulk_configure_columns_simple.py` | wariant konfiguracji kolumn dla prostego układu 4 kolumn |
-| `configure_columns_via_cli.py` | konfiguracja kolumn przez Jira Command Line Interface (Appfire) zamiast przeglądarki |
-| `move_all_statuses_to_new.py` | przenosi wszystkie statusy tablicy do jednej kolumny „New In” |
-| `create_analysis_for_stories.py` | dla każdego Story tworzy powiązane zadanie „Analysis” |
-| `diagnose_field_config.py`, `diagnose_transition.py` | diagnostyka: surowa odpowiedź field configuration scheme i dostępne przejścia zadania |
-| `project_lock.py` | moduł blokady pojedynczego projektu przy równoległych uruchomieniach (używany przez inne skrypty) |
+| `add_admin_to_projects.py` | adds one person (accountId) to the Administrator role in existing projects |
+| `add_group_to_projects.py` | adds a group to one or more roles in existing projects |
+| `assign_category_to_projects.py` | assigns an existing project category to the given projects |
+| `copy_permission_scheme.py` | copies a permission scheme under a new name and optionally attaches it to a project |
+| `empty_notification.py` | attaches the given notification scheme to a list of projects (keys in `RAW_PROJECT_KEYS`, credentials from the `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` environment variables) |
+| `atlassian_suspend_to_deactivate.py` | deactivates accounts with the "suspended" status in the Atlassian organization (Lifecycle API) |
+| `backfill_jira_links.py` | one-off: fills in the `jira_link` column in the sheet for rows with a `jira_key` |
+| `list_sheet_tabs.py` | prints the exact tab names of the Google Sheet |
+| `check_jira_project_access.py` | checks whether an e-mail and API token have read access in Jira |
+| `check_project_level_attachments.py` | detects files attached to a project in Asana (not to tasks), which the sync does not move |
+| `migrate_project_level_attachments.py` | moves those files to Jira as attachments of a "Project resources" container issue |
+| `bulk_configure_columns_simple.py` | column configuration variant for a simple 4-column layout |
+| `configure_columns_via_cli.py` | column configuration via the Jira Command Line Interface (Appfire) instead of the browser |
+| `move_all_statuses_to_new.py` | moves all statuses of a board to a single "New In" column |
+| `create_analysis_for_stories.py` | creates a linked "Analysis" issue for every Story |
+| `diagnose_field_config.py`, `diagnose_transition.py` | diagnostics: raw field configuration scheme response and the transitions available for an issue |
+| `project_lock.py` | per-project lock module for parallel runs (used by other scripts) |

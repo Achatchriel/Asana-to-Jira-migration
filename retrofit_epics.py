@@ -77,8 +77,8 @@ def project_of(issue_key: str) -> str:
 def assert_same_project(child_key: str, parent_key: str, expected_project: str) -> None:
     """Zabezpieczenie przed skażonymi danymi w task_sync_state.json - jeśli
     zadanie z gid śledzonego pod projektem X ma faktycznie zapisany klucz
-    Jiry z INNEGO projektu (potwierdzony ręcznie przypadek: BESUGA2 próbował
-    przepiąć zadanie pod BMATLE2-65 - dwa RÓŻNE projekty), Jira i tak by to
+    Jiry z INNEGO projektu (potwierdzony ręcznie przypadek: PROJ7 próbował
+    przepiąć zadanie pod PROJ6-65 - dwa RÓŻNE projekty), Jira i tak by to
     odrzuciła ("Issues... must be created in the same project as the
     parent"), ale lepiej wykryć to WCZEŚNIEJ, z jasnym komunikatem
     wskazującym na źródło problemu (skażony stan), niż dostać nieczytelny
@@ -219,7 +219,7 @@ def main() -> None:
                                 except RuntimeError as set_exc:
                                     if "appropriate hierarchy" in str(set_exc) or "same project as the parent" in str(set_exc):
                                         # Prawdopodobnie legacy Subtask (id=10059, "Migrated...") - ten
-                                        # sam wzorzec co przy sub1 (AKESPU2-36..43). Samo set_parent
+                                        # sam wzorzec co przy sub1 (PROJ8-36..43). Samo set_parent
                                         # (PUT z polem parent) jest odrzucane dla tego typu. Konwertujemy
                                         # na regularny Sub-task via Bulk Move, potem ustawiamy rodzica.
                                         print(f"        [INFO] {sub2_key}: set_parent odrzucony "

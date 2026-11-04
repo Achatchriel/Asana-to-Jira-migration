@@ -33,7 +33,9 @@ Dodatkowo pakiet zawiera:
   i `protected_projects.txt` (trwałe wyłączenie ze wszystkiego), sekcja 11,
 - **konfigurację Jiry z pliku YAML** (`build_jira_schema.py`, sekcja 17) oraz
   **Epiki i Story z arkusza zakresu** (`create_epics_stories_from_sheet.py`,
-  sekcja 20); oba narzędzia są niezależne od migracji z Asany.
+  sekcja 20); oba narzędzia są niezależne od migracji z Asany,
+- **panel webowy** `migration_app/` — lokalna aplikacja, która uruchamia skrypty
+  z przeglądarki, pokazuje stan projektów i logi na żywo (sekcja 21).
 
 Każdy wiersz arkusza musi mieć `asana_project_link`. Wiersz bez linku (albo z
 linkiem, do którego token nie ma dostępu) jest **pomijany w całości**: projekt
@@ -47,7 +49,8 @@ w kolumnach · 12 kierunek zwrotny · 13 logi i Slack · 14 weryfikacja i sprzą
 17 konfiguracja Jiry z YAML (pola, statusy, workflow, ekrany, schematy) ·
 18 procedura pracy (naprawa, rutynowo, okresowo) · 19 rozwiązywanie problemów
 (19a synchronizacja i naprawy, 19b konfiguracja Jiry w praktyce) ·
-20 Epiki i Story z arkusza "Zakres MVP"
+20 Epiki i Story z arkusza "Zakres MVP" · 21 panel webowy ·
+22 pozostałe skrypty pomocnicze
 
 ## 1. Instalacja
 
@@ -72,6 +75,17 @@ pip install -r requirements.txt
    ```bash
    python check_asana_token.py
    ```
+
+### Czego nie ma w repozytorium
+
+Repozytorium zawiera wyłącznie kod i dokumentację. Pliki z danymi powstają
+lokalnie przy pracy i są wykluczone w `.gitignore`: `.env`, sesja przeglądarki
+(`auth_state.json`), pliki stanu i cache (`*.json`, sekcja 16), raporty `*.csv`,
+arkusze `*.xlsx`, listy projektów `*.txt` (np. `sync_exclude.txt`,
+`protected_projects.txt`), konfiguracje YAML konkretnej instancji oraz katalogi
+`logs/`, `locks/`, `pipeline_summaries/`, `diagnostics/`, `repair_reports/`.
+Klucze projektów, nazwy instancji i grup w przykładach (`PROJ`, `KLUCZ`,
+`twoja-instancja.atlassian.net`, `KlientX`) są przykładowe — podstaw własne.
 
 ## 3. Typ tablicy
 
@@ -151,7 +165,7 @@ widzą jej filtr. Nowy filtr dostaje te same udostępnienia i prawa edycji co fi
 projekcie źródłowym staje się udostępnieniem tej roli w nowym projekcie, grupy
 i inne udostępnienia bez zmian). Dodatkowo filtr jest zawsze udostępniany nowemu
 projektowi, nawet gdy źródłowy był prywatny. Projekty skopiowane starszą wersją
-skryptu (zespół nie widzi tablic) poprawia:
+skryptu (zespół nie widzi tablic) poprawia `fix_board_filter_permissions.py` *(skrypt nie jest dołączony do tego repozytorium)*:
 ```bash
 python fix_board_filter_permissions.py --project-keys XYZ                      # raport
 python fix_board_filter_permissions.py --project-keys XYZ --apply --editable   # udostępnij + prawo edycji
@@ -287,7 +301,7 @@ standardowego), przed kopiowaniem zadań odtwarza się go w trzech krokach.
 Konto w instancji źródłowej musi być tam administratorem, inaczej workflow nie
 da się odczytać.
 
-1. **Eksport workflow** (`export_source_workflows.py`, tylko odczyt źródła):
+1. **Eksport workflow** (`export_source_workflows.py`, tylko odczyt źródła) *(skrypt nie jest dołączony do tego repozytorium)*:
    ```bash
    python export_source_workflows.py --source-key KLUCZ
    python export_source_workflows.py --source-key KLUCZ --name-prefix "KLUCZ – " --out jira_schema_klucz.yaml
@@ -377,7 +391,7 @@ Zasady, żeby nie rozrywać hierarchii:
 | Epic bez dzieci | według własnego statusu |
 
 Przy podziale stan kopiowania jest prowadzony osobno dla pary `źródło>cel`
-(np. `WEB>CJD`, `WEB>MCPSIG2`), więc ten sam Epik może być w dwóch projektach.
+(np. `WEB>CJD`, `WEB>PROJ4`), więc ten sam Epik może być w dwóch projektach.
 Sub-taski idą z rodzicem, więc mapa statusów projektu, do którego trafia rodzic,
 musi obejmować też statusy podzadań z drugiej grupy (inaczej w planie pojawi się
 `(domyślny)`).
@@ -416,7 +430,7 @@ python copy_project_cross_instance.py \
     --done-status Done --other-status Misc \
     --user-map wt_user_map.json --skip-boards --dry-run
 ```
-Podział WEB na dwa istniejące projekty (CJD i MCPSIG2), także do późniejszego
+Podział WEB na dwa istniejące projekty (CJD i PROJ4), także do późniejszego
 dociągania nowości:
 ```bash
 python copy_project_cross_instance.py \
@@ -426,7 +440,7 @@ python copy_project_cross_instance.py \
     --user-map wt_user_map.json --skip-boards --skip-access --update-status --dry-run
 
 python copy_project_cross_instance.py \
-    --source-key WEB --target-key MCPSIG2 \
+    --source-key WEB --target-key PROJ4 \
     --exclude-statuses "CJD - Backlog,CJD - On Hold,CJD - Neu / Offen,CJD - In Arbeit" \
     --status-map status_map_projekt2.json \
     --user-map wt_user_map.json --skip-boards --skip-access --update-status --dry-run
@@ -1002,7 +1016,7 @@ DEBUG_SYNC=1 python asana_jira_sync.py --limit 1 --project-keys KLUCZ
 | `epic_candidates.json` | **automatycznie tworzona** lista kandydatów na Epic per projekt |
 | `copy_project_cross_instance.py` | kopia projektu między dwiema instancjami Jiry (sekcja 4a) |
 | `copy_project.py` | pełna kopia JEDNEGO istniejącego projektu Jiry, łącznie z tablicami/kolumnami (sekcja 4a) |
-| `fix_board_filter_permissions.py` | udostępnia filtry tablic projektowi, gdy zespół nie widzi tablic (sekcja 4a) |
+| `fix_board_filter_permissions.py` | udostępnia filtry tablic projektowi, gdy zespół nie widzi tablic (sekcja 4a) *(skrypt nie jest dołączony do tego repozytorium)* |
 | `audit_hierarchy.py` | audyt i naprawa miejsca zgłoszeń w hierarchii względem drzewa Asany (sekcja 15e) |
 | `compare_project_totals.py` | pełne porównanie projektu Asana vs Jira, wszystkie poziomy, po identyfikatorach (sekcja 14a) |
 | `jira_asana_sync.py` | kierunek zwrotny, Jira → Asana (sekcja 12) |
@@ -1024,7 +1038,7 @@ DEBUG_SYNC=1 python asana_jira_sync.py --limit 1 --project-keys KLUCZ
 | `find_duplicate_comments_attachments.py` | wykrywa zdublowane komentarze/załączniki WEWNĄTRZ pojedynczych zadań |
 | `check_duplicate_sheet_rows.py` | diagnostyka: klucze Jiry z więcej niż jednym wierszem w arkuszu |
 | `diagnose_jira_asana_gap.py` | diagnostyka: które konkretnie tytuły istnieją tylko w Jirze / tylko w Asanie |
-| `trace_task_origins.py` | diagnostyka: przy dwóch źródłach Asany pod jednym kluczem Jiry, ustala pochodzenie każdego zadania |
+| `trace_task_origins.py` | diagnostyka: przy dwóch źródłach Asany pod jednym kluczem Jiry, ustala pochodzenie każdego zadania *(skrypt nie jest dołączony do tego repozytorium)* |
 | `clean_stale_task_state.py` | usuwa z `task_sync_state.json` wpisy wskazujące na nieistniejące już zadania Jiry |
 | `repair_state_file.py` | naprawia uszkodzony (np. po `Ctrl+C`) `task_sync_state.json` |
 | `repair_missing_state_entries.py` | odtwarza brakujące wpisy w stanie, dopasowując zadania po tytule (sekcja 14e) |
@@ -1043,7 +1057,7 @@ DEBUG_SYNC=1 python asana_jira_sync.py --limit 1 --project-keys KLUCZ
 | `remove_status_from_column.py` | zdejmuje status z kolumny tablic (sekcja 4a) |
 | `copy_project_cross_instance.py` | kopia (także przyrostowa i z podziałem) projektu z innej instancji Jiry (sekcja 4a) |
 | `sync_exclude.txt`, `protected_projects.txt` | czasowe i trwałe wyłączenia projektów (sekcja 11) |
-| `export_source_workflows.py` | eksport workflow i statusów z innej instancji Jiry do YAML i mapy statusów (sekcja 4a) |
+| `export_source_workflows.py` | eksport workflow i statusów z innej instancji Jiry do YAML i mapy statusów (sekcja 4a) *(skrypt nie jest dołączony do tego repozytorium)* |
 | `build_jira_schema.py` | konfiguracja Jiry z pliku YAML (sekcja 17) |
 | `set_transition_groups.py` | kto może wykonać przejście w workflow (sekcja 17j) |
 | `parse_jira_pdfs.py`, `parse_jira_workflow.py`, `parse_jira_pptx.py`, `merge_jira_sources.py` | budowa pliku YAML z dokumentacji klienta (sekcja 17) |
@@ -1278,8 +1292,8 @@ braków od drugiego poziomu w dół ani zadań w złym miejscu. Ten skrypt liczy
 wszystkie poziomy rekurencyjnie, każde zadanie raz, i porównuje po identyfikatorach
 ze stanu (zduplikowane tytuły nie mylą wyniku). Tylko odczyt:
 ```bash
-python compare_project_totals.py GMLORY2
-python compare_project_totals.py GMLORY2,AKMPUN --details --attachments   # z treścią i liczbą załączników
+python compare_project_totals.py PROJ5
+python compare_project_totals.py PROJ5,AKMPUN --details --attachments   # z treścią i liczbą załączników
 python compare_project_totals.py --all --top-level                        # szybki przegląd całego arkusza (bez podzadań)
 python compare_project_totals.py --all --shard 1/3                        # pełne porównanie wszystkich, równolegle (osobny CSV na część)
 ```
@@ -1383,7 +1397,7 @@ Tylko wykrywanie — nic nie usuwa (raport: `duplicate_comments_attachments_repo
   jak `--compare-asana`) — rozróżnia "prawdziwe nadmiarowe duplikaty" od
   "unikalne zadanie, którego odpowiednik zniknął z Asany" (np. usunięty
   po zakończeniu etapu — to może być oczekiwane, nie błąd).
-- **`trace_task_origins.py KLUCZ`** — gdy jeden klucz Jiry ma dwa różne
+- **`trace_task_origins.py KLUCZ`** *(skrypt nie jest dołączony do tego repozytorium)* — gdy jeden klucz Jiry ma dwa różne
   źródła Asany w arkuszu (patrz `check_duplicate_sheet_rows.py`), ustala,
   ile zadań w Jirze pochodzi z którego źródła, i czy któreś nie pasuje do
   żadnego z obecnie istniejących zadań w obu.
@@ -1428,8 +1442,8 @@ tylko raport.
 | `--only-keys A-1,A-2` | test na wybranych zgłoszeniach |
 
 ```bash
-python close_children_of_done.py --project-keys MCPSIG2                # raport
-python close_children_of_done.py --project-keys MCPSIG2 --apply        # tylko Jira
+python close_children_of_done.py --project-keys PROJ4                # raport
+python close_children_of_done.py --project-keys PROJ4 --apply        # tylko Jira
 ```
 Od wprowadzenia dziedziczenia statusów (sekcja 11) synchronizacja robi to sama;
 narzędzie służy głównie do kontroli (oczekiwane: 0 do zamknięcia). Nie używaj
@@ -1444,8 +1458,8 @@ więc Jira pokazuje je jako zamknięte (przekreślony klucz, wypada z filtrów
 z powrotem (np. przez synchronizację), a przejście w workflow nie czyści
 rozwiązania.
 ```bash
-python fix_stale_resolution.py --project-keys PROJ3,MCPSIG2           # raport z podziałem na typy
-python fix_stale_resolution.py --project-keys PROJ3,MCPSIG2 --apply   # czyszczenie, bez powiadomień
+python fix_stale_resolution.py --project-keys PROJ3,PROJ4           # raport z podziałem na typy
+python fix_stale_resolution.py --project-keys PROJ3,PROJ4 --apply   # czyszczenie, bez powiadomień
 ```
 Czyszczenie idzie przez edycję zgłoszenia, więc pole Resolution musi być na
 ekranie edycji danego typu (często nie ma go dla Epików). Skrypt sprawdza to
@@ -1892,7 +1906,8 @@ automatycznie (sekcja 15e).
 
 Buduje konfigurację projektu company-managed na podstawie deklaratywnego
 pliku YAML: pola niestandardowe, typy zgłoszeń, statusy, workflow, ekrany i
-wszystkie schematy. Przykład pełnej konfiguracji: `jira_schema_klient.yaml`
+wszystkie schematy. Przykład pełnej konfiguracji: `jira_schema_klient.yaml` (konfiguracja klienta,
+nie jest publikowana; punkt wyjścia do własnej: szablon `jira_schema.yaml`)
 (odtworzenie konfiguracji KlientX).
 
 ```bash
@@ -2270,7 +2285,7 @@ Kolejność sprawdzania, gdy pola nie widać w zgłoszeniu:
 
 Zakłada grupy i ustawia na przejściach workflow warunek „Restrict transition”
 (`system:restrict-issue-transition`) z listą grup. Konfiguracja jest w
-`transition_groups.yaml`:
+`transition_groups.yaml` (plik nie jest w repozytorium — utwórz go według wzoru):
 
 ```yaml
 groups:                               # alias ze slajdu -> grupa w Jirze
@@ -2420,7 +2435,7 @@ ponowne uruchomienie tej samej komendy pomija zrobione). Po zatrzymaniu
 | `copy_project_cross_instance.py`: `0 zadań` albo `odrzuca logowanie: HTTP 401` | token do instancji źródłowej wygasł albo został cofnięty, konto straciło dostęp, instancja zmieniła adres | nowy token (zwykły, nie "z zakresami") w `SOURCE_JIRA_API_TOKEN`; sprawdzenie: `curl -u "$SOURCE_JIRA_EMAIL:$SOURCE_JIRA_API_TOKEN" "$SOURCE_JIRA_BASE_URL/rest/api/3/myself"` |
 | `AttributeError: module 'jira_sync' has no attribute ...` albo raport z identycznymi liczbami mimo nowej wersji | w folderze jest stara wersja pliku (pobrana nowa zapisała się jako `plik (1).py`) albo nieaktualny `__pycache__` | `ls -la nazwa*.py`, przenieść nową wersję na właściwą nazwę, `rm -rf __pycache__`; pliki z jednej paczki podmieniać razem |
 | `repair_batch.py: error: podaj --project-keys albo --keys-file` | pusta zmienna `$PARTIA` (nowy terminal) | ustawić `PARTIA` i `KEYS` ponownie |
-| `GUIDE:: nie znaleziono polecenia` przy `source .env` | wartość ze spacją bez cudzysłowu | `DEVELOPER_GROUP_NAME="MOJA GRUPA: Staff"` |
+| `GRUPA:: nie znaleziono polecenia` przy `source .env` | wartość ze spacją bez cudzysłowu | `DEVELOPER_GROUP_NAME="MOJA GRUPA: Staff"` |
 | `sesja przeglądarki wygasła` / `UNAUTHENTICATED` / pusta odpowiedź GraphQL | sesja, przeciążenie, zmiana skrótu zapytania | sekcja 4a, "Gdy zapis kolumn przestaje działać" |
 | `Bulk Move nie zakończyło się w ciągu 60s` | wolna kolejka po stronie Jiry | ponowne `--apply` dokończy brakujące (sekcja 15e) |
 | `For issue X Type is required` | wymagane pole "Type" przy zmianie typu | obsługiwane automatycznie przez `convert_to_epic.py`; jeśli wraca, sprawdzić `DEFAULT_TYPE_FIELD_ID`/`DEFAULT_TYPE_FIELD_VALUE` w `.env` |
@@ -2543,3 +2558,39 @@ python export_stories_to_sheet.py --project PROJ --out stories_PROJ.xlsx
 # własny filtr
 python export_stories_to_sheet.py --project PROJ --jql 'project = PROJ AND component = MVP'
 ```
+
+## 21. Panel webowy (`migration_app/`)
+
+Lokalna aplikacja do uruchamiania skryptów z przeglądarki. Niczego w nich nie
+zmienia: każde narzędzie odpala skrypt jako podproces, pokazuje polecenie przed
+startem i log na żywo. Działa na bibliotece standardowej Pythona i nasłuchuje
+tylko na `127.0.0.1`.
+
+```bash
+./migration_app/panel.sh
+```
+
+Potem otwórz http://127.0.0.1:8765. Widoki (przegląd, projekty, narzędzia,
+statusy i osoby, historia uruchomień) opisuje [`migration_app/README.md`](migration_app/README.md).
+
+## 22. Pozostałe skrypty pomocnicze
+
+| Skrypt | Do czego służy |
+|---|---|
+| `add_admin_to_projects.py` | dodaje jedną osobę (accountId) do roli Administrator w istniejących projektach |
+| `add_group_to_projects.py` | dodaje grupę do jednej lub wielu ról w istniejących projektach |
+| `assign_category_to_projects.py` | przypisuje istniejącą kategorię projektu do podanych projektów |
+| `copy_permission_scheme.py` | kopiuje schemat uprawnień pod nową nazwą i opcjonalnie podpina go do projektu |
+| `empty_notification.py` | podpina wskazany schemat powiadomień do listy projektów (klucze w `RAW_PROJECT_KEYS`, dane logowania z `.env`) |
+| `atlassian_suspend_to_deactivate.py` | dezaktywuje konta o statusie „suspended” w organizacji Atlassian (Lifecycle API) |
+| `backfill_jira_links.py` | jednorazowo uzupełnia kolumnę `jira_link` w arkuszu dla wierszy z `jira_key` |
+| `list_sheet_tabs.py` | wypisuje dokładne nazwy zakładek arkusza Google |
+| `check_jira_project_access.py` | sprawdza, czy e-mail i token API mają dostęp do odczytu w Jirze |
+| `check_project_level_attachments.py` | wykrywa pliki przypięte do projektu w Asanie (nie do zadań), których synchronizacja nie przenosi |
+| `migrate_project_level_attachments.py` | przenosi te pliki do Jiry jako załączniki zadania-kontenera „Zasoby projektu” |
+| `bulk_configure_columns_simple.py` | wariant konfiguracji kolumn dla prostego układu 4 kolumn |
+| `configure_columns_via_cli.py` | konfiguracja kolumn przez Jira Command Line Interface (Appfire) zamiast przeglądarki |
+| `move_all_statuses_to_new.py` | przenosi wszystkie statusy tablicy do jednej kolumny „New In” |
+| `create_analysis_for_stories.py` | dla każdego Story tworzy powiązane zadanie „Analysis” |
+| `diagnose_field_config.py`, `diagnose_transition.py` | diagnostyka: surowa odpowiedź field configuration scheme i dostępne przejścia zadania |
+| `project_lock.py` | moduł blokady pojedynczego projektu przy równoległych uruchomieniach (używany przez inne skrypty) |

@@ -24,13 +24,13 @@ Rozbieżności zapisywane do compare_project_totals_report.csv.
 Tylko odczyt - niczego nie zmienia.
 
 Użycie:
-    python compare_project_totals.py GMLORY2
-    python compare_project_totals.py GMLORY2,AKMPUN,CMANBE
+    python compare_project_totals.py PROJ5
+    python compare_project_totals.py PROJ5,AKMPUN,CMANBE
     python compare_project_totals.py --all                   # wszystkie projekty z arkusza
     python compare_project_totals.py --all --shard 1/3       # równolegle (osobny CSV na shard)
     python compare_project_totals.py --all --attachments     # dodatkowo załączniki (tylko pliki,
                                                              # bo tylko takie przenosi synchronizacja)
-    python compare_project_totals.py GMLORY2 --details       # listy konkretnych zadań na konsoli
+    python compare_project_totals.py PROJ5 --details       # listy konkretnych zadań na konsoli
     python compare_project_totals.py --all --top-level       # tylko zadania najwyższego poziomu (szybko:
                                                              # bez schodzenia w podzadania)
 Przy --all na konsoli są tylko liczby per projekt (listy w CSV); --details

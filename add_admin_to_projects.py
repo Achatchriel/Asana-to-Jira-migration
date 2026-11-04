@@ -10,7 +10,7 @@ utworzone (nie tylko przy tworzeniu nowych).
 
 Użycie:
     python add_admin_to_projects.py --account-id 5b10a2844c20165700ede21 \\
-        --project-keys FMPGEU,HBGRMU2,HBGRMU3
+        --project-keys FMPGEU,PROJ9,PROJ10
 
     python add_admin_to_projects.py --account-id 5b10a2844c20165700ede21 --all
         # wszystkie projekty z arkusza, które mają wypełniony jira_key

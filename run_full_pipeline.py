@@ -91,7 +91,7 @@ Użycie:
     python run_full_pipeline.py --only sync --parallel 3   # tylko sync, 3 równoległe procesy
     python run_full_pipeline.py --skip projects --skip statuses --project-keys APPLO,APPIC   # wybrane projekty
     python run_full_pipeline.py --only sync --keys-file partia_00.txt --verify            # partia + kontrola
-    python run_full_pipeline.py --only epics --force-epics --project-keys GMLORY2         # ponowne wykrycie Epików
+    python run_full_pipeline.py --only epics --force-epics --project-keys PROJ5         # ponowne wykrycie Epików
     python run_full_pipeline.py --verify                                                  # na koniec porównanie z Asaną
 
   Krok 6 (verify, compare_project_totals.py) jest OPCJONALNY: tylko z --verify

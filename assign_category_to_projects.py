@@ -9,7 +9,7 @@ przypisuje istniejącą.
 
 Użycie:
     python assign_category_to_projects.py --category "Migracja 2026" \\
-        --project-keys FMPGEU,HBGRMU2,HBGRMU3
+        --project-keys FMPGEU,PROJ9,PROJ10
 
     python assign_category_to_projects.py --category "Migracja 2026" --all
         # wszystkie projekty z arkusza, które mają wypełniony jira_key

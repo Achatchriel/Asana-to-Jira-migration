@@ -6,7 +6,7 @@ Skanuje CAŁY task_sync_state.json i szuka wpisów, gdzie zadanie śledzone
 pod projektem X ma zapisany klucz Jiry Y-liczba, gdzie Y != X - czyli
 zadanie z Asany "myśli", że należy do jednego projektu Jiry, ale jego
 faktyczny klucz wskazuje na INNY projekt. Ten wzorzec skażenia potwierdzony
-ręcznie w dwóch niezależnych parach (BESUGA2/BMATLE2, PROJ3/AKESPU2) -
+ręcznie w dwóch niezależnych parach (PROJ7/PROJ6, PROJ3/PROJ8) -
 ten skrypt sprawdza, czy jest więcej takich przypadków, i pokazuje pełną
 skalę na raz, zamiast odkrywać je pojedynczo przy każdym uruchomieniu
 retrofit_epics.py.

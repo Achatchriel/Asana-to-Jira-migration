@@ -9,7 +9,7 @@ już zostały utworzone.
 
 Użycie:
     python add_group_to_projects.py --group "MOJA GRUPA: Staff" \\
-        --role-names Developer,Users --project-keys FMPGEU,HBGRMU2,HBGRMU3
+        --role-names Developer,Users --project-keys FMPGEU,PROJ9,PROJ10
 
     python add_group_to_projects.py --group "MOJA GRUPA: Staff" \\
         --role-names Developer,Users --all

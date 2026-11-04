@@ -1,3 +1,7 @@
+> **Note:** this English README covers only the original part of the toolkit
+> (creating projects from the sheet and basic Asana → Jira sync). The complete,
+> up-to-date documentation is the Polish [`README.md`](README.md).
+
 # Sync: Google Sheets (selected Asana projects) → Jira
 
 The script creates Jira projects **only for entries listed in the Google Sheet** —

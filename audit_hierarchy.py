@@ -35,11 +35,11 @@ Statusy:
 Zadania niezmigrowane w ogóle nie są tu poprawiane - to robi asana_jira_sync.py.
 
 Użycie:
-    python audit_hierarchy.py --project-keys MCPSIG2,AKMPUN        # raport
+    python audit_hierarchy.py --project-keys PROJ4,AKMPUN        # raport
     python audit_hierarchy.py                                       # wszystkie projekty z arkusza
     python audit_hierarchy.py --shard 1/3                           # równolegle
-    python audit_hierarchy.py --project-keys MCPSIG2 --apply --only-keys MCPSIG2-123   # test na jednym
-    python audit_hierarchy.py --project-keys MCPSIG2 --apply        # naprawa
+    python audit_hierarchy.py --project-keys PROJ4 --apply --only-keys PROJ4-123   # test na jednym
+    python audit_hierarchy.py --project-keys PROJ4 --apply        # naprawa
     python audit_hierarchy.py --full                                # też projekty bez podzadań na liście projektu
 
 Po naprawie: python refresh_state_flags.py --project-keys ... --apply

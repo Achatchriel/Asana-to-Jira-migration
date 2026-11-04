@@ -92,6 +92,10 @@ def build_reversed_section_map(section_status_map: dict) -> dict:
     Jiry (np. "In progress" ORAZ "Feedback Required")."""
     reversed_map: dict[str, list[str]] = {}
     for section_name, raw_value in section_status_map.items():
+        if section_name.startswith("__"):
+            continue  # wpisy specjalne (__ukonczone__, __szablon__), nie sekcje
+        if isinstance(raw_value, dict):  # rozszerzony wpis {"status": ..., "labels": ...}
+            raw_value = raw_value.get("status")
         status_names = raw_value if isinstance(raw_value, list) else [raw_value]
         for status_name in status_names:
             if not status_name:

@@ -142,7 +142,7 @@ def main() -> None:
             print(f"[BŁĄD] {project}: {why} - tryb asana wymaga jednego projektu Asany. Użyj --source jira albo popraw arkusz.")
             continue
         target_id = (ajs.get_status_id_by_name(project, args.done_status) if args.done_status
-                     else ajs.resolve_target_status_id(project, None, {}, set(), completed=True))
+                     else ajs.resolve_target_status_id(project, None, ajs.load_section_status_map(), set(), completed=True))
         if not target_id:
             print(f"[BŁĄD] Nie znaleziono statusu docelowego w {project} - pomijam projekt.")
             continue

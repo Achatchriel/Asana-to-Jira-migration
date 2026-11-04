@@ -1,59 +1,54 @@
-# Dane logowania / sekrety - NIGDY nie commitować
+# Repo zawiera tylko kod, dokumentację i przykłady. Wszystko poniżej to sekrety albo
+# dane konkretnej migracji - powstają lokalnie (panel tworzy je z szablonów).
+
+# --- Sekrety - NIGDY nie commitować ---
 .env
 .env.*
 !.env.example
-*.json
-!package.json
+service_account.json
+*-service-account*.json
 dashboard-*.json
-
-# Sesja logowania do przeglądarki (Playwright) - zawiera aktywne ciasteczka sesji
+# Sesja logowania do przeglądarki (Playwright) - aktywne ciasteczka sesji
 auth_state.json
 
-# Cache i stan lokalny (dane robocze, nie sekrety, ale i tak nie trzeba wersjonować)
-project_key_cache.json
-task_sync_state.json
-workflow_graph_cache.json
-user_map.json
-section_status_map.json
-*_report.json
-
-# Logi
-logs/
-*.log
-
-# Zrzuty ekranu z błędów
-error_*.png
-
-# Środowisko Python
-.venv/
-__pycache__/
-*.pyc
-
-# Pliki wyjściowe
-getint_routing_checklist.xlsx
-
-# panel migracji (migration_app)
-migration_app/runs/
-migration_app/checks/
-migration_app/backups/
-
-# Dane robocze (eksporty, listy projektów, raporty, diagnostyka)
+# --- Dane migracji (stan, mapy, cache, listy projektów, eksporty) ---
+*.json
+!package.json
+*.txt
+!requirements.txt
 *.csv
 *.xlsx
 *.xlsx#
-*.zip
-*.deb
-*.png
-*.txt
-!requirements.txt
+.~lock.*#
 *.yaml
 !jira_schema.yaml
-diagnostics/
+*.lock
+*.backup
 locks/
-repair_reports/
+section_status_profiles/
+
+# --- Logi, raporty, zrzuty ---
+logs/
+*.log
 pipeline_summaries/
 pipeline_slack/
+repair_reports/
+diagnostics/
+*.png
 mapy_*/
-section_status_profiles/
+
+# --- Archiwa i pobrane pliki ---
+*.zip
+*.deb
+
+# --- Środowisko Python ---
+.venv/
 venv/
-hs_err_pid*.log
+__pycache__/
+*.pyc
+
+# --- Panel migracji (migration_app): dane robocze ---
+migration_app/runs/
+migration_app/checks/
+migration_app/backups/
+migration_app/cache/

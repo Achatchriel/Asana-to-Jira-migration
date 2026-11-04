@@ -114,6 +114,24 @@ def assignable_ids(project_key: str) -> "set | None":
         start += len(page)
 
 
+def assignable_holders(project_key: str) -> "dict | None":
+    """Komu schemat uprawnień projektu daje ASSIGNABLE_USER (role, grupy, osoby)."""
+    try:
+        scheme = jira_get(f"/rest/api/3/project/{project_key}/permissionscheme")
+        full = jira_get(f"/rest/api/3/permissionscheme/{scheme['id']}", expand="permissions,group,projectRole,user")
+    except Exception:  # noqa: BLE001 - brak uprawnień admina do odczytu schematu
+        return None
+    holders = []
+    for p in full.get("permissions", []):
+        if p["permission"] != "ASSIGNABLE_USER":
+            continue
+        h = p["holder"]
+        name = ((h.get("projectRole") or {}).get("name") or (h.get("group") or {}).get("name")
+                or (h.get("user") or {}).get("displayName") or h.get("parameter") or h["type"])
+        holders.append({"type": h["type"], "name": name})
+    return {"scheme": full.get("name"), "scheme_id": scheme["id"], "holders": holders}
+
+
 def map_sources(project_key: str) -> tuple:
     """(nazwa szablonu albo None, wpisy z pliku projektu, wpisy szablonu)."""
     path = sync.SECTION_STATUS_MAP_FILE.with_name(f"{sync.SECTION_STATUS_MAP_FILE.stem}.{project_key}.json")
@@ -128,7 +146,7 @@ def map_sources(project_key: str) -> tuple:
 
 
 def check_project(project_key: str, asana_name: str, asana_link: str, state: dict,
-                  global_map: dict, user_map: dict) -> dict:
+                  global_map: dict, user_map: dict, not_in_jira: dict) -> dict:
     result = {"jira_key": project_key, "asana_name": asana_name, "asana_link": asana_link,
               "checked_at": time.time(), "errors": [], "warnings": []}
     gid = core.extract_asana_project_gid(asana_link)
@@ -160,10 +178,11 @@ def check_project(project_key: str, asana_name: str, asana_link: str, state: dic
         overrides = {}
     profile, own, profile_entries = map_sources(project_key)
     result["map"] = {"profile": profile, "project_file": bool(own) or profile is not None}
-    done_name = overrides.get(sync.COMPLETED_KEY) or "Fertig"
+    done_name = overrides.get(sync.COMPLETED_KEY) or global_map.get(sync.COMPLETED_KEY) or "Fertig"
     result["done_status"] = {"name": done_name, "exists": done_name.lower() in status_lower,
                              "source": "projekt" if sync.COMPLETED_KEY in own else
-                             (f"szablon {profile}" if sync.COMPLETED_KEY in profile_entries else "domyślny")}
+                             (f"szablon {profile}" if sync.COMPLETED_KEY in profile_entries else
+                              "główna" if sync.COMPLETED_KEY in global_map else "domyślny")}
 
     # ---------------------------------------------------------------- sekcje
     by_section = defaultdict(lambda: {"open": 0, "completed": 0})
@@ -211,23 +230,36 @@ def check_project(project_key: str, asana_name: str, asana_link: str, state: dic
     assignable = assignable_ids(project_key)
     if assignable is None:
         result["warnings"].append("Nie udało się pobrać listy osób, które można przypisać w projekcie.")
+    lead_info = jira_get(f"/rest/api/3/project/{project_key}").get("lead") or {}
+    lead = lead_info.get("accountId")
+    result["project_lead"] = lead_info.get("displayName") or lead
     for g, p in people.items():
         acc = user_map.get(g)
         p["jira_account_id"] = acc
         p["jira_name"] = (users.get(acc) or {}).get("name") if acc else None
         p["jira_active"] = (users.get(acc) or {}).get("active") if acc else None
         p["assignable"] = (acc in assignable) if (acc and assignable is not None) else None
-        if not acc:
+        p["not_in_jira"] = g in not_in_jira
+        if p["not_in_jira"] and acc:
+            p["problem"] = "oznaczona „nie w Jirze”, ale jest w user_map.json"
+        elif p["not_in_jira"]:
+            p["problem"] = None
+        elif not acc:
             p["problem"] = "brak w user_map.json"
         elif acc not in users:
             p["problem"] = "konto Jiry nie znalezione"
         elif not p["jira_active"]:
             p["problem"] = "konto Jiry nieaktywne"
         elif p["assignable"] is False:
-            p["problem"] = "nie może być przypisany w projekcie"
+            # Mapowanie jest poprawne - Jira nie pozwala przypisać tego konta: żadna jego rola
+            # w projekcie nie ma "Assignable User" w schemacie uprawnień (lead też go nie daje).
+            p["problem"] = "zmapowany, ale bez uprawnienia do przypisania w projekcie" + \
+                (" (jest leadem projektu)" if acc == lead else "")
         else:
             p["problem"] = None
-    result["people"] = sorted(people.values(), key=lambda p: (p["problem"] is None, -p["tasks"]))
+    result["people"] = sorted(people.values(), key=lambda p: (p["problem"] is None, p["not_in_jira"], -p["tasks"]))
+    if any(p["assignable"] is False for p in people.values()):
+        result["assignable_permission"] = assignable_holders(project_key)
     result["unassigned_tasks"] = unassigned
 
     # ---------------------------------------------------------------- zgodność
@@ -235,7 +267,7 @@ def check_project(project_key: str, asana_name: str, asana_link: str, state: dic
     mismatches = []
     counts = {"tasks": len(tasks), "migrated": 0, "not_migrated": 0, "jira_master": 0, "skipped": 0,
               "missing_in_jira": 0, "status_ok": 0, "status_bad": 0, "status_unmapped": 0,
-              "assignee_ok": 0, "assignee_bad": 0}
+              "assignee_ok": 0, "assignee_default": 0, "assignee_not_in_jira": 0, "assignee_unassignable_empty": 0, "assignee_kept": 0, "assignee_bad": 0}
     for t in tasks:
         entry = project_state.get(t["gid"])
         sec = task_section[t["gid"]]
@@ -276,6 +308,25 @@ def check_project(project_key: str, asana_name: str, asana_link: str, state: dic
         want = user_map.get(a_gid) if a_gid else None
         if want == issue["assignee"]:
             counts["assignee_ok"] += 1
+        elif a_gid in not_in_jira and not want:
+            # Osoba świadomie bez konta w Jirze: zadanie dostaje leada albo przejmuje je ktoś inny.
+            counts["assignee_not_in_jira"] += 1
+        elif not a_gid and lead and issue["assignee"] == lead:
+            # Bez osoby w Asanie Jira przypisuje domyślnie leada projektu - to nie jest różnica.
+            counts["assignee_default"] += 1
+        elif a_gid and people[a_gid]["assignable"] is False:
+            # Osoby nie da się przypisać: nowe zadanie powstaje bez przypisanego, a w już
+            # utworzonych zostaje to, co jest (np. lead wstawiony zastępczo) - ustalenie z PM.
+            counts["assignee_unassignable_empty" if not issue["assignee"] else "assignee_kept"] += 1
+        elif a_gid and people[a_gid]["problem"]:
+            # Zadanie ma kogoś innego - zwykle leada wstawionego zastępczo przez starszą
+            # wersję synchronizacji (przed zmianą na "bez przypisanego").
+            counts["assignee_bad"] += 1
+            mismatches.append({**row, "kind": "brak uprawnienia w Jirze" if people[a_gid]["assignable"] is False else "problem z mapowaniem",
+                               "expected": "(nieprzypisany) — " + f"{(t['assignee'] or {}).get('name') or a_gid}: {people[a_gid]['problem']}"
+                               if people[a_gid]["assignable"] is False else
+                               f"{(t['assignee'] or {}).get('name') or a_gid} — {people[a_gid]['problem']}",
+                               "actual": issue["assignee_name"]})
         elif a_gid and not want:
             counts["assignee_bad"] += 1
             mismatches.append({**row, "kind": "przypisany", "expected": f"(niezmapowany) {(t['assignee'] or {}).get('name') or a_gid}",
@@ -308,22 +359,35 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Sprawdzenie statusów i przypisań Asana ↔ Jira (tylko odczyt).")
     parser.add_argument("project_keys", help="Klucze projektów Jiry po przecinku")
     parser.add_argument("--out-dir", default=str(Path(__file__).resolve().parent / "checks"))
+    parser.add_argument("--fresh-sheet", action="store_true",
+                        help="Czytaj arkusz od nowa zamiast z cache panelu (migration_app/cache/sheet.json).")
     args = parser.parse_args()
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     wanted = [k.strip().upper() for k in args.project_keys.split(",") if k.strip()]
-    log("Arkusz Google…")
-    cache = core.load_key_cache()
     rows = {}
-    for row in core.get_sheet_rows():
-        key = (row.jira_key or cache.get(core.normalize(row.project_name)) or "").upper()
-        if key:
-            rows[key] = row
+    sheet_cache = Path(__file__).resolve().parent / "cache" / "sheet.json"
+    if sheet_cache.exists() and not args.fresh_sheet:
+        data = json.loads(sheet_cache.read_text(encoding="utf-8"))
+        log(f"Arkusz Google z cache panelu (wczytany {time.strftime('%Y-%m-%d %H:%M', time.localtime(data['loaded_at']))})…")
+        for r in data["rows"]:
+            if r["jira_key"]:
+                rows[r["jira_key"]] = core.SheetRow(project_name=r["name"], jira_key=r["jira_key"],
+                                                    asana_project_link=r["asana_link"])
+    else:
+        log("Arkusz Google (może potrwać kilka minut)…")
+        cache = core.load_key_cache()
+        for row in core.get_sheet_rows():
+            key = (row.jira_key or cache.get(core.normalize(row.project_name)) or "").upper()
+            if key:
+                rows[key] = row
     log("Stan synchronizacji, mapy, user_map…")
     state = json.loads(sync.STATE_FILE.read_text(encoding="utf-8")) if sync.STATE_FILE.exists() else {}
     global_map = sync.load_section_status_map()
     user_map = sync.load_user_map()
+    not_in_jira_file = ROOT / "asana_users_not_in_jira.json"
+    not_in_jira = json.loads(not_in_jira_file.read_text(encoding="utf-8")) if not_in_jira_file.exists() else {}
 
     failed = 0
     for key in wanted:
@@ -334,7 +398,7 @@ def main() -> None:
                        "errors": ["Projekt nie występuje w arkuszu (albo jest w protected_projects.txt)."],
                        "warnings": []}
             else:
-                res = check_project(key, row.project_name, row.asana_project_link, state, global_map, user_map)
+                res = check_project(key, row.project_name, row.asana_project_link, state, global_map, user_map, not_in_jira)
         except Exception as exc:  # noqa: BLE001
             res = {"jira_key": key, "checked_at": time.time(), "errors": [f"{type(exc).__name__}: {exc}"],
                    "warnings": []}

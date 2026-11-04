@@ -45,6 +45,10 @@ def pos(label, **kw):
 
 TOOLS = [
     # ------------------------------------------------------------------ pipeline
+    {"id": "sheet_load", "group": "pipeline", "script": "migration_app/sheet_projects.py",
+     "title": "Wczytaj arkusz projektów",
+     "desc": "Odczyt arkusza Google do cache panelu (lista projektów). Może potrwać kilka minut, gdy wiersze nie mają nazw.",
+     "writes": "never", "params": []},
     {"id": "full_pipeline", "group": "pipeline", "script": "run_full_pipeline.py",
      "title": "Pełny pipeline",
      "desc": "Projekty → kolumny → statusy kolumn → kandydaci na Epiki → synchronizacja zadań (opcjonalnie weryfikacja).",
@@ -112,7 +116,13 @@ TOOLS = [
     {"id": "status_check", "group": "asana", "script": "migration_app/asana_check.py",
      "title": "Statusy i przypisania (sprawdzenie)",
      "desc": "Sekcje → statusy, osoby → konta Jiry i zgodność zmigrowanych zadań. Wyniki w zakładce „Statusy i osoby”.",
-     "writes": "never", "params": [pos("Projekty", required=True, kind_hint="keys")]},
+     "writes": "never", "params": [pos("Projekty", required=True, kind_hint="keys"),
+                                   {"flag": "--fresh-sheet", "kind": "bool", "label": "Czytaj arkusz od nowa (wolne)"}]},
+    {"id": "status_source", "group": "asana", "script": "migration_app/status_source.py",
+     "title": "Sekcje i statusy do mapowania",
+     "desc": "Sekcje ze wszystkich projektów arkusza i statusy projektu Jiry - źródło strony „Mapowanie statusów”.",
+     "writes": "never",
+     "params": [{"flag": "--project", "kind": "keys", "single": True, "label": "Projekt ze statusami (domyślnie wzorcowy)"}]},
     {"id": "all_sections", "group": "asana", "script": "list_all_asana_sections.py",
      "title": "Wszystkie sekcje Asany",
      "desc": "Sekcje ze wszystkich projektów arkusza - do uzupełniania map statusów.",

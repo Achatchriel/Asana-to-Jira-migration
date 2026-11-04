@@ -264,7 +264,8 @@ def load_user_map() -> dict:
 # (np. "Agenda JF (migriert zu Jira)", także z literówką "mirgiert"). Dla nich
 # źródłem prawdy jest Jira: zadanie RAZEM Z PODDRZEWEM jest pomijane (ani
 # tworzone, ani aktualizowane). Wzorzec (regex, bez wielkości liter) w .env.
-MIGRATED_TITLE_RE = re.compile(os.getenv("MIGRATED_TO_JIRA_PATTERN", r"mi[rg]{1,2}r?iert\s+zu\s+jira"), re.IGNORECASE)
+# Pusta wartość w .env = wzorzec domyślny (pusty regex pasowałby do KAŻDEGO tytułu).
+MIGRATED_TITLE_RE = re.compile(os.getenv("MIGRATED_TO_JIRA_PATTERN") or r"mi[rg]{1,2}r?iert\s+zu\s+jira", re.IGNORECASE)
 
 
 def is_jira_master(title: str, entry: "dict | None") -> bool:
@@ -282,7 +283,8 @@ def project_section_overrides(project_key: str) -> dict:
     """Mapa sekcji TYLKO dla jednego projektu: section_status_map.<KLUCZ>.json obok
     głównej mapy. Jej wpisy mają pierwszeństwo przed section_status_map.json (która
     zostaje nietknięta). Specjalny wpis "__ukonczone__" = status dla zadań
-    ukończonych w Asanie (domyślnie "Fertig"). Brak pliku = zachowanie jak dotąd."""
+    ukończonych w Asanie (gdy brak - wpis "__ukonczone__" z mapy głównej, a w końcu "Fertig").
+    Brak pliku = zachowanie jak dotąd."""
     if project_key not in _PROJECT_OVERRIDES:
         path = SECTION_STATUS_MAP_FILE.with_name(f"{SECTION_STATUS_MAP_FILE.stem}.{project_key}.json")
         data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
@@ -982,14 +984,22 @@ def create_jira_issue(project_key: str, summary: str, description_html: str,
         resp = request_with_retry("POST", url, auth=JIRA_AUTH, json={"fields": fields}, timeout=REQUEST_TIMEOUT)
 
     if resp.status_code >= 300 and assignee_account_id and _is_assignee_error(resp):
-        # Oryginalny assignee nie może być przypisany w tym projekcie (np. nie
-        # jest jego członkiem) - spróbuj z leadem PROJEKTU zamiast się poddawać.
-        lead_id = get_project_lead_account_id(project_key)
-        if lead_id and lead_id != assignee_account_id:
-            fields["assignee"] = {"accountId": lead_id}
-            resp = request_with_retry("POST", url, auth=JIRA_AUTH, json={"fields": fields}, timeout=REQUEST_TIMEOUT)
-            if resp.status_code < 300:
-                print(f"      [INFO] Assignee z Asany nie mógł być przypisany w '{project_key}' — użyto leada projektu.")
+        # Oryginalny assignee nie może być przypisany w tym projekcie (brak
+        # uprawnienia "Assignable User" w schemacie uprawnień) - tworzymy zadanie
+        # BEZ przypisanego, zamiast podstawiać kogoś innego.
+        del fields["assignee"]
+        resp = request_with_retry("POST", url, auth=JIRA_AUTH, json={"fields": fields}, timeout=REQUEST_TIMEOUT)
+        if resp.status_code < 300:
+            print(f"      [INFO] Assignee z Asany nie może być przypisany w '{project_key}' — zadanie bez przypisanego.")
+        elif _is_assignee_error(resp):
+            # Projekt nie pozwala na nieprzypisane zadania - ostatnia deska ratunku: lead projektu.
+            lead_id = get_project_lead_account_id(project_key)
+            if lead_id and lead_id != assignee_account_id:
+                fields["assignee"] = {"accountId": lead_id}
+                resp = request_with_retry("POST", url, auth=JIRA_AUTH, json={"fields": fields}, timeout=REQUEST_TIMEOUT)
+                if resp.status_code < 300:
+                    print(f"      [INFO] Assignee z Asany nie może być przypisany, a projekt '{project_key}' "
+                          f"nie pozwala na nieprzypisane — użyto leada projektu.")
 
     if resp.status_code >= 300:
         raise RuntimeError(f"Błąd tworzenia zadania Jira: {resp.status_code} {resp.text}")
@@ -1019,13 +1029,14 @@ def update_jira_issue(issue_key: str, summary: str, description_html: str,
         resp = request_with_retry("PUT", url, auth=JIRA_AUTH, json={"fields": fields}, timeout=REQUEST_TIMEOUT)
 
     if resp.status_code >= 300 and assignee_account_id and _is_assignee_error(resp):
+        # Osoby z Asany nie da się przypisać - obecny przypisany w Jirze zostaje bez
+        # zmian (ustalenie z PM: już utworzonych/przypisanych zadań nie zmieniamy),
+        # a tytuł/opis/termin i tak się zapisują.
         project_key = issue_key.split("-")[0]
-        lead_id = get_project_lead_account_id(project_key)
-        if lead_id and lead_id != assignee_account_id:
-            fields["assignee"] = {"accountId": lead_id}
-            resp = request_with_retry("PUT", url, auth=JIRA_AUTH, json={"fields": fields}, timeout=REQUEST_TIMEOUT)
-            if resp.status_code < 300:
-                print(f"      [INFO] Assignee z Asany nie mógł być przypisany w '{project_key}' — użyto leada projektu.")
+        del fields["assignee"]
+        resp = request_with_retry("PUT", url, auth=JIRA_AUTH, json={"fields": fields}, timeout=REQUEST_TIMEOUT)
+        if resp.status_code < 300:
+            print(f"      [INFO] Assignee z Asany nie może być przypisany w '{project_key}' — przypisany w {issue_key} bez zmian.")
 
     if resp.status_code >= 300:
         raise RuntimeError(f"Błąd aktualizacji {issue_key}: {resp.status_code} {resp.text}")
@@ -1642,7 +1653,7 @@ def resolve_target_status_id(project_key: str, section_name: Optional[str],
     if completed and section_rule(project_key, section_name, section_status_map)["over_completed"]:
         completed = False  # np. "Verworfen": odrzucone zadanie, nawet odhaczone, ma być Closed, nie Done
     if completed:
-        done_name = overrides.get(COMPLETED_KEY) or "Fertig"
+        done_name = overrides.get(COMPLETED_KEY) or section_status_map.get(COMPLETED_KEY) or "Fertig"
         status_id = get_status_id_by_name(project_key, done_name)
         if status_id:
             return status_id

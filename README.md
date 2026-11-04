@@ -9,7 +9,8 @@ spodem panel wywołuje zwykłe skrypty Pythona, opisane szczegółowo w części
 **Arkusz Google jest źródłem prawdy** o tym, które projekty mają powstać w Jirze:
 narzędzia tworzą i synchronizują tylko projekty z wierszy arkusza.
 
-- **Część I — panel:** instalacja, uruchomienie, widoki panelu i typowa praca.
+- **Część I — panel:** instalacja jednym poleceniem, zakładka Start (nowa migracja
+  krok po kroku), mapowanie osób i statusów, widoki panelu i typowa praca.
 - **Część II — skrypty:** dokumentacja każdego narzędzia, opcje, pliki stanu,
   procedury naprawcze i rozwiązywanie problemów.
 
@@ -19,52 +20,95 @@ narzędzia tworzą i synchronizują tylko projekty z wierszy arkusza.
 
 ## Szybki start
 
-**1. Instalacja.** Panel uruchamia skrypty interpreterem z `.venv` w głównym
-folderze, więc środowisko musi się nazywać właśnie tak:
+**Potrzebujesz:** Linuksa albo macOS z Pythonem 3.10+, konta **administratora Jiry**
+(Cloud) z [tokenem API](https://id.atlassian.com/manage-profile/security/api-tokens),
+[tokenu Asany](https://app.asana.com/0/my-apps), **konta serwisowego Google** (klucz
+JSON) i **arkusza Google** z listą projektów do migracji (sekcja 7 w części II -
+wystarczy kolumna `asana_project_link`, zalecane także `project_name` i `jira_key`).
+
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/playwright install chromium     # kroki przeglądarkowe (kolumny i statusy tablic)
+git clone <adres repozytorium> jiraSync
+cd jiraSync
+./start.sh                 # http://127.0.0.1:8765
 ```
 
-**2. Konfiguracja.**
-```bash
-cp .env.example .env
-```
-Uzupełnij co najmniej dostęp do Jiry (adres, e-mail, [token API](https://id.atlassian.com/manage-profile/security/api-tokens)),
-Asany ([Personal Access Token](https://app.asana.com/0/my-apps), GID workspace'u)
-i arkusza Google (klucz konta serwisowego, ID arkusza; arkusz trzeba
-**udostępnić** adresowi konta serwisowego jako Edytor). Dalsze wartości możesz
-uzupełniać już w panelu (widok **Konfiguracja**). Znaczenie wszystkich zmiennych:
-sekcje 2-6 w części II.
+`start.sh` przy pierwszym uruchomieniu tworzy `.venv`, instaluje zależności
+(`requirements.txt`, ponownie tylko po jego zmianie) i przeglądarkę dla Playwright
+(ok. 300 MB, raz na komputer), a potem uruchamia panel i otwiera go w przeglądarce.
+Opcje: `./start.sh --port 9000` (inny port), `NO_BROWSER=1 ./start.sh` (bez otwierania
+przeglądarki), `PYTHON=python3.12 ./start.sh` (inny interpreter). Serwer nasłuchuje
+wyłącznie na `127.0.0.1`. Zatrzymanie: `Ctrl+C`.
 
-**3. Start panelu.**
-```bash
-./migration_app/panel.sh                 # http://127.0.0.1:8765
-./migration_app/panel.sh --port 9000     # inny port
-```
-Otwórz adres w przeglądarce. Serwer nasłuchuje wyłącznie na `127.0.0.1`, sam
-panel nie potrzebuje żadnych dodatkowych bibliotek (tylko biblioteka standardowa
-Pythona). Zatrzymanie: `Ctrl+C` w terminalu.
+Panel działa od pustego folderu: `.env` powstaje z `.env.example` przy pierwszym
+zapisie konfiguracji, a mapy i listy - z szablonów. Dalej prowadzi zakładka **Start**.
+
+## Zakładka Start: nowa migracja krok po kroku
+
+Każdy krok ma stan wykrywany automatycznie (z plików i wyników testów), więc widać,
+co jest gotowe. Kolejność ma znaczenie - każdy krok korzysta z poprzednich.
+
+| # | Krok | Co robi | Wynik |
+|---|---|---|---|
+| 1 | **Konfiguracja** | formularz najważniejszych zmiennych; wklejony klucz konta serwisowego Google; panel pokazuje adres, któremu trzeba udostępnić arkusz | `.env`, `service_account.json` |
+| 2 | **Test połączeń** | konto Jiry i uprawnienie administratora, projekt i tablica wzorcowa, pola wymagane przy tworzeniu zadań, których skrypt nie uzupełni sam, token i workspace Asany (lista do wyboru), dostęp do arkusza, zakładka, nagłówki, wiersze bez linku do Asany | `migration_app/cache/setup_check.json` |
+| 3 | **Arkusz projektów** | wczytanie listy projektów (przy wierszach bez nazwy - kilka minut, bo nazwy pobierane są z Asany) | `migration_app/cache/sheet.json` |
+| 4 | **Mapowanie osób** | osoby z Asany ↔ konta z wybranych grup Jiry, z propozycjami; osoby bez konta oznaczasz „nie w Jirze” | `user_map.json`, `asana_users_not_in_jira.json` |
+| 5 | **Mapowanie statusów** | sekcje Asany ze wszystkich projektów ↔ **statusy projektu wzorcowego**; status dla zadań ukończonych w Asanie | `section_status_map.json` |
+| 6 | **Sesja przeglądarki** | jednorazowe logowanie do Jiry (SSO/2FA) dla kroków kolumn i statusów tablic; po zalogowaniu wysyłasz Enter w polu odpowiedzi uruchomienia | `auth_state.json` |
+| 7 | **Podgląd** | cały pipeline w trybie dry-run - nic nie zapisuje | log w Uruchomieniach |
+| 8 | **Migracja** | pełny pipeline; panel pokazuje polecenie i prosi o potwierdzenie | projekty i zadania w Jirze |
+| 9 | **Weryfikacja** | zgodność statusów i przypisań, porównanie liczby zadań z Asaną | `migration_app/checks/` |
+
+Krok 2 da się uruchomić też z terminala: `.venv/bin/python migration_app/setup_check.py`.
+Zacznij od zakładki arkusza z 1-2 projektami testowymi (`GOOGLE_SHEET_RANGE`), przejdź
+całość, obejrzyj wynik w Jirze i dopiero potem przełącz na pełną listę.
+
+## Mapowanie osób i statusów
+
+**Mapowanie osób** wczytuje członków workspace'u Asany i członków **wybranych grup
+Jiry**. Propozycje dopasowań: ten sam e-mail, ta sama część przed `@` w innej domenie,
+to samo imię i nazwisko, wzorzec `imie.nazwisko@JIRA_EMAIL_DOMAIN`. Każdą osobę możesz
+dopasować ręcznie (podpowiedzi po imieniu lub e-mailu) albo oznaczyć **„nie w Jirze”**
+- ich zadania powstają bez przypisanego i nie są liczone jako różnice. Start od obecnego
+`user_map.json` albo od pustej mapy; goście Asany są domyślnie ukryci; panel ostrzega,
+gdy dwie osoby z Asany wskazują to samo konto. Pamiętaj: przypisać zadanie można tylko
+osobie, której rola w projekcie ma uprawnienie **„Assignable User”** w schemacie
+uprawnień - samo mapowanie (ani bycie leadem projektu) tego nie daje.
+
+**Mapowanie statusów** zbiera nazwy sekcji ze wszystkich projektów arkusza (z liczbą
+projektów i zadań) oraz statusy projektu wzorcowego (`JIRA_TEMPLATE_PROJECT_KEY`, albo
+innego wskazanego projektu). Do wyboru są **wyłącznie statusy, które istnieją we
+wzorcu**, pogrupowane na „do zrobienia”, „w toku” i „zakończone”. Propozycje: ta sama
+nazwa, a potem znaczenie sekcji (np. Fertig/Done/Abgeschlossen → status „zakończony”
+wzorca, In Arbeit → „w toku”, Backlog/To Do → „do zrobienia”). Sekcję można oznaczyć
+„pomiń” (zadania z poddrzewem nie są migrowane); sekcja bez mapowania zostaje w statusie
+startowym workflow. **Status dla zadań ukończonych w Asanie wybierasz jawnie** (wpis
+`__ukonczone__`) - bez niego skrypt użyłby `Fertig`, którego w Twojej Jirze może nie być.
+Wpisy wskazujące status spoza wzorca są oznaczane, a krok 5 jest gotowy dopiero bez nich.
+
+Mapy pojedynczych projektów (`section_status_map.<KLUCZ>.json`) edytujesz w widoku
+**Statusy i osoby** albo w **Konfiguracji**.
 
 ## Widoki panelu
 
 | Widok | Do czego służy |
 |---|---|
+| **Start** | kroki nowej migracji (wyżej) |
 | **Przegląd** | stan całości na jednym ekranie: braki w `.env`, wiek sesji przeglądarki (potrzebnej w krokach kolumn i statusów), stan synchronizacji, projekty chronione i wyłączone, ostatnie uruchomienia |
-| **Projekty** | projekty z arkusza (bez dostępu do arkusza: z pliku stanu i `project_key_cache.json`), liczba wpisów w stanie, mapa sekcji, flagi, wynik ostatniego sprawdzenia. **Zaznaczone projekty trafiają automatycznie do pól „Projekty” w narzędziach** |
-| **Narzędzia** | 67 skryptów w siedmiu grupach (tabela niżej), każdy z formularzem opcji. Panel pokazuje dokładne polecenie przed startem |
-| **Statusy i osoby** | sprawdzenie bez zapisu: sekcje Asany → statusy Jiry (te same reguły co synchronizacja: mapa projektu, szablon, mapa główna, `__ukonczone__`), osoby → konta Jiry (czy są w `user_map.json`, czy aktywne, czy można je przypisać w projekcie) oraz różnice statusu i przypisanego w już zmigrowanych zadaniach. Brakujące mapowanie sekcji zapiszesz od razu do `section_status_map.<KLUCZ>.json` |
+| **Projekty** | projekty z arkusza (bez wczytanego arkusza: z pliku stanu i `project_key_cache.json`), liczba wpisów w stanie, mapa sekcji, flagi, wynik ostatniego sprawdzenia. **Zaznaczone projekty trafiają automatycznie do pól „Projekty” w narzędziach** |
+| **Narzędzia** | 69 skryptów w siedmiu grupach (tabela niżej), każdy z formularzem opcji. Panel pokazuje dokładne polecenie przed startem |
+| **Statusy i osoby** | sprawdzenie bez zapisu, per projekt: sekcje Asany → statusy Jiry (te same reguły co synchronizacja: mapa projektu, szablon, mapa główna, `__ukonczone__`), osoby → konta Jiry (czy są w `user_map.json`, czy aktywne, czy można je przypisać - przy braku uprawnienia panel pokazuje schemat uprawnień i role, które je dają) oraz różnice statusu i przypisanego w już zmigrowanych zadaniach. Brakujące mapowanie sekcji zapiszesz od razu do `section_status_map.<KLUCZ>.json`, osobę oznaczysz „nie w Jirze” |
+| **Mapowanie osób** / **Mapowanie statusów** | jak wyżej |
 | **Uruchomienia** | historia z pełnymi logami na żywo; pole odpowiedzi dla skryptów, które pytają o potwierdzenie; przerwanie całego uruchomienia (z procesami potomnymi) |
-| **Konfiguracja** | edycja `.env` (sekrety zamaskowane, puste pole = bez zmian), map statusów, szablonów, `user_map.json`, `sync_exclude.txt`, `protected_projects.txt` i schematów YAML |
+| **Konfiguracja** | edycja `.env` (sekrety zamaskowane, puste pole = bez zmian), map statusów, szablonów, `user_map.json`, `asana_users_not_in_jira.json`, `sync_exclude.txt`, `protected_projects.txt` i schematów YAML; pliki, których jeszcze nie ma, powstają przy pierwszym zapisie |
 | **Raporty** | `logs/`, `pipeline_summaries/`, `repair_reports/` i raporty CSV/JSON (CSV wyświetlany jako tabela) |
 
 ## Grupy narzędzi
 
 | Grupa w panelu | Co zawiera | Opis w części II |
 |---|---|---|
-| **Pipeline migracji** | cały pipeline, tworzenie projektów, kolumny i statusy tablic, kandydaci na Epiki, synchronizacja w obie strony, zapis sesji przeglądarki, pliki projektu z Asany | sekcje 8, 11-12 |
-| **Asana: statusy i przypisania** | sprawdzenie statusów i osób, sekcje projektów, członkowie Asany, mapa użytkowników, token | sekcja 11 („Konfiguracja przed pierwszym uruchomieniem”) |
+| **Pipeline migracji** | wczytanie arkusza, cały pipeline, tworzenie projektów, kolumny i statusy tablic, kandydaci na Epiki, synchronizacja w obie strony, zapis sesji przeglądarki, pliki projektu z Asany | sekcje 8, 11-12 |
+| **Asana: statusy i przypisania** | sprawdzenie statusów i osób, źródła mapowania statusów, sekcje projektów, członkowie Asany, mapa użytkowników, token | sekcja 11 („Konfiguracja przed pierwszym uruchomieniem”) |
 | **Weryfikacja** | liczenie i porównanie z Asaną, duplikaty, audyty hierarchii, diagnostyka | sekcja 14 |
 | **Naprawy** | odtwarzanie powiązań, usuwanie duplikatów, „migriert zu Jira”, fałszywe Epiki, flagi stanu, naprawy partiami | sekcja 15 |
 | **Konfiguracja Jiry** | schemat z YAML, układ i aktualizacja workflow, ekrany, field schemes, grupy na przejściach | sekcja 17 |
@@ -77,26 +121,23 @@ Pythona). Zatrzymanie: `Ctrl+C` w terminalu.
   zaznaczonym `--dry-run`; zapis wymaga jego odznaczenia albo zaznaczenia `--apply`.
 - **Potwierdzenie przed zapisem.** Każde uruchomienie, które zmieni dane w Jirze,
   Asanie albo w plikach, panel oznacza i wymaga potwierdzenia.
-- **Kopie plików.** Przed każdym zapisem z widoku Konfiguracja panel kopiuje
-  plik do `migration_app/backups/`.
+- **Kopie plików.** Przed każdym zapisem z panelu (konfiguracja, mapowania, `.env`)
+  panel kopiuje plik do `migration_app/backups/`.
+- **Sekrety poza repo.** `.env`, `service_account.json` i `auth_state.json` są w
+  `.gitignore`; panel nie pokazuje wartości tokenów.
 - **Te same zabezpieczenia co skrypty:** `protected_projects.txt`,
   `sync_exclude.txt`, blokady projektów i atomowy zapis stanu działają tak samo
   jak przy uruchomieniu z terminala (sekcja 11).
 
 ## Typowa praca w panelu
 
-**Pierwsza migracja projektów z arkusza:**
-1. **Przegląd** — usuń braki w `.env`; jeśli sesja przeglądarki jest stara albo
-   jej brak: Narzędzia → *Pipeline* → zapis sesji przeglądarki (zalogujesz się
-   w otwartym oknie).
-2. **Statusy i osoby** — sprawdź, czy wszystkie sekcje Asany mają status w Jirze,
-   a osoby konta w Jirze; brakujące sekcje dopisz od razu, brakujące osoby
-   uzupełnij w Konfiguracji (`user_map.json`) albo narzędziem mapy użytkowników.
-3. **Projekty** — zaznacz projekty do migracji (albo nic, wtedy narzędzia biorą
-   cały arkusz).
-4. **Narzędzia → Pipeline** — uruchom cały pipeline z podglądem, przejrzyj log
-   w **Uruchomieniach**, potem ten sam pipeline bez podglądu.
-5. **Weryfikacja** — porównanie z Asaną dla zmigrowanych projektów.
+**Nowa migracja:** zakładka **Start**, kroki 1-9. Przed masowym tworzeniem zgłoszeń
+poproś administratora Jiry o wyłączenie powiadomień i automatyzacji dla nowych
+projektów (Jira wysyła maile przy każdym zgłoszeniu tworzonym przez API).
+
+**Kolejne projekty w trwającej migracji:** **Projekty** → zaznacz projekty →
+**Statusy i osoby** (brakujące sekcje i osoby) → **Narzędzia → Pipeline** z podglądem,
+przejrzyj log w **Uruchomieniach**, potem ten sam pipeline bez podglądu → weryfikacja.
 
 **Rutynowa synchronizacja:** Narzędzia → *Pipeline* → kandydaci na Epiki, potem
 synchronizacja Asana → Jira (opcjonalnie Jira → Asana, nigdy równolegle z
@@ -814,9 +855,11 @@ Osobny skrypt (obok `jira_sync.py`, który tworzy tylko *projekty*) — synchron
 - **Podzadania i hierarchia**: podzadania z Asany jako Sub-taski, a dla zadań
   z trzema poziomami zagnieżdżenia pełna struktura Epic → Task → Sub-task
   (szczegóły w podsekcji niżej).
-- **Fallback assignee** — jeśli oryginalny przypisany z Asany nie może być
-  przypisany w danym projekcie Jira (np. nie jest jego członkiem), skrypt
-  automatycznie próbuje z leadem TEGO KONKRETNEGO projektu zamiast się poddać.
+- **Fallback assignee** — jeśli przypisany z Asany nie może być przypisany w projekcie
+  Jira (żadna jego rola nie ma „Assignable User” w schemacie uprawnień), NOWE zadanie
+  powstaje bez przypisanego (lead projektu tylko wtedy, gdy projekt nie pozwala na
+  nieprzypisane). W JUŻ utworzonych zadaniach przypisany zostaje bez zmian, a tytuł,
+  opis i termin zapisują się normalnie.
 - **Fallback formatowania** — jeśli konwersja HTML→ADF wygeneruje strukturę,
   którą Jira odrzuci jako niepoprawną (rzadkie, ale się zdarza), skrypt
   automatycznie ponawia z opisem jako zwykłym tekstem (bez formatowania)
@@ -1017,7 +1060,7 @@ przekazać: przy ręcznym przeniesieniu zadania do Jiry dopisać to w Asanie.
    wzorzec (`Imię.Nazwisko@domena`, różny od adresu w Asanie), skrypt próbuje
    też zbudować taki adres z imienia/nazwiska (z wariantem transliterowanym
    niemieckich znaków ü/ö/ä/ß). Domena ustawiana przez `JIRA_EMAIL_DOMAIN`
-   w `.env` (domyślnie `twoja-firma.pl`). Domyślnie **pomija gości** Asany —
+   w `.env` (gdy brak zmiennej: domena instancji, dla której pakiet powstał). Domyślnie **pomija gości** Asany —
    żeby ich uwzględnić: `python generate_user_map.py --include-guests`.
    Wynik: `user_map.json`. Osoby niedopasowane automatycznie możesz dopisać
    ręcznie do tego pliku (`"asana_user_gid": "jira_accountId"`), albo znaleźć
@@ -1034,7 +1077,7 @@ te same nazwy sekcji mają w nim prowadzić gdzie indziej, obok głównej mapy
 tworzysz `section_status_map.<KLUCZ>.json` (dwie kropki, klucz wielkimi literami,
 dokładnie jak w Jirze). Jego wpisy mają pierwszeństwo, ale tylko w tym projekcie;
 główna mapa zostaje nietknięta. Wpis `"__ukonczone__"` wskazuje status dla
-zadań odhaczonych w Asanie (domyślnie `Fertig`):
+zadań odhaczonych w Asanie w tym projekcie (pierwszeństwo przed mapą główną; gdy brak w obu - `Fertig`):
 ```json
 {
   "__ukonczone__": "Live",
@@ -1057,7 +1100,7 @@ mapy upewnij się, że workflow projektu ma statusy, na które ona wskazuje.
 
 | W Asanie | Status w Jirze |
 |---|---|
-| podzadanie odhaczone | status końcowy (`Fertig` albo `__ukonczone__` projektu) |
+| podzadanie odhaczone | status końcowy (`__ukonczone__` projektu, mapy głównej albo `Fertig`) |
 | otwarte podzadanie pod **odhaczonym** zadaniem (na dowolnym poziomie) | status końcowy |
 | otwarte podzadanie z **własną** sekcją (dodane też do listy projektu) | według swojej sekcji (pierwszeństwo) |
 | pozostałe otwarte podzadania | status zadania najwyższego poziomu według jego sekcji |
@@ -1550,7 +1593,7 @@ tylko raport.
 | Opcja | Działanie |
 |---|---|
 | (bez opcji) | raport: otwarte zgłoszenia pod ukończonymi zadaniami |
-| `--apply` | zamyka je **w Jirze** (status końcowy projektu, domyślnie `Fertig`, albo `--done-status`) |
+| `--apply` | zamyka je **w Jirze** (status końcowy: `__ukonczone__` z mapy projektu albo głównej, inaczej `Fertig`; albo `--done-status`) |
 | `--apply --also-asana` | dodatkowo odhacza odpowiadające im zadania **w Asanie** (tylko po udanej zmianie w Jirze) |
 | `--source asana` (domyślnie) | drzewo i "ukończone" według Asany; spłaszczenie w Jirze nie ma znaczenia; wymaga projektu w arkuszu |
 | `--source jira` | hierarchia i status końcowy według Jiry |
@@ -2680,12 +2723,16 @@ Obsługę panelu opisuje część I. Pliki:
 
 | Ścieżka | Co to |
 |---|---|
-| `panel.sh` | start panelu (`--port` zmienia port, domyślnie 8765) |
+| `../start.sh` | instalacja (`.venv`, zależności, przeglądarka) i start panelu; `panel.sh` tylko go wywołuje |
 | `server.py` | serwer HTTP i API |
 | `catalog.py` | katalog narzędzi: grupy, parametry formularzy, kiedy narzędzie zapisuje |
 | `runner.py` | podprocesy, logi, wejście dla pytań skryptów, przerywanie |
 | `asana_check.py` | sprawdzenie statusów i przypisań (można też uruchomić ręcznie) |
-| `sheet_projects.py` | odczyt projektów z arkusza (JSON) |
+| `sheet_projects.py` | odczyt projektów z arkusza do `cache/sheet.json` |
+| `setup_check.py` | testy połączeń i konfiguracji (Start, krok 2) |
+| `people_source.py` | osoby z Asany i grup Jiry z propozycjami dopasowań |
+| `status_source.py` | sekcje Asany i statusy projektu wzorcowego do mapowania |
+| `cache/` | wyniki odczytów (arkusz, osoby, sekcje, testy) — nie jest w repozytorium |
 | `static/` | interfejs (HTML, JS, CSS) |
 | `runs/` | historia uruchomień (metadane i log) — nie jest w repozytorium |
 | `checks/` | wyniki sprawdzeń statusów i osób — nie jest w repozytorium |

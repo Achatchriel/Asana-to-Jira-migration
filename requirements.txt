@@ -1,8 +1,13 @@
-playwright>=1.44
-# Poniższe są też potrzebne, bo bulk_configure_columns.py importuje jira_sync.py
-# (z katalogu wyżej), a ten korzysta z requests, python-dotenv i bibliotek Google:
+# Instalowane automatycznie przez ./start.sh (do .venv). Ręcznie: pip install -r requirements.txt
 requests>=2.31
 python-dotenv>=1.0
 google-auth>=2.29
 google-auth-httplib2>=0.2
 google-api-python-client>=2.126
+# Kroki 2-3 (kolumny i statusy tablic) i kopiowanie projektów - przez przeglądarkę.
+# Po instalacji pakietu potrzebna jest jeszcze przeglądarka: python -m playwright install chromium
+playwright>=1.44
+# Konfiguracja Jiry z YAML (build_jira_schema.py i pokrewne)
+pyyaml>=6.0
+# Epiki/Story z arkusza .xlsx (create_epics_stories_from_sheet.py, export_stories_to_sheet.py)
+openpyxl>=3.1

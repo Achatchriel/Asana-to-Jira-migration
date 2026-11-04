@@ -49,9 +49,22 @@ MASK = "••••••"
 # Pliki konfiguracyjne edytowalne z panelu (wzorce względem ROOT).
 EDITABLE = [
     "section_status_map.json", "section_status_map.*.json", "section_status_profiles/*.json",
-    "user_map.json", "wt_user_map.json", "sync_exclude.txt", "protected_projects.txt",
-    "transition_groups.yaml", "jira_schema.yaml", "jira_schema_klient.yaml", "workflows.yaml",
+    "user_map.json", "asana_users_not_in_jira.json", "wt_user_map.json", "sync_exclude.txt", "protected_projects.txt",
+    "transition_groups.yaml", "jira_schema.yaml", "workflows.yaml",
 ]
+# Pliki, które każda migracja ma (albo będzie mieć) - widoczne w panelu, zanim powstaną,
+# z treścią startową przy pierwszym zapisie.
+STANDARD_FILES = {
+    "section_status_map.json": "{\n}\n",
+    "user_map.json": "{\n}\n",
+    "asana_users_not_in_jira.json": "{\n}\n",
+    "sync_exclude.txt": "# Projekty wyłączone z synchronizacji (np. na czas naprawy) - jeden klucz Jiry w linii.\n",
+    "protected_projects.txt": "# Projekty wyłączone ze WSZYSTKICH narzędzi (np. już zarchiwizowane) - jeden klucz Jiry w linii.\n",
+}
+REQUIRED_ENV = ["JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN", "ASANA_TOKEN", "ASANA_WORKSPACE_GID",
+                "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_SHEET_ID"]
+CACHE_DIR = APP_DIR / "cache"
+CACHE_DIR.mkdir(exist_ok=True)
 # Raporty i logi do podglądu.
 REPORT_GLOBS = ["logs/*", "pipeline_summaries/*", "repair_reports/**/*", "*.csv", "*_report*.json",
                 "duplicate_scan_shard_*.json", "column_assignment_report*.json", "epic_candidates.json"]
@@ -148,8 +161,19 @@ def env_entries() -> dict:
     return {"exists": ENV_FILE.exists(), "entries": entries}
 
 
+def new_env_lines() -> list:
+    """Treść nowego .env: .env.example z komentarzami, bez przykładowych wartości wymaganych pól."""
+    example = ROOT / ".env.example"
+    lines = example.read_text(encoding="utf-8").splitlines() if example.exists() else []
+    for i, line in enumerate(lines):
+        m = re.match(r"([A-Z_][A-Z0-9_]*)=", line)
+        if m and m.group(1) in ("JIRA_BASE_URL", "JIRA_EMAIL"):
+            lines[i] = f"{m.group(1)}="
+    return lines
+
+
 def save_env(values: dict) -> None:
-    lines = ENV_FILE.read_text(encoding="utf-8").splitlines() if ENV_FILE.exists() else []
+    lines = ENV_FILE.read_text(encoding="utf-8").splitlines() if ENV_FILE.exists() else new_env_lines()
     seen = set()
     for i, line in enumerate(lines):
         m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", line)
@@ -165,30 +189,45 @@ def save_env(values: dict) -> None:
     ENV_FILE.chmod(0o600)
 
 
+def env_values() -> dict:
+    return {k: v for k, v, _ in parse_env_lines(ENV_FILE.read_text(encoding="utf-8"))} if ENV_FILE.exists() else {}
+
+
 def required_env_missing() -> list:
-    required = ["JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN", "ASANA_TOKEN", "ASANA_WORKSPACE_GID",
-                "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_SHEET_ID"]
-    current = {k: v for k, v, _ in parse_env_lines(ENV_FILE.read_text(encoding="utf-8"))} if ENV_FILE.exists() else {}
-    return [k for k in required if not current.get(k)]
+    current = env_values()
+    return [k for k in REQUIRED_ENV if not current.get(k)]
 
 
 # --------------------------------------------------------------------------- #
 # Projekty z arkusza
 # --------------------------------------------------------------------------- #
 
+SHEET_CACHE = APP_DIR / "cache" / "sheet.json"
 _projects_cache = {"at": 0, "rows": None, "error": None}
 _projects_lock = threading.Lock()
 
 
 def load_sheet_rows(refresh: bool) -> tuple:
+    """Wiersze arkusza z cache (migration_app/cache/sheet.json); odczyt arkusza
+    tylko przy refresh albo gdy cache jeszcze nie istnieje - trwa nawet kilka minut."""
     with _projects_lock:
-        if refresh or _projects_cache["rows"] is None and _projects_cache["error"] is None:
+        # Cache mógł zostać odświeżony przez narzędzie „Wczytaj arkusz” (osobny proces).
+        if not refresh and SHEET_CACHE.exists() and SHEET_CACHE.stat().st_mtime != _projects_cache.get("mtime"):
+            try:
+                data = json.loads(SHEET_CACHE.read_text(encoding="utf-8"))
+                _projects_cache.update(rows=data["rows"], error=None, at=data.get("loaded_at", 0),
+                                       mtime=SHEET_CACHE.stat().st_mtime)
+            except (json.JSONDecodeError, KeyError):
+                pass
+        if refresh:
             try:
                 out = subprocess.run([python_executable(), str(APP_DIR / "sheet_projects.py")], cwd=ROOT,
-                                     capture_output=True, text=True, timeout=180)
+                                     capture_output=True, text=True, timeout=900)
                 if out.returncode != 0:
                     raise RuntimeError((out.stdout + out.stderr).strip()[-1500:] or f"kod wyjścia {out.returncode}")
-                _projects_cache.update(rows=json.loads(out.stdout)["rows"], error=None, at=time.time())
+                data = json.loads(SHEET_CACHE.read_text(encoding="utf-8"))
+                _projects_cache.update(rows=data["rows"], error=None, at=data["loaded_at"],
+                                       mtime=SHEET_CACHE.stat().st_mtime)
             except Exception as exc:  # noqa: BLE001
                 _projects_cache.update(error=str(exc), at=time.time())
         return _projects_cache["rows"], _projects_cache["error"], _projects_cache["at"]
@@ -236,7 +275,7 @@ def project_list(refresh: bool = False) -> dict:
                         "state_entries": counts.get(key, 0), "protected": True, "excluded": key in excluded,
                         "has_map": (ROOT / f"section_status_map.{key}.json").exists(), "profile": None,
                         "check": None})
-    return {"projects": out, "source": source, "error": error, "loaded_at": at}
+    return {"projects": out, "source": source, "error": error, "loaded_at": at, "sheet_loaded": source == "arkusz"}
 
 
 # --------------------------------------------------------------------------- #
@@ -262,6 +301,7 @@ def overview() -> dict:
         "protected": read_key_list("protected_projects.txt"), "excluded": read_key_list("sync_exclude.txt"),
         "browser_sessions": sessions, "running": runner.running_count(),
         "user_map_size": len(json.loads((ROOT / "user_map.json").read_text(encoding="utf-8"))) if (ROOT / "user_map.json").exists() else 0,
+        "skipped_people": len(json.loads((ROOT / "asana_users_not_in_jira.json").read_text(encoding="utf-8"))) if (ROOT / "asana_users_not_in_jira.json").exists() else 0,
         "recent_summaries": [{"path": str(p.relative_to(ROOT)), "mtime": p.stat().st_mtime} for p in summaries],
         "recent_runs": runner.list()[:6],
     }
@@ -280,12 +320,189 @@ def list_reports() -> list:
 
 def list_editable() -> list:
     seen, out = set(), []
+    for name in STANDARD_FILES:
+        p = ROOT / name
+        seen.add(p)
+        out.append({"path": name, "size": p.stat().st_size if p.exists() else 0,
+                    "mtime": p.stat().st_mtime if p.exists() else None, "missing": not p.exists()})
     for pattern in EDITABLE:
         for p in sorted(ROOT.glob(pattern)):
             if p.is_file() and p not in seen:
                 seen.add(p)
                 out.append({"path": str(p.relative_to(ROOT)), "size": p.stat().st_size, "mtime": p.stat().st_mtime})
     return out
+
+
+def set_person_skipped(gid: str, skip: bool, name: str = "", email: str = "") -> dict:
+    """Osoba z Asany, która świadomie NIE będzie miała konta w Jirze. Lista w
+    asana_users_not_in_jira.json (osobno od user_map.json, bo generate_user_map.py
+    nadpisuje tamten plik). Oznaczenie usuwa też wpis osoby z user_map.json - inaczej
+    synchronizacja dalej próbowałaby ją przypisać (i wstawiała leada przy błędzie)."""
+    if not re.fullmatch(r"\d+", gid):
+        raise ValueError("Niepoprawny gid osoby z Asany.")
+    skip_file, map_file = ROOT / "asana_users_not_in_jira.json", ROOT / "user_map.json"
+    skipped = json.loads(skip_file.read_text(encoding="utf-8")) if skip_file.exists() else {}
+    removed = None
+    if skip:
+        skipped[gid] = {"name": name, "email": email, "marked_at": time.strftime("%Y-%m-%d")}
+        user_map = json.loads(map_file.read_text(encoding="utf-8")) if map_file.exists() else {}
+        if gid in user_map:
+            removed = user_map.pop(gid)
+            backup(map_file)
+            map_file.write_text(json.dumps(user_map, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    else:
+        skipped.pop(gid, None)
+    backup(skip_file)
+    skip_file.write_text(json.dumps(skipped, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return {"skipped": gid in skipped, "removed_from_user_map": removed}
+
+
+def run_people_source(*args, timeout=600) -> None:
+    out = subprocess.run([python_executable(), str(APP_DIR / "people_source.py"), *args], cwd=ROOT,
+                         capture_output=True, text=True, timeout=timeout)
+    if out.returncode != 0:
+        raise RuntimeError((out.stdout + out.stderr).strip()[-1500:] or f"kod wyjścia {out.returncode}")
+
+
+def read_json_file(path: Path, default):
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else default
+
+
+def people_state() -> dict:
+    return {"source": read_json_file(APP_DIR / "cache" / "people.json", None),
+            "user_map": read_json_file(ROOT / "user_map.json", {}),
+            "not_in_jira": read_json_file(ROOT / "asana_users_not_in_jira.json", {})}
+
+
+def save_people_mapping(mapping: dict, not_in_jira: dict, keep_unlisted: bool) -> dict:
+    """Zapisuje user_map.json i asana_users_not_in_jira.json z mapowania z panelu.
+    keep_unlisted: zostaw wpisy osób, których nie ma na wczytanej liście z Asany."""
+    source = read_json_file(APP_DIR / "cache" / "people.json", None) or {}
+    listed = {a["gid"] for a in source.get("asana", [])}
+    for gid, acc in mapping.items():
+        if not re.fullmatch(r"\d+", gid) or not isinstance(acc, str) or not acc:
+            raise ValueError(f"Niepoprawny wpis mapy: {gid} → {acc!r}")
+    overlap = set(mapping) & set(not_in_jira)
+    if overlap:
+        raise ValueError(f"{len(overlap)} osób jest jednocześnie zmapowanych i oznaczonych „nie w Jirze”.")
+    old_map = read_json_file(ROOT / "user_map.json", {})
+    old_skip = read_json_file(ROOT / "asana_users_not_in_jira.json", {})
+    new_map = {g: a for g, a in old_map.items() if keep_unlisted and g not in listed and g not in not_in_jira}
+    new_map.update(mapping)
+    new_skip = {g: v for g, v in old_skip.items() if keep_unlisted and g not in listed and g not in new_map}
+    new_skip.update({g: {**v, "marked_at": (old_skip.get(g) or {}).get("marked_at") or time.strftime("%Y-%m-%d")}
+                     for g, v in not_in_jira.items()})
+    for path, data in ((ROOT / "user_map.json", new_map), (ROOT / "asana_users_not_in_jira.json", new_skip)):
+        backup(path)
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return {"user_map": len(new_map), "not_in_jira": len(new_skip),
+            "removed": len(set(old_map) - set(new_map)), "added": len(set(new_map) - set(old_map)),
+            "changed": sum(1 for g in new_map if g in old_map and old_map[g] != new_map[g])}
+
+
+def google_key_path() -> Path:
+    raw = env_values().get("GOOGLE_APPLICATION_CREDENTIALS") or "./service_account.json"
+    return (ROOT / raw).resolve() if not Path(raw).is_absolute() else Path(raw)
+
+
+def save_google_key(text: str) -> dict:
+    """Zapisuje wklejony klucz konta serwisowego do ./service_account.json (poza repo - .gitignore)."""
+    try:
+        info = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"To nie jest poprawny JSON: {exc}") from exc
+    if info.get("type") != "service_account" or not info.get("client_email") or not info.get("private_key"):
+        raise ValueError("To nie jest klucz konta serwisowego (brak type=service_account, client_email lub private_key).")
+    path = ROOT / "service_account.json"
+    backup(path)
+    path.write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    save_env({"GOOGLE_APPLICATION_CREDENTIALS": "./service_account.json"})
+    return {"client_email": info["client_email"]}
+
+
+def status_map_step(status_map: dict) -> dict:
+    """Mapa statusów jest gotowa, gdy ma wpisy, jawny status dla ukończonych i wszystkie
+    wskazane statusy istnieją w projekcie wzorcowym (lista z ostatniego odczytu źródeł)."""
+    sections = {k: v for k, v in status_map.items() if not k.startswith("__")}
+    if not sections:
+        return {"done": False, "detail": "Brak mapy statusów."}
+    source = read_json_file(CACHE_DIR / "statuses.json", None)
+    known = {s["name"] for s in source["statuses"]} if source else None
+    used = [v.get("status") if isinstance(v, dict) else (v[0] if isinstance(v, list) and v else v) for v in status_map.values()]
+    invalid = sorted({u for u in used if isinstance(u, str) and u and known is not None and u not in known})
+    done_status = status_map.get("__ukonczone__")
+    problems = []
+    if not done_status:
+        problems.append("brak statusu dla ukończonych zadań")
+    if invalid:
+        problems.append(f"statusy spoza projektu {source['status_project']}: {', '.join(invalid[:5])}")
+    detail = f"section_status_map.json: {len(sections)} sekcji" + (f", ukończone → {done_status}" if done_status else "")
+    return {"done": not problems, "detail": detail + ("; " + "; ".join(problems) if problems else "")}
+
+
+def setup_status() -> dict:
+    """Kroki pierwszej migracji ze stanem wykrytym z plików - zakładka Start."""
+    env = env_values()
+    missing = required_env_missing()
+    check = read_json_file(CACHE_DIR / "setup_check.json", None)
+    env_mtime = ENV_FILE.stat().st_mtime if ENV_FILE.exists() else 0
+    check_fresh = bool(check) and check["checked_at"] >= env_mtime
+    checks_ok = check_fresh and all(check[k]["ok"] for k in ("jira", "asana", "google"))
+    sheet = read_json_file(SHEET_CACHE, None)
+    user_map = read_json_file(ROOT / "user_map.json", {})
+    skipped = read_json_file(ROOT / "asana_users_not_in_jira.json", {})
+    status_map = read_json_file(ROOT / "section_status_map.json", {})
+    session = ROOT / "auth_state.json"
+    runs = runner.list()
+    trial = next((r for r in runs if r["tool_id"] in ("full_pipeline", "asana_jira_sync") and "--dry-run" in r["argv"]
+                  and r["status"] in ("ok", "partial")), None)
+    counts = state_counts()
+    google_email = None
+    try:
+        google_email = json.loads(google_key_path().read_text(encoding="utf-8")).get("client_email")
+    except (OSError, json.JSONDecodeError):
+        pass
+    steps = [
+        {"id": "env", "done": not missing, "detail": "Brakuje: " + ", ".join(missing) if missing else "Wymagane pola uzupełnione."},
+        {"id": "check", "done": checks_ok,
+         "detail": "Wszystkie połączenia działają." if checks_ok else
+         ("Wynik sprzed ostatniej zmiany .env - sprawdź ponownie." if check and not check_fresh else
+          "Nie sprawdzono." if not check else "Są błędy - zobacz szczegóły.")},
+        {"id": "sheet", "done": bool(sheet and sheet.get("rows")),
+         "detail": f"{len(sheet['rows'])} projektów, wczytano {time.strftime('%Y-%m-%d %H:%M', time.localtime(sheet['loaded_at']))}" if sheet else "Nie wczytano."},
+        {"id": "people", "done": bool(user_map or skipped),
+         "detail": f"user_map.json: {len(user_map)} osób, nie w Jirze: {len(skipped)}" if (user_map or skipped) else "Brak mapy osób."},
+        {"id": "statuses", **status_map_step(status_map)},
+        {"id": "session", "done": session.exists(),
+         "detail": f"Sesja sprzed {round((time.time() - session.stat().st_mtime) / 3600, 1)} h" if session.exists() else "Brak zapisanej sesji."},
+        {"id": "trial", "done": bool(trial), "detail": f"Ostatni podgląd: {trial['command']}" if trial else "Jeszcze nie uruchomiono."},
+        {"id": "migrate", "done": bool(counts), "detail": f"{len(counts)} projektów, {sum(counts.values())} zadań w stanie" if counts else "Jeszcze nic nie zmigrowano."},
+        {"id": "verify", "done": any(CHECKS_DIR.glob("*.json")), "detail": f"{len(list(CHECKS_DIR.glob('*.json')))} sprawdzonych projektów"},
+    ]
+    return {"steps": steps, "check": check, "check_fresh": check_fresh, "google_email": google_email,
+            "env": {k: env.get(k, "") for k in ("JIRA_BASE_URL", "JIRA_EMAIL", "ASANA_WORKSPACE_GID", "GOOGLE_SHEET_ID",
+                                               "GOOGLE_SHEET_RANGE", "JIRA_TEMPLATE_PROJECT_KEY", "JIRA_TEMPLATE_BOARD_ID",
+                                               "DEFAULT_LEAD_ACCOUNT_ID")},
+            "secrets_set": {k: bool(env.get(k)) for k in ("JIRA_API_TOKEN", "ASANA_TOKEN")}}
+
+
+def save_status_map(entries: dict, keep_unlisted: bool) -> dict:
+    """Zapis mapy głównej section_status_map.json z panelu. entries: {sekcja: status | None}."""
+    source = read_json_file(CACHE_DIR / "statuses.json", None) or {}
+    listed = {s["name"] for s in source.get("sections", [])} | {"__ukonczone__"}
+    path = ROOT / "section_status_map.json"
+    old = read_json_file(path, {})
+    new = {k: v for k, v in old.items() if keep_unlisted and k not in listed}
+    for k, v in entries.items():
+        if isinstance(v, str) and v.strip():
+            new[k] = v.strip()
+        elif isinstance(v, dict) and v.get("pomin"):
+            new[k] = {"pomin": True}
+    backup(path)
+    path.write_text(json.dumps(new, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return {"entries": len(new), "added": len(set(new) - set(old)), "removed": len(set(old) - set(new)),
+            "changed": sum(1 for k in new if k in old and old[k] != new[k])}
 
 
 def update_status_map(project_key: str, section: str, value) -> dict:
@@ -442,6 +659,43 @@ class Handler(BaseHTTPRequestHandler):
             if not re.fullmatch(r"[A-Z0-9_]+", p[1].upper()) or not f.exists():
                 return self.send_error_json(404, "Brak wyniku sprawdzenia dla tego projektu.")
             return self.send_json(json.loads(f.read_text(encoding="utf-8")))
+        if p == ["setup"] and method == "GET":
+            return self.send_json(setup_status())
+        if p == ["setup", "check"] and method == "POST":
+            out = subprocess.run([python_executable(), str(APP_DIR / "setup_check.py")], cwd=ROOT,
+                                 capture_output=True, text=True, timeout=180)
+            if out.returncode != 0:
+                raise RuntimeError((out.stdout + out.stderr).strip()[-1500:])
+            return self.send_json(setup_status())
+        if p == ["setup", "google-key"] and method == "POST":
+            return self.send_json(save_google_key(self.read_json().get("key", "")))
+        if p == ["statusmap"] and method == "GET":
+            return self.send_json({"source": read_json_file(CACHE_DIR / "statuses.json", None),
+                                   "map": read_json_file(ROOT / "section_status_map.json", {})})
+        if p == ["statusmap"] and method == "PUT":
+            body = self.read_json()
+            return self.send_json(save_status_map(body.get("entries") or {}, bool(body.get("keep_unlisted"))))
+        if p == ["people"] and method == "GET":
+            return self.send_json(people_state())
+        if p == ["people", "groups"] and method == "GET":
+            cache = APP_DIR / "cache" / "jira_groups.json"
+            if q.get("refresh") == "1" or not cache.exists():
+                run_people_source("groups", timeout=180)
+            return self.send_json(read_json_file(cache, {"groups": []}))
+        if p == ["people", "load"] and method == "POST":
+            groups = [g for g in (self.read_json().get("groups") or []) if isinstance(g, str) and g.strip()]
+            if not groups:
+                raise ValueError("Wybierz przynajmniej jedną grupę Jiry.")
+            run_people_source("load", "--groups", ",".join(groups))
+            return self.send_json(people_state())
+        if p == ["people", "mapping"] and method == "PUT":
+            body = self.read_json()
+            return self.send_json(save_people_mapping(body.get("mapping") or {}, body.get("not_in_jira") or {},
+                                                      bool(body.get("keep_unlisted"))))
+        if p == ["people-skip"] and method == "POST":
+            body = self.read_json()
+            return self.send_json(set_person_skipped(str(body["gid"]), bool(body.get("skip")),
+                                                     body.get("name") or "", body.get("email") or ""))
         if len(p) == 2 and p[0] == "status-map" and method == "POST":
             body = self.read_json()
             return self.send_json({"map": update_status_map(p[1].upper(), body["section"], body.get("value"))})
@@ -458,7 +712,8 @@ class Handler(BaseHTTPRequestHandler):
         if p == ["files"] and method == "GET":
             if "path" in q:
                 path = safe_path(q["path"], EDITABLE)
-                return self.send_json({"path": q["path"], "content": path.read_text(encoding="utf-8") if path.exists() else ""})
+                content = path.read_text(encoding="utf-8") if path.exists() else STANDARD_FILES.get(q["path"], "")
+                return self.send_json({"path": q["path"], "content": content, "missing": not path.exists()})
             return self.send_json({"files": list_editable()})
         if p == ["files"] and method == "PUT":
             body = self.read_json()

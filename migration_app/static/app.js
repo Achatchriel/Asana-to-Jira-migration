@@ -76,13 +76,13 @@ function go(hash) { location.hash = hash; }
 async function route() {
   const [pathPart, queryPart] = location.hash.replace(/^#\/?/, "").split("?");
   S.query = new URLSearchParams(queryPart || "");
-  const [view, ...args] = (pathPart || "overview").split("/").filter((x, i) => i === 0 || x).map(decodeURIComponent);
+  const [view, ...args] = (pathPart || "start").split("/").filter((x, i) => i === 0 || x).map(decodeURIComponent);
   S.viewToken++;
   document.querySelectorAll("#nav a").forEach(a => a.classList.toggle("active", a.dataset.view === view));
   const main = $("#main");
   main.replaceChildren(h("p", { class: "muted" }, "Ładowanie…"));
   try {
-    await (VIEWS[view] || VIEWS.overview)(main, ...args);
+    await (VIEWS[view] || VIEWS.start)(main, ...args);
   } catch (e) {
     main.replaceChildren(h("div", { class: "notice bad" }, "Błąd: " + e.message));
   }
@@ -182,6 +182,281 @@ function mountLog(container, runId, onUpdate) {
   return log;
 }
 
+// ------------------------------------------------------------------ Start (pierwsza migracja)
+
+// Uruchamia narzędzie i pokazuje jego log w podanym kontenerze; onDone(run) po zakończeniu.
+async function runInline(box, toolId, values, onDone) {
+  await ensureCatalog();
+  let run;
+  try { run = await startTool(toolId, values); } catch (e) { toast(e.message, true); return; }
+  if (!run) return;
+  box.replaceChildren();
+  mountLog(box, run.id, r => { if (r.status !== "running" && onDone) onDone(r); }).style.height = "28vh";
+}
+
+const START_STEPS = {
+  env: ["Konfiguracja", "Dane dostępowe do Jiry, Asany i arkusza Google (zapisywane w .env, poza repo)."],
+  check: ["Test połączeń", "Sprawdza konto Jiry i uprawnienia administratora, projekt i tablicę wzorcową, token Asany, dostęp do arkusza i jego kolumny."],
+  sheet: ["Arkusz projektów", "Wczytuje listę projektów do migracji. Każdy wiersz potrzebuje asana_project_link."],
+  people: ["Mapowanie osób", "Kto z Asany odpowiada komu w Jirze; osoby bez konta oznaczasz „nie w Jirze”."],
+  statuses: ["Mapowanie statusów", "Która sekcja Asany trafia na który status Jiry i jaki status dostają zadania ukończone."],
+  session: ["Sesja przeglądarki", "Kroki 2-3 (kolumny i statusy tablic) działają przez przeglądarkę - zaloguj się raz do Jiry (SSO/2FA)."],
+  trial: ["Podgląd całej migracji", "Pipeline w trybie dry-run: pokazuje, co zostanie utworzone i zsynchronizowane, nic nie zapisując."],
+  migrate: ["Migracja", "Pełny pipeline. Zalecane: najpierw zakładka arkusza z 1-2 projektami testowymi (GOOGLE_SHEET_RANGE)."],
+  verify: ["Weryfikacja", "Zgodność statusów, przypisań i liczby zadań z Asaną."],
+};
+
+VIEWS.start = async main => {
+  const st = await api("GET", "setup");
+  const done = st.steps.filter(s => s.done).length;
+  const card = (step, i, ...content) => h("div", { class: "card", style: step.done ? "" : (st.steps.slice(0, i).every(s => s.done) ? "border-color:var(--accent)" : "") },
+    h("div", { class: "row" },
+      h("span", { class: "pill " + (step.done ? "ok" : "") , style: "min-width:26px;text-align:center" }, step.done ? "✓" : String(i + 1)),
+      h("h2", { style: "margin:0" }, START_STEPS[step.id][0]), h("span", { class: "spacer" }), h("small", {}, step.detail)),
+    h("p", { class: "muted", style: "margin:8px 0" }, START_STEPS[step.id][1]),
+    ...content);
+  const S_ = Object.fromEntries(st.steps.map((s, i) => [s.id, [s, i]]));
+  const chk = st.check || {};
+
+  main.replaceChildren(
+    h("div", { class: "page-head" },
+      h("div", {}, h("h1", {}, "Start migracji"), h("small", {}, `Ukończone kroki: ${done} z ${st.steps.length}. Kolejność ma znaczenie - każdy krok korzysta z poprzednich.`))),
+    card(...S_.env, envForm(st)),
+    card(...S_.check, checkResults(chk, st.check_fresh)),
+    card(...S_.sheet, (() => {
+      const box = h("div");
+      return h("div", {}, h("div", { class: "row" },
+        h("button", { class: S_.sheet[0].done ? "" : "primary", onclick: () => runInline(box, "sheet_load", {}, () => route()) }, S_.sheet[0].done ? "Wczytaj ponownie" : "Wczytaj arkusz"),
+        h("button", { onclick: () => go("#/projects") }, "Lista projektów")), box);
+    })()),
+    card(...S_.people, h("button", { class: S_.people[0].done ? "" : "primary", onclick: () => go("#/people") }, "Otwórz mapowanie osób")),
+    card(...S_.statuses, h("button", { class: S_.statuses[0].done ? "" : "primary", onclick: () => go("#/statusmap") }, "Otwórz mapowanie statusów")),
+    card(...S_.session, h("div", { class: "row" },
+      h("button", { class: S_.session[0].done ? "" : "primary", onclick: async () => { const r = await startTool("save_login", {}).catch(e => toast(e.message, true)); if (r) go("#/runs/" + r.id); } }, "Otwórz przeglądarkę do logowania"),
+      h("small", {}, "Po zalogowaniu wróć do panelu i wyślij Enter w polu odpowiedzi uruchomienia."))),
+    card(...S_.trial, h("button", { class: S_.trial[0].done ? "" : "primary", onclick: async () => {
+      const r = await startTool("full_pipeline", { "--dry-run": true }).catch(e => toast(e.message, true)); if (r) go("#/runs/" + r.id);
+    } }, "Uruchom podgląd (dry-run)")),
+    card(...S_.migrate, h("div", { class: "row" },
+      h("button", { class: S_.migrate[0].done ? "" : "primary", onclick: () => openTool("full_pipeline", { "--dry-run": false, "--verify": true }) }, "Pełny pipeline…"),
+      h("small", {}, "Panel pokaże polecenie i poprosi o potwierdzenie przed zapisem."))),
+    card(...S_.verify, h("div", { class: "row" },
+      h("button", { onclick: () => go("#/check") }, "Statusy i osoby"),
+      h("button", { onclick: () => openTool("compare_totals", { "--all": true }) }, "Porównanie liczby zadań…"))),
+  );
+};
+
+function envForm(st) {
+  const chk = st.check || {};
+  const vals = {};
+  const field = (key, label, opts = {}) => {
+    const secret = opts.secret;
+    const input = h("input", { type: secret ? "password" : "text", value: secret ? "" : (st.env[key] || ""),
+      placeholder: secret ? (st.secrets_set[key] ? "ustawiony - wpisz, aby zmienić" : "") : (opts.placeholder || ""),
+      oninput: e => { vals[key] = e.target.value.trim(); } });
+    const extra = opts.extra ? opts.extra(input) : null;
+    return h("div", { class: "field" }, h("span", {}, label, opts.required ? " *" : "", h("span", { class: "mono" }, "  " + key)), input, opts.help ? h("small", { class: "muted" }, opts.help) : null, extra);
+  };
+  const ws = ((chk.asana || {}).data || {}).workspaces || [];
+  const boards = (((chk.jira || {}).data || {}).template || {}).boards || [];
+  const tabs = ((chk.google || {}).data || {}).tabs || [];
+  const myId = ((chk.jira || {}).data || {}).account_id;
+  const pick = (input, key, value) => { input.value = value; vals[key] = value; };
+
+  const keyArea = h("textarea", { rows: 3, placeholder: "Wklej tutaj zawartość pliku JSON z kluczem konta serwisowego Google…" });
+  const keyInfo = h("div", {}, st.google_email ? h("div", { class: "notice ok", style: "margin:6px 0 0" }, "Klucz zapisany. Udostępnij arkusz Google adresowi: ",
+    h("strong", { class: "mono" }, st.google_email), " ", h("button", { class: "small", onclick: () => { navigator.clipboard.writeText(st.google_email); toast("Skopiowano adres."); } }, "Kopiuj")) : null);
+
+  const saveBtn = h("button", { class: "primary", onclick: async () => {
+    saveBtn.disabled = true; saveBtn.textContent = "Zapisuję i sprawdzam…";
+    try {
+      if (keyArea.value.trim()) await api("POST", "setup/google-key", { key: keyArea.value.trim() });
+      if (vals.GOOGLE_SHEET_ID) { const m = vals.GOOGLE_SHEET_ID.match(/\/d\/([A-Za-z0-9_-]+)/); if (m) vals.GOOGLE_SHEET_ID = m[1]; }
+      if (vals.JIRA_BASE_URL) vals.JIRA_BASE_URL = vals.JIRA_BASE_URL.replace(/\/+$/, "").replace(/\/(jira|secure|browse).*$/, "");
+      const changed = Object.fromEntries(Object.entries(vals).filter(([k, v]) => v !== (st.env[k] || "") && !(k.endsWith("TOKEN") && !v)));
+      if (Object.keys(changed).length) await api("PUT", "env", { values: changed });
+      await api("POST", "setup/check");
+      route();
+    } catch (e) { toast(e.message, true); saveBtn.disabled = false; saveBtn.textContent = "Zapisz i sprawdź połączenia"; }
+  } }, "Zapisz i sprawdź połączenia");
+
+  return h("div", {},
+    h("div", { class: "form-grid" },
+      field("JIRA_BASE_URL", "Adres Jiry", { required: true, placeholder: "https://firma.atlassian.net" }),
+      field("JIRA_EMAIL", "E-mail konta Jiry (administrator)", { required: true }),
+      field("JIRA_API_TOKEN", "Token API Jiry", { required: true, secret: true, help: "id.atlassian.com → Security → API tokens" }),
+      field("ASANA_TOKEN", "Token Asany", { required: true, secret: true, help: "app.asana.com/0/my-apps → Personal access token" }),
+      field("ASANA_WORKSPACE_GID", "Workspace Asany", { required: true, help: ws.length ? null : "Lista pojawi się po teście połączenia z tokenem.",
+        extra: inp => ws.length ? h("div", { class: "row" }, ws.map(w => h("button", { class: "small", type: "button", onclick: () => pick(inp, "ASANA_WORKSPACE_GID", w.gid) }, w.name))) : null }),
+      field("GOOGLE_SHEET_ID", "Arkusz Google (adres albo ID)", { required: true, placeholder: "https://docs.google.com/spreadsheets/d/…" }),
+      field("GOOGLE_SHEET_RANGE", "Zakładka i kolumny", { placeholder: "Arkusz1!A:F",
+        extra: inp => tabs.length ? h("div", { class: "row" }, tabs.slice(0, 8).map(t => h("button", { class: "small", type: "button", onclick: () => pick(inp, "GOOGLE_SHEET_RANGE", `${t}!A:J`) }, t))) : null }),
+      field("JIRA_TEMPLATE_PROJECT_KEY", "Projekt wzorcowy (klucz)", { help: "Z niego nowe projekty dostają workflow, ekrany, pola i uprawnienia." }),
+      field("JIRA_TEMPLATE_BOARD_ID", "Tablica wzorcowa (ID)", {
+        extra: inp => boards.length ? h("div", { class: "row" }, boards.map(b => h("button", { class: "small", type: "button", onclick: () => pick(inp, "JIRA_TEMPLATE_BOARD_ID", String(b.id)) }, `${b.id} ${b.name}`))) : null }),
+      field("DEFAULT_LEAD_ACCOUNT_ID", "Domyślny lead projektów (accountId)", {
+        extra: inp => myId ? h("button", { class: "link small", type: "button", onclick: () => pick(inp, "DEFAULT_LEAD_ACCOUNT_ID", myId) }, "użyj mojego konta") : null })),
+    h("div", { class: "field", style: "margin-top:12px" }, h("span", {}, "Klucz konta serwisowego Google *", h("span", { class: "mono" }, "  → service_account.json")),
+      keyArea, h("small", { class: "muted" }, "Google Cloud Console → IAM → Service Accounts → Keys → Add key (JSON). Plik zostaje lokalnie (jest w .gitignore)."), keyInfo),
+    h("div", { class: "row end", style: "margin-top:12px" },
+      h("button", { class: "ghost", onclick: () => go("#/config/env") }, "Wszystkie zmienne…"), saveBtn));
+}
+
+function checkResults(chk, fresh) {
+  const names = { jira: "Jira", asana: "Asana", google: "Google Sheets" };
+  const btn = h("button", { onclick: async () => { btn.disabled = true; btn.textContent = "Sprawdzam…"; try { await api("POST", "setup/check"); route(); } catch (e) { toast(e.message, true); btn.disabled = false; btn.textContent = "Sprawdź połączenia"; } } }, "Sprawdź połączenia");
+  if (!chk.checked_at) return h("div", { class: "row" }, btn);
+  return h("div", {},
+    h("div", { class: "grid cols-2", style: "grid-template-columns:repeat(auto-fit,minmax(260px,1fr))" },
+      ["jira", "asana", "google"].map(k => {
+        const r = chk[k];
+        return h("div", { class: "notice " + (r.ok ? (r.warn ? "warn" : "ok") : "bad"), style: "margin:0" },
+          h("strong", {}, names[k], r.ok ? (r.warn ? " - działa, ale są uwagi" : " ✓") : " - błąd"),
+          h("ul", {}, r.messages.map(m => h("li", {}, m))));
+      })),
+    h("div", { class: "row", style: "margin-top:10px" }, h("small", {}, "Sprawdzono " + fmtTime(chk.checked_at) + (fresh ? "" : " - przed ostatnią zmianą .env")), h("span", { class: "spacer" }), btn));
+}
+
+// ------------------------------------------------------------------ Mapowanie statusów
+
+// Propozycje biorą WYŁĄCZNIE statusy projektu wzorcowego: najpierw ta sama nazwa, potem słowa
+// kluczowe sekcji (DE/EN/PL) → status wzorca z tej samej kategorii (do zrobienia / w toku / zakończone).
+const STATUS_HINTS = [
+  // Kolejność słów = priorytet przy wyborze statusu wzorca (np. „Done” przed „Closed”).
+  { cat: "done", words: ["done", "fertig", "erledigt", "abgeschlossen", "completed", "complete", "resolved", "zrobione", "gotowe", "zakonczone", "closed"] },
+  { cat: "indeterminate", words: ["in arbeit", "in progress", "doing", "wip", "in bearbeitung", "umsetzung", "w trakcie", "w realizacji"] },
+  { cat: "new", words: ["to do", "todo", "new", "backlog", "open", "offen", "neu", "to dos", "inbox", "ideen", "ideas", "eingang", "no section", "untitled section", "do zrobienia"] },
+];
+const normS = s => (s || "").toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+
+// Status wzorca reprezentujący kategorię: taki, którego nazwa sama jest słowem kluczowym
+// tej kategorii (np. „Done”, „To Do”), a gdy brak - pierwszy status tej kategorii we wzorcu.
+function categoryStatus(cat, statuses) {
+  const hint = STATUS_HINTS.find(x => x.cat === cat);
+  const ofCat = statuses.filter(s => s.category === cat);
+  for (const w of hint.words) { const hit = ofCat.find(s => normS(s.name) === w); if (hit) return hit; }
+  return ofCat[0] || null;
+}
+
+function suggestStatus(section, statuses) {
+  const n = normS(section);
+  const exact = statuses.find(s => normS(s.name) === n);
+  if (exact) return { status: exact.name, reason: "ta sama nazwa" };
+  const padded = ` ${n} `;
+  for (const hint of STATUS_HINTS) {
+    if (hint.words.some(w => padded.includes(` ${w} `))) {
+      const st = categoryStatus(hint.cat, statuses);
+      if (st) return { status: st.name, reason: { done: "zakończone", indeterminate: "w toku", new: "do zrobienia" }[hint.cat] };
+    }
+  }
+  return null;
+}
+
+VIEWS.statusmap = async main => {
+  let data = await api("GET", "statusmap");
+  const loadBox = h("div");
+  const projIn = h("input", { type: "text", placeholder: "domyślnie projekt wzorcowy", style: "max-width:220px" });
+  const loadBtn = h("button", { class: data.source ? "" : "primary", onclick: () => runInline(loadBox, "status_source", { "--project": projIn.value.trim().toUpperCase() }, () => route()) },
+    data.source ? "Wczytaj ponownie" : "Wczytaj sekcje i statusy");
+  const body = h("div");
+  main.replaceChildren(
+    h("div", { class: "page-head" }, h("div", {}, h("h1", {}, "Mapowanie statusów"),
+      h("small", {}, "Sekcje Asany ze wszystkich projektów arkusza → statusy Jiry. Wynik: section_status_map.json (mapa główna; mapy pojedynczych projektów - w „Statusy i osoby”)."))),
+    h("div", { class: "card" }, h("h2", {}, "1. Źródło"),
+      data.source ? h("p", {}, `Statusy z projektu ${data.source.status_project} (${data.source.statuses.length}), sekcje z ${data.source.projects_scanned} projektów (${data.source.sections.length} różnych nazw). Wczytano ${fmtTime(data.source.loaded_at)}.`,
+        data.source.errors.length ? h("span", { style: "color:var(--warn)" }, ` Błędy w ${data.source.errors.length} projektach.`) : null) :
+        h("p", { class: "muted" }, "Wymaga wczytanego arkusza (Start → krok 3). Przy kilkuset projektach trwa 2-3 minuty."),
+      h("div", { class: "row" }, h("span", {}, "Projekt ze statusami:"), projIn, h("span", { class: "spacer" }), loadBtn), loadBox),
+    body);
+  if (!data.source) return;
+
+  const src = data.source;
+  const statuses = src.statuses;
+  const sug = Object.fromEntries(src.sections.map(s => [s.name, suggestStatus(s.name, statuses)]));
+  let work = {};
+  const SKIP = "__pomin__";
+  const valueOf = v => v && typeof v === "object" ? (v.pomin ? SKIP : (v.status || "")) : (Array.isArray(v) ? v[0] : (v || ""));
+  const init = mode => {
+    work = {};
+    [...src.sections.map(s => s.name), "__ukonczone__"].forEach(n => { work[n] = mode === "current" ? valueOf(data.map[n]) : ""; });
+    // Propozycja dla ukończonych: status „zakończony” wzorca. Zapisywana jawnie - bez wpisu skrypt
+    // synchronizacji użyłby „Fertig”, którego w innej Jirze może nie być.
+    if (!work.__ukonczone__ || !statuses.some(s => s.name === work.__ukonczone__)) { const d = categoryStatus("done", statuses); work.__ukonczone__ = d ? d.name : ""; }
+    keep.checked = mode === "current"; draw();
+  };
+  let filter = "todo", q = "", minProjects = 1;
+  const tbody = h("tbody");
+  const summary = h("div", { class: "row", style: "margin:10px 0" });
+  const keep = h("input", { type: "checkbox", checked: true });
+  const doneSel = h("select", { style: "max-width:240px", onchange: e => { work.__ukonczone__ = e.target.value; } });
+  const known = new Set(statuses.map(x => x.name));
+  const invalid = v => v && v !== SKIP && !known.has(v);
+  const opts = cur => [h("option", { value: "" }, "(bez mapowania - status startowy)"),
+    invalid(cur) ? h("option", { value: cur, selected: true }, `⚠ ${cur} - nie ma tego statusu we wzorcu`) : null,
+    ...["new", "indeterminate", "done"].map(cat => h("optgroup", { label: { new: "Do zrobienia", indeterminate: "W toku", done: "Zakończone" }[cat] },
+      statuses.filter(s => s.category === cat).map(s => h("option", { value: s.name, selected: s.name === cur }, s.name)))),
+    h("option", { value: SKIP, selected: cur === SKIP }, "— pomiń: nie migruj zadań z tej sekcji —")];
+
+  function draw() {
+    doneSel.replaceChildren(...statuses.map(s => h("option", { value: s.name, selected: s.name === work.__ukonczone__ }, `${s.name}${s.category === "done" ? "" : " (nie jest „zakończony”)"}`)));
+    if (!work.__ukonczone__) doneSel.prepend(h("option", { value: "", selected: true }, "(wybierz status)"));
+    const secs = src.sections.filter(s => s.projects.length >= minProjects);
+    const cnt = f => secs.filter(s => f(work[s.name])).length;
+    summary.replaceChildren(pill(`${cnt(v => v && v !== SKIP)} zmapowanych`, "ok"), pill(`${cnt(v => v === SKIP)} pomijanych`, "info"),
+      pill(`${cnt(v => !v)} bez mapowania`, cnt(v => !v) ? "warn" : "ok"),
+      cnt(invalid) ? pill(`${cnt(invalid)} ze statusem spoza wzorca`, "bad") : null, h("small", {}, `z ${secs.length} sekcji (min. ${minProjects} projektów)`));
+    const rows = secs.filter(s => {
+      const v = work[s.name];
+      if (q && !normS(s.name).includes(normS(q))) return false;
+      return filter === "all" || (filter === "invalid" && invalid(v)) || (filter === "todo" && !v) || (filter === "mapped" && v && v !== SKIP) || (filter === "skip" && v === SKIP) || (filter === "suggested" && !v && sug[s.name]);
+    });
+    tbody.replaceChildren(...rows.slice(0, 400).map(s => {
+      const g = sug[s.name];
+      const sel = h("select", { style: "max-width:260px", onchange: e => { work[s.name] = e.target.value; draw(); } }, opts(work[s.name]));
+      return h("tr", {},
+        h("td", {}, s.name), h("td", { class: "num", title: s.projects.slice(0, 30).join(", ") }, s.projects.length), h("td", { class: "num" }, s.tasks),
+        h("td", {}, sel),
+        h("td", {}, g && g.status !== work[s.name] ? h("button", { class: "small", title: g.reason, onclick: () => { work[s.name] = g.status; draw(); } }, "← " + g.status, h("small", { class: "muted" }, ` (${g.reason})`)) : h("span", { class: "muted" }, g ? "✓" : "—")));
+    }), rows.length > 400 ? h("tr", {}, h("td", { colspan: 5, class: "muted" }, `Pokazano 400 z ${rows.length} - zawęź filtr albo podnieś próg projektów.`)) : null);
+  }
+
+  const save = async () => {
+    if (!work.__ukonczone__) return toast("Wybierz status dla zadań ukończonych w Asanie.", true);
+    const bad = Object.entries(work).filter(([, v]) => invalid(v));
+    if (bad.length && !confirm(`${bad.length} wpisów wskazuje status, którego nie ma w projekcie ${src.status_project} (np. „${bad[0][1]}”). Synchronizacja zostawi takie zadania w statusie startowym. Zapisać mimo to?`)) return;
+    const entries = {};
+    Object.entries(work).forEach(([k, v]) => { if (v === SKIP) entries[k] = { pomin: true }; else if (v) entries[k] = v; });
+    if (!confirm(`Zapisać ${Object.keys(entries).length} wpisów do section_status_map.json?` + (keep.checked ? "" : "\nWpisy sekcji spoza wczytanej listy zostaną usunięte."))) return;
+    try {
+      const r = await api("PUT", "statusmap", { entries, keep_unlisted: keep.checked });
+      toast(`Zapisano: ${r.entries} wpisów (+${r.added}, −${r.removed}, zmienionych ${r.changed}).`);
+      data = await api("GET", "statusmap");
+    } catch (e) { toast(e.message, true); }
+  };
+
+  body.replaceChildren(h("div", { class: "card" },
+    h("h2", {}, "2. Przypisz statusy"),
+    h("div", { class: "row" }, h("span", {}, "Start:"),
+      h("label", { class: "check" }, h("input", { type: "radio", name: "smode", checked: true, onchange: () => init("current") }), `od obecnej mapy (${Object.keys(data.map).length} wpisów)`),
+      h("label", { class: "check" }, h("input", { type: "radio", name: "smode", onchange: () => init("fresh") }), "od pustej mapy (świeża migracja)")),
+    h("div", { class: "notice", style: "margin-top:10px" }, h("div", { class: "row" }, h("strong", {}, "Zadania ukończone w Asanie →"), doneSel,
+      h("small", {}, "Ma pierwszeństwo przed sekcją (wyjątki ustawisz w mapie projektu: „nad_ukonczonym”)."))),
+    summary,
+    h("div", { class: "row", style: "margin-bottom:10px" },
+      h("select", { style: "max-width:200px", onchange: e => { filter = e.target.value; draw(); } },
+        [["todo", "Bez mapowania"], ["invalid", "Status spoza wzorca"], ["suggested", "Z propozycją"], ["mapped", "Zmapowane"], ["skip", "Pomijane"], ["all", "Wszystkie"]].map(([v, l]) => h("option", { value: v }, l))),
+      h("input", { type: "search", placeholder: "Szukaj sekcji…", style: "max-width:220px", oninput: e => { q = e.target.value; draw(); } }),
+      h("label", { class: "check" }, "min. projektów:", h("input", { type: "number", min: 1, value: 1, style: "width:70px", oninput: e => { minProjects = Math.max(1, +e.target.value || 1); draw(); } })),
+      h("span", { class: "spacer" }),
+      h("button", { onclick: () => { let n = 0; src.sections.forEach(s => { if (!work[s.name] && sug[s.name]) { work[s.name] = sug[s.name].status; n++; } }); toast(`Przyjęto ${n} propozycji.`); draw(); } }, "Przyjmij wszystkie propozycje")),
+    h("div", { class: "table-wrap" }, h("table", {},
+      h("thead", {}, h("tr", {}, h("th", {}, "Sekcja Asany"), h("th", { class: "num" }, "Projektów"), h("th", { class: "num" }, "Zadań"), h("th", {}, "Status w Jirze"), h("th", {}, "Propozycja"))), tbody)),
+    h("p", { class: "muted", style: "margin-top:8px" }, "Sekcja bez mapowania = zadania zostają w statusie startowym workflow (to nie błąd). „Pomiń” = zadania z tej sekcji, z podzadaniami, nie są migrowane."),
+    h("div", { class: "row", style: "margin-top:12px" }, h("label", { class: "check" }, keep, "zachowaj wpisy sekcji spoza wczytanej listy"), h("span", { class: "spacer" }),
+      h("button", { class: "primary", onclick: save }, "Zapisz mapowanie"))));
+  init("current");
+};
+
 // ------------------------------------------------------------------ Przegląd
 
 VIEWS.overview = async main => {
@@ -245,7 +520,7 @@ function runsTable(runs) {
 // ------------------------------------------------------------------ Projekty
 
 VIEWS.projects = async main => {
-  main.replaceChildren(h("p", { class: "muted" }, "Wczytywanie arkusza Google…"));
+  main.replaceChildren(h("p", { class: "muted" }, "Wczytywanie arkusza Google… Pierwszy odczyt może potrwać kilka minut (nazwy projektów są pobierane z Asany), potem panel korzysta z cache."));
   const data = await ensureProjects(false);
   let filter = "all", query = "";
   const tbody = h("tbody");
@@ -301,7 +576,9 @@ VIEWS.projects = async main => {
   main.replaceChildren(
     h("div", { class: "page-head" },
       h("div", {}, h("h1", {}, "Projekty"), h("small", {}, `Źródło: ${data.source} · wczytano ${fmtTime(data.loaded_at)}`)),
-      h("button", { onclick: async e => { e.target.disabled = true; e.target.textContent = "Wczytywanie…"; await ensureProjects(true); route(); } }, "Odśwież z arkusza")),
+      h("button", { onclick: async e => { e.target.disabled = true; e.target.textContent = "Wczytywanie… (do kilku minut)"; await ensureProjects(true); route(); } }, "Odśwież z arkusza")),
+    !data.sheet_loaded && !data.error && !data.projects.length ? h("div", { class: "notice" }, "Arkusz nie został jeszcze wczytany. ",
+      h("button", { class: "small", onclick: async () => { try { const r = await startTool("sheet_load", {}); if (r) go("#/runs/" + r.id); } catch (e) { toast(e.message, true); } } }, "Wczytaj arkusz")) : null,
     data.error ? h("div", { class: "notice warn" }, "Nie udało się odczytać arkusza - pokazuję dane lokalne. ", h("details", {}, h("summary", {}, "Szczegóły"), h("pre", { class: "cmd" }, data.error))) : null,
     h("div", { class: "row", style: "margin-bottom:10px" },
       h("input", { type: "search", placeholder: "Szukaj po kluczu lub nazwie…", style: "max-width:320px", oninput: e => { query = e.target.value.toLowerCase(); draw(); } }),
@@ -544,7 +821,11 @@ function checkResult(res) {
     stat(c.status_bad, `różnic statusu · ${c.status_ok} zgodnych`, c.status_bad ? "warn" : "ok"),
     stat(c.assignee_bad, `różnic przypisania · ${c.assignee_ok} zgodnych`, c.assignee_bad ? "warn" : "ok")));
   wrap.append(h("p", { class: "muted", style: "margin-top:8px" },
-    `Pominięte: ${c.jira_master} prowadzonych w Jirze („migriert zu Jira”), ${c.skipped} z sekcji „pomiń”, ${c.status_unmapped} bez mapowania statusu, ${c.missing_in_jira} usuniętych w Jirze. Nieprzypisanych w Asanie: ${res.unassigned_tasks}.`));
+    `Pominięte: ${c.jira_master} prowadzonych w Jirze („migriert zu Jira”), ${c.skipped} z sekcji „pomiń”, ${c.status_unmapped} bez mapowania statusu, ${c.missing_in_jira} usuniętych w Jirze. Nieprzypisanych w Asanie: ${res.unassigned_tasks}`
+    + (c.assignee_default ? ` (${c.assignee_default} z nich ma w Jirze domyślnie leada projektu${res.project_lead ? " – " + res.project_lead : ""}, liczone jako zgodne).` : ".")
+    + (c.assignee_not_in_jira ? ` Zadania osób „nie w Jirze”: ${c.assignee_not_in_jira} (nie liczone jako różnice).` : "")
+    + (c.assignee_unassignable_empty ? ` Bez przypisanego, bo osoby nie da się przypisać: ${c.assignee_unassignable_empty} (zgodne).` : "")
+    + (c.assignee_kept ? ` Osoby nie da się przypisać, w Jirze zostaje obecny przypisany: ${c.assignee_kept} (zaakceptowane).` : "")));
 
   const tabs = [["sections", `Sekcje (${res.sections.length})`], ["people", `Osoby (${res.people.length})`], ["diff", `Różnice (${res.mismatches.length})`]];
   const tabBar = h("div", { class: "tabs" });
@@ -599,16 +880,38 @@ function sectionsTable(res) {
 function peopleTable(res) {
   return h("div", {},
     h("div", { class: "table-wrap" }, h("table", {},
-      h("tr", {}, h("th", {}, "Osoba w Asanie"), h("th", { class: "num" }, "Zadań"), h("th", { class: "num" }, "Otwartych"), h("th", {}, "Konto w Jirze (user_map.json)"), h("th", {}, "Stan")),
+      h("tr", {}, h("th", {}, "Osoba w Asanie"), h("th", { class: "num" }, "Zadań"), h("th", { class: "num" }, "Otwartych"), h("th", {}, "Konto w Jirze (user_map.json)"), h("th", {}, "Stan"), h("th", {}, "")),
       res.people.map(p => h("tr", {},
         h("td", {}, p.name || "—", h("small", { style: "display:block" }, [p.email, p.gid].filter(Boolean).join(" · "))),
         h("td", { class: "num" }, p.tasks), h("td", { class: "num" }, p.open),
-        h("td", {}, p.jira_account_id ? [p.jira_name || "?", h("small", { class: "mono", style: "display:block" }, p.jira_account_id)] : h("span", { class: "muted" }, "—")),
-        h("td", {}, p.problem ? pill(p.problem, "bad") : pill("OK", "ok")))))),
+        h("td", { title: p.jira_account_id || "" }, p.jira_account_id ? (p.jira_name || p.jira_account_id) : h("span", { class: "muted" }, "—")),
+        h("td", {}, p.problem ? pill(p.problem, "bad") : p.not_in_jira ? pill("nie w Jirze", "info") : pill("OK", "ok")),
+        h("td", {}, personSkipButton(p)))))),
+    res.people.some(p => p.assignable === false && !p.not_in_jira) ? h("div", { class: "notice warn", style: "margin-top:10px" },
+      "„Bez uprawnienia do przypisania” = mapowanie jest poprawne, ale Jira nie pozwala przypisać tego konta w projekcie: żadna rola tej osoby w projekcie (także przez grupę) nie ma uprawnienia „Assignable User” w schemacie uprawnień. Bycie leadem go nie daje. ",
+      res.assignable_permission
+        ? [`W schemacie „${res.assignable_permission.scheme}” (id ${res.assignable_permission.scheme_id}) przypisanie dają: `, h("strong", {}, res.assignable_permission.holders.map(x => x.name).join(", ")), ". Rozwiązanie: dodać uprawnienie roli, w której są te osoby (zmienia wszystkie projekty z tym schematem), albo dodać osoby/grupę do jednej z ról powyżej w tym projekcie. Do tego czasu nowe zadania takich osób powstają bez przypisanego, a już utworzone zachowują obecnego przypisanego - jedno i drugie nie jest liczone jako różnica."]
+        : "Nie udało się odczytać schematu uprawnień (wymaga uprawnień administratora Jiry).") : null,
+    h("p", { class: "muted", style: "margin-top:8px" }, "„Nie w Jirze” = osoba świadomie bez konta (lista w asana_users_not_in_jira.json, wspólna dla wszystkich projektów). Jej zadania trafiają do Jiry bez przypisanego (Jira wstawia leada) i nie są liczone jako różnice. Oznaczenie usuwa osobę z user_map.json."),
     h("div", { class: "row", style: "margin-top:10px" },
+      h("button", { class: "small", onclick: () => go("#/config/files/asana_users_not_in_jira.json") }, "Lista „nie w Jirze”"),
       h("button", { class: "small", onclick: () => go("#/config/files/user_map.json") }, "Edytuj user_map.json"),
       h("button", { class: "small", onclick: () => go("#/tools/user_map") }, "Generuj user_map (po e-mailu)…"),
       h("button", { class: "small", onclick: () => go("#/tools/asana_members") }, "Lista osób w Asanie…")));
+}
+
+function personSkipButton(p) {
+  const skip = !p.not_in_jira;
+  const btn = h("button", { class: "small", onclick: async () => {
+    if (skip && p.jira_account_id && !confirm(`${p.name} ma wpis w user_map.json (${p.jira_name || p.jira_account_id}). Oznaczenie usunie ten wpis - synchronizacja przestanie przypisywać tej osobie zadania. Kontynuować?`)) return;
+    try {
+      const r = await api("POST", "people-skip", { gid: p.gid, skip, name: p.name, email: p.email });
+      toast(skip ? `${p.name}: nie w Jirze${r.removed_from_user_map ? " (usunięto z user_map.json)" : ""}. Sprawdź ponownie, żeby przeliczyć różnice.` : `${p.name}: zdjęto oznaczenie.`);
+      btn.disabled = true;
+      btn.textContent = "Zapisano ✓";
+    } catch (e) { toast(e.message, true); }
+  } }, skip ? "Nie w Jirze" : "Cofnij");
+  return btn;
 }
 
 function diffTable(res) {
@@ -619,7 +922,7 @@ function diffTable(res) {
     .filter(m => (!kind || m.kind === kind) && (!q || `${m.jira_key} ${m.title} ${m.section}`.toLowerCase().includes(q)))
     .map(m => h("tr", {},
       h("td", {}, jiraLink(m.jira_key)), h("td", {}, m.title, m.completed ? h("span", {}, " ", pill("ukończone")) : null),
-      h("td", {}, h("small", {}, m.section || "—")), h("td", {}, pill(m.kind, m.kind === "brak w Jirze" ? "bad" : "warn")),
+      h("td", {}, h("small", {}, m.section || "—")), h("td", {}, pill(m.kind, ["brak w Jirze", "brak uprawnienia w Jirze", "problem z mapowaniem"].includes(m.kind) ? "bad" : "warn")),
       h("td", {}, m.expected || "—"), h("td", {}, m.actual || "—"))));
   const kinds = [...new Set(res.mismatches.map(m => m.kind))];
   const out = h("div", {},
@@ -635,6 +938,176 @@ function diffTable(res) {
   draw();
   return out;
 }
+
+// ------------------------------------------------------------------ Mapowanie osób
+
+VIEWS.people = async main => {
+  let st = await api("GET", "people");
+  const groupsBox = h("div", { class: "card" });
+  const body = h("div");
+  main.replaceChildren(
+    h("div", { class: "page-head" },
+      h("div", {}, h("h1", {}, "Mapowanie osób"), h("small", {}, "Osoby z Asany → konta Jiry z wybranych grup. Wynik: user_map.json i asana_users_not_in_jira.json."))),
+    groupsBox, body);
+
+  // --- wybór grup Jiry
+  const chosen = new Set(st.source ? st.source.groups : []);
+  const groupList = h("div", { style: "max-height:180px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:6px;margin:8px 0" });
+  const chosenLabel = h("small", {});
+  let allGroups = [];
+  const drawGroups = q => {
+    chosenLabel.textContent = chosen.size ? "Wybrane: " + [...chosen].join(", ") : "Nie wybrano grup.";
+    groupList.replaceChildren(...allGroups.filter(g => !q || g.name.toLowerCase().includes(q) || chosen.has(g.name)).slice(0, 300).map(g =>
+      h("label", { class: "check", style: "padding:2px 0" }, h("input", { type: "checkbox", checked: chosen.has(g.name),
+        onchange: e => { e.target.checked ? chosen.add(g.name) : chosen.delete(g.name); drawGroups(q); } }), g.name)));
+  };
+  const loadBtn = h("button", { class: "primary", onclick: async () => {
+    if (!chosen.size) return toast("Wybierz przynajmniej jedną grupę Jiry.", true);
+    loadBtn.disabled = true; loadBtn.textContent = "Wczytywanie…";
+    try { st = await api("POST", "people/load", { groups: [...chosen] }); drawMapping(); toast("Wczytano osoby z Asany i Jiry."); }
+    catch (e) { toast(e.message, true); }
+    loadBtn.disabled = false; loadBtn.textContent = "Wczytaj osoby";
+  } }, "Wczytaj osoby");
+  groupsBox.append(
+    h("h2", {}, "1. Grupy Jiry, z których wybierasz konta"),
+    h("input", { type: "search", placeholder: "Filtruj grupy…", style: "max-width:320px", oninput: e => drawGroups(e.target.value.toLowerCase()) }),
+    groupList, h("div", { class: "row" }, chosenLabel, h("span", { class: "spacer" }),
+      st.source ? h("small", {}, "Ostatnio wczytano " + fmtTime(st.source.loaded_at)) : null, loadBtn));
+  api("GET", "people/groups").then(r => { allGroups = r.groups; drawGroups(""); }).catch(e => groupList.replaceChildren(h("span", { class: "muted" }, "Nie udało się pobrać grup: " + e.message)));
+  drawGroups("");
+
+  // --- mapowanie
+  function drawMapping() {
+    const src = st.source;
+    if (!src) { body.replaceChildren(h("div", { class: "card muted" }, "Wybierz grupy Jiry i kliknij „Wczytaj osoby”.")); return; }
+    const jiraById = Object.fromEntries(src.jira.map(u => [u.account_id, u]));
+    const label = acc => { const u = jiraById[acc]; return u ? `${u.name}${u.email ? " — " + u.email : ""}` : acc ? `(spoza wybranych grup) ${acc}` : ""; };
+    const byLabel = Object.fromEntries(src.jira.map(u => [label(u.account_id), u.account_id]));
+    const asanaByGid = Object.fromEntries(src.asana.map(a => [a.gid, a]));
+    let work = {}, mode = "current";
+
+    const init = m => {
+      mode = m; work = {};
+      src.asana.forEach(a => {
+        work[a.gid] = m === "current"
+          ? { acc: st.user_map[a.gid] || "", skip: !!st.not_in_jira[a.gid] && !st.user_map[a.gid] }
+          : { acc: "", skip: false };
+      });
+      keepUnlisted.checked = m === "current";
+      draw();
+    };
+
+    let filter = "todo", q = "", showGuests = false;
+    const tbody = h("tbody");
+    const summary = h("div", { class: "row", style: "margin:10px 0" });
+    const keepUnlisted = h("input", { type: "checkbox", checked: true });
+    const dl = h("datalist", { id: "jira-people" }, src.jira.map(u => h("option", { value: label(u.account_id) })));
+    const guests = src.asana.filter(a => a.guest).length;
+
+    const usage = () => { const m = {}; Object.entries(work).forEach(([g, w]) => { if (w.acc) (m[w.acc] = m[w.acc] || []).push(g); }); return m; };
+    const status = (a, w) => {
+      if (w.skip) return ["nie w Jirze", "info"];
+      if (w.acc) return [st.user_map[a.gid] === w.acc && mode === "current" ? "zmapowany" : "zmapowany (zmiana)", "ok"];
+      if (src.suggestions[a.gid]) return ["jest propozycja", "warn"];
+      return ["do decyzji", "bad"];
+    };
+    const matches = (a, w) => {
+      if (!showGuests && a.guest && !w.acc && !w.skip) return false;
+      if (q && !`${a.name} ${a.email} ${label(w.acc)}`.toLowerCase().includes(q)) return false;
+      switch (filter) {
+        case "todo": return !w.acc && !w.skip;
+        case "suggested": return !w.acc && !w.skip && !!src.suggestions[a.gid];
+        case "mapped": return !!w.acc;
+        case "skip": return w.skip;
+        case "changed": return (w.acc || "") !== (st.user_map[a.gid] || "") || w.skip !== (!!st.not_in_jira[a.gid] && !st.user_map[a.gid]);
+        default: return true;
+      }
+    };
+
+    function draw() {
+      const use = usage();
+      const rows = src.asana.filter(a => matches(a, work[a.gid]));
+      const all = src.asana.filter(a => showGuests || !a.guest || work[a.gid].acc || work[a.gid].skip);
+      const cnt = f => all.filter(a => f(work[a.gid])).length;
+      summary.replaceChildren(
+        pill(`${cnt(w => !!w.acc)} zmapowanych`, "ok"), pill(`${cnt(w => w.skip)} nie w Jirze`, "info"),
+        pill(`${cnt(w => !w.acc && !w.skip)} do decyzji`, cnt(w => !w.acc && !w.skip) ? "bad" : "ok"),
+        h("small", {}, `· ${src.jira.length} kont w grupach Jiry, nieużytych: ${src.jira.filter(u => !use[u.account_id]).length}`));
+      tbody.replaceChildren(...rows.slice(0, 500).map(a => {
+        const w = work[a.gid];
+        const sug = src.suggestions[a.gid];
+        const input = h("input", { type: "text", list: "jira-people", value: label(w.acc), placeholder: "wpisz imię lub e-mail…", disabled: w.skip,
+          onchange: e => {
+            const v = e.target.value.trim();
+            if (!v) { w.acc = ""; draw(); return; }
+            if (byLabel[v]) { w.acc = byLabel[v]; draw(); return; }
+            toast("Wybierz osobę z listy podpowiedzi.", true); e.target.value = label(w.acc);
+          } });
+        const dup = w.acc && use[w.acc] && use[w.acc].length > 1
+          ? h("small", { style: "display:block;color:var(--warn)" }, "to samo konto także: " + use[w.acc].filter(g => g !== a.gid).map(g => asanaByGid[g] ? asanaByGid[g].name : g).join(", ")) : null;
+        return h("tr", {},
+          h("td", {}, a.name || "—", a.guest ? h("span", {}, " ", pill("gość")) : null,
+            h("small", { style: "display:block" }, a.email || "brak e-maila")),
+          h("td", { style: "min-width:280px" }, input, dup),
+          h("td", {}, sug && sug.account_id !== w.acc && !w.skip
+            ? h("button", { class: "small", title: "Dopasowanie: " + sug.reason, onclick: () => { w.acc = sug.account_id; draw(); } }, "← " + (jiraById[sug.account_id] || {}).name, h("small", { class: "muted" }, ` (${sug.reason})`))
+            : h("span", { class: "muted" }, sug && sug.account_id === w.acc ? `✓ ${sug.reason}` : "—")),
+          h("td", {}, h("label", { class: "check" }, h("input", { type: "checkbox", checked: w.skip, onchange: e => { w.skip = e.target.checked; if (w.skip) w.acc = ""; draw(); } }), "nie w Jirze")),
+          h("td", {}, pill(...status(a, w))));
+      }), rows.length > 500 ? h("tr", {}, h("td", { colspan: 5, class: "muted" }, `Pokazano 500 z ${rows.length} - zawęź filtr.`)) : null);
+    }
+
+    const acceptAll = () => {
+      let n = 0;
+      src.asana.forEach(a => { const w = work[a.gid]; const s = src.suggestions[a.gid];
+        if (s && !w.acc && !w.skip && (showGuests || !a.guest)) { w.acc = s.account_id; n++; } });
+      toast(`Przyjęto ${n} propozycji.`); draw();
+    };
+    const skipVisibleTodo = () => {
+      const rows = src.asana.filter(a => matches(a, work[a.gid]) && !work[a.gid].acc && !work[a.gid].skip);
+      if (!rows.length) return toast("Brak widocznych osób do decyzji.");
+      if (!confirm(`Oznaczyć ${rows.length} widocznych, niezmapowanych osób jako „nie w Jirze”?`)) return;
+      rows.forEach(a => { work[a.gid].skip = true; }); draw();
+    };
+    const save = async () => {
+      const mapping = {}, notIn = {};
+      Object.entries(work).forEach(([g, w]) => { if (w.acc) mapping[g] = w.acc; else if (w.skip) notIn[g] = { name: asanaByGid[g].name, email: asanaByGid[g].email }; });
+      const msg = `Zapisać ${Object.keys(mapping).length} mapowań do user_map.json i ${Object.keys(notIn).length} osób „nie w Jirze”?` +
+        (keepUnlisted.checked ? "\nWpisy osób spoza wczytanej listy zostaną zachowane." : "\nPliki zostaną zastąpione (świeża mapa) - kopie trafią do migration_app/backups/.");
+      if (!confirm(msg)) return;
+      try {
+        const r = await api("PUT", "people/mapping", { mapping, not_in_jira: notIn, keep_unlisted: keepUnlisted.checked });
+        toast(`Zapisano: user_map.json ${r.user_map} wpisów (+${r.added}, −${r.removed}, zmienionych ${r.changed}), nie w Jirze: ${r.not_in_jira}.`);
+        st = await api("GET", "people"); mode = "current"; draw();
+      } catch (e) { toast(e.message, true); }
+    };
+
+    const FILTERS = [["todo", "Do decyzji"], ["suggested", "Z propozycją"], ["mapped", "Zmapowane"], ["skip", "Nie w Jirze"], ["changed", "Zmienione (niezapisane)"], ["all", "Wszystkie"]];
+    body.replaceChildren(dl, h("div", { class: "card" },
+      h("h2", {}, "2. Dopasuj osoby"),
+      !src.jira_emails_visible ? h("div", { class: "notice warn" }, "Jira nie zwraca adresów e-mail (widoczność kont) - propozycje opierają się tylko na imieniu i nazwisku.") : null,
+      h("div", { class: "row" },
+        h("span", {}, "Start:"),
+        h("label", { class: "check" }, h("input", { type: "radio", name: "pmode", checked: true, onchange: () => init("current") }), `od obecnego user_map.json (${Object.keys(st.user_map).length})`),
+        h("label", { class: "check" }, h("input", { type: "radio", name: "pmode", onchange: () => init("fresh") }), "od pustej mapy (świeża migracja)")),
+      summary,
+      h("div", { class: "row", style: "margin-bottom:10px" },
+        h("select", { style: "max-width:220px", onchange: e => { filter = e.target.value; draw(); } }, FILTERS.map(([v, l]) => h("option", { value: v }, l))),
+        h("input", { type: "search", placeholder: "Szukaj osoby…", style: "max-width:240px", oninput: e => { q = e.target.value.toLowerCase(); draw(); } }),
+        h("label", { class: "check" }, h("input", { type: "checkbox", onchange: e => { showGuests = e.target.checked; draw(); } }), `pokaż gości Asany (${guests})`),
+        h("span", { class: "spacer" }),
+        h("button", { onclick: acceptAll }, "Przyjmij wszystkie propozycje"),
+        h("button", { onclick: skipVisibleTodo }, "Widoczne „do decyzji” → nie w Jirze")),
+      h("div", { class: "table-wrap" }, h("table", {},
+        h("thead", {}, h("tr", {}, h("th", {}, "Osoba w Asanie"), h("th", {}, "Konto w Jirze"), h("th", {}, "Propozycja"), h("th", {}, ""), h("th", {}, "Stan"))), tbody)),
+      h("div", { class: "row", style: "margin-top:12px" },
+        h("label", { class: "check" }, keepUnlisted, "zachowaj wpisy osób spoza wczytanej listy"),
+        h("span", { class: "spacer" }),
+        h("button", { class: "primary", onclick: save }, "Zapisz mapowanie"))));
+    init("current");
+  }
+  drawMapping();
+};
 
 // ------------------------------------------------------------------ Konfiguracja
 
@@ -677,7 +1150,7 @@ async function filesEditor(body, path) {
   const { files } = await api("GET", "files");
   const list = h("div", { class: "tool-list" },
     h("div", { class: "tool-group" }, "Pliki"),
-    files.map(f => h("div", { class: "tool-item" + (f.path === path ? " active" : ""), onclick: () => go("#/config/files/" + f.path) }, h("span", { class: "mono", style: "font-size:12.5px" }, f.path))),
+    files.map(f => h("div", { class: "tool-item" + (f.path === path ? " active" : ""), onclick: () => go("#/config/files/" + f.path) }, h("span", { class: "mono", style: "font-size:12.5px" }, f.path), f.missing ? h("span", { class: "w muted" }, "nowy") : null)),
     h("div", { class: "tool-group" }, "Nowa mapa projektu"),
     (() => {
       const k = h("input", { type: "text", placeholder: "KLUCZ", list: "project-keys" });
@@ -690,7 +1163,7 @@ async function filesEditor(body, path) {
 
   const f = await api("GET", "files?path=" + encodeURIComponent(path));
   const isJson = path.endsWith(".json");
-  const isNewMap = !f.content && /^section_status_map\..+\.json$/.test(path);
+  const isNewMap = f.missing && /^section_status_map\..+\.json$/.test(path);
   const ta = h("textarea", { class: "editor", spellcheck: false }, f.content || (isNewMap ? '{\n  "__ukonczone__": "Done"\n}\n' : ""));
   const status = h("small");
   const validate = () => {
@@ -700,7 +1173,7 @@ async function filesEditor(body, path) {
   ta.addEventListener("input", validate);
   ta.addEventListener("keydown", e => { if (e.key === "Tab") { e.preventDefault(); ta.setRangeText("  ", ta.selectionStart, ta.selectionEnd, "end"); } });
   editorBox.append(h("div", { class: "card" },
-    h("div", { class: "row", style: "margin-bottom:8px" }, h("h2", { class: "mono", style: "margin:0" }, path), isNewMap ? pill("nowy plik", "info") : null, h("span", { class: "spacer" }), status),
+    h("div", { class: "row", style: "margin-bottom:8px" }, h("h2", { class: "mono", style: "margin:0" }, path), f.missing ? pill("nowy plik - powstanie przy zapisie", "info") : null, h("span", { class: "spacer" }), status),
     path === "sync_exclude.txt" || path === "protected_projects.txt" ? h("p", { class: "muted" }, "Jeden klucz w linii, # = komentarz.") : null,
     /section_status_map\..+\.json$/.test(path) ? h("p", { class: "muted" }, 'Wpisy: "Sekcja": "Status" albo {"status", "labels", "components", "resolution", "nad_ukonczonym", "pomin"}. "__ukonczone__" = status dla ukończonych, "__szablon__" = nazwa szablonu z section_status_profiles/.') : null,
     ta,

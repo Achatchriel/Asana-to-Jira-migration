@@ -387,6 +387,7 @@ TOOLS = [
                 {"flag": "--lead-account-id", "kind": "str", "label": "Lead (accountId, domyślnie jak w źródle)"},
                 {"flag": "--description", "kind": "str", "label": "Opis (domyślnie jak w źródle)"},
                 {"flag": "--board-ids", "kind": "str", "label": "ID tablic źródła"},
+                {"flag": "--roles-file", "kind": "str", "label": "Plik z wyborem ról (karta „Kopia projektu”)"},
                 {"flag": "--no-roles", "kind": "bool", "label": "Bez członków ról"},
                 {"flag": "--no-versions", "kind": "bool", "label": "Bez wersji"},
                 {"flag": "--no-components", "kind": "bool", "label": "Bez komponentów"},

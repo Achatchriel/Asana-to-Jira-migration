@@ -34,6 +34,7 @@ Użycie:
 """
 
 import argparse
+import json
 import re
 import sys
 import time
@@ -360,15 +361,25 @@ def copy_versions(src_key: str, dst_key: str, dst_id: str) -> None:
     print(f"   Wersje: {'do utworzenia' if DRY else 'utworzono'} {n} z {len(src)}.")
 
 
-def copy_roles(src_key: str, dst_key: str) -> None:
-    roles = get(f"/rest/api/3/project/{src_key}/role")
-    for name, url in sorted(roles.items()):
+def source_role_selection(src_key: str) -> list:
+    """Wszystkie role źródła z ich osobami i grupami (gdy nie podano --roles-file)."""
+    out = []
+    for name, url in sorted(get(f"/rest/api/3/project/{src_key}/role").items()):
         if name == ADDON_ROLE:
             continue
         role_id = url.rstrip("/").rsplit("/", 1)[-1]
         actors = get(f"/rest/api/3/project/{src_key}/role/{role_id}").get("actors", [])
-        users = [a["actorUser"]["accountId"] for a in actors if (a.get("actorUser") or {}).get("accountId")]
-        groups = [a["actorGroup"]["groupId"] for a in actors if (a.get("actorGroup") or {}).get("groupId")]
+        out.append({"id": role_id, "name": name,
+                    "users": [a["actorUser"]["accountId"] for a in actors if (a.get("actorUser") or {}).get("accountId")],
+                    "groups": [a["actorGroup"]["groupId"] for a in actors if (a.get("actorGroup") or {}).get("groupId")]})
+    return out
+
+
+def apply_roles(dst_key: str, selection: list) -> None:
+    """Dodaje do ról nowego projektu podane osoby (accountId) i grupy (groupId)."""
+    for role in selection:
+        name, role_id = role.get("name") or role["id"], str(role["id"])
+        users, groups = list(role.get("users") or []), list(role.get("groups") or [])
         if not users and not groups:
             continue
         if DRY:
@@ -507,9 +518,22 @@ def copy_columns(src_board: int, dst_board: int) -> None:
             "unmappedStatuses": [strip(st) for st in s.get("unmappedStatuses", [])]}
     try:
         call("PUT", "/rest/greenhopper/1.0/rapidviewconfig/columns", json=body)
-        print(f"      Kolumny: {len(cols)} ({', '.join(c['name'] for c in cols[:8])}{'…' if len(cols) > 8 else ''}).")
     except RuntimeError as exc:
         warn(f"kolumny tablicy {dst_board}: zapis nie powiódł się ({exc}). Ustaw je ręcznie albo starszym copy_project.py (przez przeglądarkę).")
+        return
+    # Weryfikacja: odczyt nowej tablicy i porównanie kolumn oraz przypisanych statusów ze źródłem.
+    after = get("/rest/greenhopper/1.0/rapidviewconfig/editmodel.json", rapidViewId=dst_board)["rapidListConfig"]
+    want = [(c["name"], sorted(str(st["id"]) for st in c["mappedStatuses"])) for c in cols]
+    got = [(c["name"], sorted(str(st["id"]) for st in c.get("mappedStatuses", []))) for c in after.get("mappedColumns", [])]
+    if want == got:
+        mapped = sum(len(ids) for _, ids in got)
+        print(f"      Kolumny i statusy zgodne ze źródłem: {len(got)} kolumn, {mapped} przypisanych statusów.")
+        for col_name, _ in got[:20]:
+            names = [st["name"] for c in after["mappedColumns"] if c["name"] == col_name for st in c.get("mappedStatuses", [])]
+            print(f"        {col_name}: {', '.join(names) or '(brak statusów)'}")
+    else:
+        diff = [f"{w[0]}: {w[1]} ≠ {g[1] if g else 'brak'}" for w, g in zip(want, got + [None] * len(want)) if w != g]
+        warn(f"kolumny tablicy {dst_board} różnią się od źródła po zapisie: {'; '.join(diff[:5])}")
 
 
 # --------------------------------------------------------------------------- #
@@ -526,7 +550,10 @@ def main() -> None:
                     help="Początek nazw kopii schematów: klucz (XYZ Permission Scheme) albo nazwa nowego projektu")
     ap.add_argument("--existing-target", action="store_true",
                     help="Projekt docelowy już istnieje (np. po przerwanym uruchomieniu) - podepnij kopie i dokończ")
-    ap.add_argument("--no-roles", action="store_true", help="Nie kopiuj członków ról")
+    ap.add_argument("--no-roles", action="store_true", help="Nie dodawaj nikogo do ról")
+    ap.add_argument("--roles-file", default="",
+                    help="JSON z wyborem: [{\"id\": ID roli, \"name\": ..., \"users\": [accountId], \"groups\": [groupId]}] "
+                         "(panel zapisuje go w karcie „Kopia projektu”). Bez pliku: role i członkowie jak w źródle")
     ap.add_argument("--no-versions", action="store_true", help="Nie kopiuj wersji")
     ap.add_argument("--no-components", action="store_true", help="Nie kopiuj komponentów")
     ap.add_argument("--no-field-contexts", action="store_true", help="Nie dopisuj projektu do kontekstów pól (szybciej)")
@@ -574,7 +601,13 @@ def main() -> None:
     if not a.no_versions:
         copy_versions(src["key"], key, dst_id)
     if not a.no_roles:
-        copy_roles(src["key"], key)
+        if a.roles_file:
+            selection = json.loads(Path(a.roles_file).read_text(encoding="utf-8"))
+            print(f"   Role według wyboru ({a.roles_file}): {len(selection)}")
+        else:
+            selection = source_role_selection(src["key"])
+            print("   Role i członkowie jak w źródle.")
+        apply_roles(key, selection)
     if not a.no_field_contexts:
         copy_field_contexts(src["id"], dst_id)
 

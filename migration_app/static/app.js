@@ -1111,6 +1111,89 @@ VIEWS.people = async main => {
 
 // ------------------------------------------------------------------ Kopia projektu
 
+// Wybór osób i grup dla ról nowego projektu: start od ról źródła, z możliwością
+// odznaczenia, dodania osób/grup z wyszukiwarki i dodania innych ról.
+function rolesEditor(sourceKey) {
+  let data = null, none = false;
+  const body = h("div");
+  const card = h("div", { class: "card" });
+
+  const addSearch = role => {
+    const kind = h("select", { style: "max-width:110px" }, h("option", { value: "users" }, "osoba"), h("option", { value: "groups" }, "grupa"));
+    const q = h("input", { type: "text", placeholder: "imię, e-mail albo nazwa grupy…", style: "max-width:240px" });
+    const results = h("div", { class: "row", style: "margin-top:4px" });
+    const search = async () => {
+      if (q.value.trim().length < 2) return toast("Wpisz co najmniej 2 znaki.", true);
+      results.replaceChildren(h("small", { class: "muted" }, "Szukam…"));
+      try {
+        const found = await api("GET", `jira/${kind.value}?q=${encodeURIComponent(q.value.trim())}`);
+        const list = kind.value === "users" ? role.users : role.groups;
+        const idKey = kind.value === "users" ? "accountId" : "groupId";
+        results.replaceChildren(...(found.length ? found.map(x => h("button", { class: "small", title: x.email || "",
+          onclick: () => { if (!list.some(y => y[idKey] === x[idKey])) list.push({ [idKey]: x[idKey], name: x.name, on: true }); draw(); } },
+          "+ " + x.name + (x.active === false ? " (nieaktywne)" : ""))) : [h("small", { class: "muted" }, "Nic nie znaleziono.")]));
+      } catch (e) { results.replaceChildren(h("small", { style: "color:var(--bad)" }, e.message)); }
+    };
+    q.addEventListener("keydown", e => { if (e.key === "Enter") search(); });
+    return h("div", {}, h("div", { class: "row" }, kind, q, h("button", { class: "small", onclick: search }, "Szukaj")), results);
+  };
+
+  const chip = (item, label) => h("label", { class: "check", style: "margin-right:12px" },
+    h("input", { type: "checkbox", checked: item.on, onchange: e => { item.on = e.target.checked; } }), label);
+
+  function draw() {
+    if (!data) {
+      body.replaceChildren(h("p", { class: "muted" }, none ? "Nikt nie zostanie dodany do ról nowego projektu (poza leadem)."
+        : "Wczytaj role projektu źródłowego - osoby i grupy będą wstępnie zaznaczone, możesz je odznaczyć albo dodać inne."));
+      return;
+    }
+    const shown = data.rows.filter(r => r.users.length || r.groups.length || r.added);
+    const free = data.all_roles.filter(r => !shown.some(x => x.id === r.id));
+    const roleSel = h("select", { style: "max-width:260px" }, h("option", { value: "" }, "+ dodaj rolę…"), free.map(r => h("option", { value: r.id }, r.name)));
+    roleSel.onchange = () => {
+      const r = data.all_roles.find(x => x.id === roleSel.value);
+      if (!r) return;
+      const row = data.rows.find(x => x.id === r.id);
+      if (row) row.added = true; else data.rows.push({ id: r.id, name: r.name, users: [], groups: [], added: true });
+      draw();
+    };
+    body.replaceChildren(
+      ...shown.map(r => h("div", { style: "border-top:1px solid var(--border);padding:10px 0" },
+        h("strong", {}, r.name),
+        h("div", { style: "margin:6px 0" },
+          r.groups.map(g => chip(g, "👥 " + g.name)), r.users.map(u => chip(u, u.name || u.accountId)),
+          !r.users.length && !r.groups.length ? h("small", { class: "muted" }, "nikogo - dodaj poniżej") : null),
+        addSearch(r))),
+      h("div", { class: "row", style: "border-top:1px solid var(--border);padding-top:10px" }, roleSel));
+  }
+
+  const loadBtn = h("button", { onclick: async () => {
+    const key = sourceKey();
+    if (!key) return toast("Najpierw podaj projekt źródłowy.", true);
+    loadBtn.disabled = true; loadBtn.textContent = "Wczytuję…";
+    try {
+      const d = await api("GET", `jira/roles?project=${encodeURIComponent(key)}`);
+      data = { all_roles: d.all_roles, rows: d.roles.map(r => ({ id: r.id, name: r.name,
+        users: r.users.map(u => ({ ...u, on: true })), groups: r.groups.map(g => ({ ...g, on: true })) })) };
+      none = false; noneBox.checked = false;
+      draw();
+    } catch (e) { toast(e.message, true); }
+    loadBtn.disabled = false; loadBtn.textContent = data ? "Wczytaj ponownie" : "Wczytaj role źródła";
+  } }, "Wczytaj role źródła");
+  const noneBox = h("input", { type: "checkbox", onchange: e => { none = e.target.checked; if (none) data = null; draw(); } });
+
+  card.append(h("div", { class: "row" }, h("h2", { style: "margin:0" }, "Role i dostęp"), h("span", { class: "spacer" }),
+      h("label", { class: "check" }, noneBox, "nikogo nie dodawaj"), loadBtn),
+    h("p", { class: "muted", style: "margin:8px 0" }, "Kogo i z jaką rolą dodać do nowego projektu. Uwaga: przypisywać zadania można tylko osobom z roli, która w schemacie uprawnień ma „Assignable User”."),
+    body);
+  draw();
+  return {
+    card, none: () => none, loaded: () => !!data,
+    selection: () => (data ? data.rows : []).map(r => ({ id: r.id, name: r.name,
+      users: r.users.filter(u => u.on).map(u => u.accountId), groups: r.groups.filter(g => g.on).map(g => g.groupId) })),
+  };
+}
+
 const SCHEME_LABELS = ["Permission Scheme", "Notification Scheme", "Issue Security Scheme", "Workflow Scheme",
   "Issue Type Scheme", "Issue Type Screen Scheme", "Field Configuration Scheme", "Priority Scheme"];
 
@@ -1127,10 +1210,23 @@ VIEWS.copy = async main => {
     names.replaceChildren(...SCHEME_LABELS.map(l => h("li", {}, `${base} ${l}`)));
   };
   const logBox = h("div", { style: "margin-top:12px" });
+  const roles = rolesEditor(() => (v["--source"] || "").toUpperCase());
   const run = dry => async () => {
     for (const [k, l] of [["--source", "projekt źródłowy"], ["--target-key", "klucz nowego projektu"], ["--target-name", "nazwę nowego projektu"]])
       if (!v[k]) return toast(`Podaj ${l}.`, true);
-    await runInline(logBox, "clone_project", { ...v, "--source": (v["--source"] || "").toUpperCase(), "--dry-run": dry });
+    const values = { ...v, "--source": (v["--source"] || "").toUpperCase(), "--dry-run": dry, "--no-roles": roles.none() };
+    delete values["--roles-file"];
+    if (!roles.none()) {
+      if (roles.loaded()) {
+        try {
+          const r = await api("POST", "clone/roles", { target_key: v["--target-key"], roles: roles.selection() });
+          values["--roles-file"] = r.path;
+        } catch (e) { return toast(e.message, true); }
+      } else if (!dry) {
+        return toast("Wczytaj role projektu źródłowego i wybierz, kogo dodać (albo zaznacz „nikogo nie dodawaj”).", true);
+      }
+    }
+    await runInline(logBox, "clone_project", values);
   };
   draw();
   main.replaceChildren(
@@ -1151,11 +1247,12 @@ VIEWS.copy = async main => {
         h("label", { class: "check" }, h("input", { type: "radio", name: "nb", onchange: () => { v["--name-base"] = "name"; draw(); } }), "od nazwy nowego projektu")),
       names,
       h("p", { class: "muted", style: "margin-top:8px" }, "Kopiowane są tylko schematy, których źródło używa (np. bez schematu bezpieczeństwa nie powstaje jego kopia). Schemat o takiej nazwie, który już istnieje, jest używany ponownie. Same workflow, ekrany i konfiguracje pól pozostają wspólne ze źródłem - wskazują na nie nowe schematy.")),
+    roles.card,
     h("div", { class: "card" },
       h("h2", {}, "Co jeszcze skopiować"),
-      h("p", { class: "muted" }, "Domyślnie wszystko: ustawienia projektu (kategoria, URL, domyślne przypisanie), komponenty, wersje, członków ról, konteksty pól niestandardowych ograniczone do źródła oraz tablice z filtrami i kolumnami (bez przeglądarki)."),
+      h("p", { class: "muted" }, "Domyślnie wszystko: ustawienia projektu (kategoria, URL, domyślne przypisanie), komponenty, wersje, konteksty pól niestandardowych ograniczone do źródła oraz tablice - filtr z tymi samymi udostępnieniami, kolumny i przypisanie statusów do kolumn jak w źródle (przez API, bez przeglądarki; po zapisie skrypt sprawdza, czy każda kolumna ma te same statusy)."),
       h("div", { class: "form-grid" },
-        check("--no-roles", "bez członków ról"), check("--no-versions", "bez wersji"), check("--no-components", "bez komponentów"),
+        check("--no-versions", "bez wersji"), check("--no-components", "bez komponentów"),
         check("--no-field-contexts", "bez kontekstów pól (szybciej - pomija przegląd wszystkich pól)"), check("--no-boards", "bez tablic"),
         check("--existing-target", "projekt docelowy już istnieje (dokończenie przerwanej kopii)")),
       h("div", { style: "margin-top:10px" }, input("--board-ids", "ID tablic źródła", { help: "Puste = tablice przypisane do projektu źródłowego." }))),

@@ -659,6 +659,27 @@ class Handler(BaseHTTPRequestHandler):
             if not re.fullmatch(r"[A-Z0-9_]+", p[1].upper()) or not f.exists():
                 return self.send_error_json(404, "Brak wyniku sprawdzenia dla tego projektu.")
             return self.send_json(json.loads(f.read_text(encoding="utf-8")))
+        # -- karta „Kopia projektu”: odczyty z Jiry i wybór ról
+        if len(p) == 2 and p[0] == "jira" and method == "GET" and p[1] in ("roles", "users", "groups"):
+            arg = ["--project", q.get("project", "")] if p[1] == "roles" else ["--query", q.get("q", "")]
+            if not arg[1].strip():
+                raise ValueError("Podaj projekt albo tekst do wyszukania.")
+            out = subprocess.run([python_executable(), str(APP_DIR / "jira_lookup.py"), p[1], *arg], cwd=ROOT,
+                                 capture_output=True, text=True, timeout=120)
+            if out.returncode != 0:
+                raise RuntimeError((out.stdout + out.stderr).strip()[-800:])
+            return self.send_json(json.loads(out.stdout))
+        if p == ["clone", "roles"] and method == "POST":
+            body = self.read_json()
+            key = str(body.get("target_key", "")).upper()
+            if not re.fullmatch(r"[A-Z][A-Z0-9]{1,9}", key):
+                raise ValueError("Niepoprawny klucz nowego projektu.")
+            roles = [{"id": str(r["id"]), "name": str(r.get("name") or r["id"]),
+                      "users": [str(u) for u in r.get("users") or []], "groups": [str(g) for g in r.get("groups") or []]}
+                     for r in body.get("roles") or [] if r.get("users") or r.get("groups")]
+            path = CACHE_DIR / f"clone_roles_{key}.json"
+            path.write_text(json.dumps(roles, ensure_ascii=False, indent=1), encoding="utf-8")
+            return self.send_json({"path": str(path.relative_to(ROOT)), "roles": len(roles)})
         if p == ["setup"] and method == "GET":
             return self.send_json(setup_status())
         if p == ["setup", "check"] and method == "POST":

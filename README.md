@@ -105,10 +105,17 @@ skryptów, nie korzysta z projektu wzorcowego i z `.env` czyta tylko dostęp do 
   ekrany i konfiguracje pól pozostają wspólne ze źródłem (wskazują na nie nowe schematy).
 - **Projekt:** typ, lead (albo podany), opis, URL, kategoria i domyślne przypisanie jak
   w źródle; projekt powstaje od razu z kopiami schematów.
-- **Dodatkowo (każde można wyłączyć):** komponenty, wersje, członkowie ról, konteksty
-  pól niestandardowych ograniczone do źródła, tablice - filtr z podmienionym projektem
-  i tymi samymi udostępnieniami, tablica oraz kolumny z przypisaniem statusów (przez
-  API, bez przeglądarki).
+- **Role i dostęp:** karta wczytuje role źródła z osobami i grupami (wstępnie
+  zaznaczonymi). Możesz je odznaczyć, dodać osoby lub grupy z wyszukiwarki i dodać
+  inne role; do nowego projektu trafia dokładnie ten wybór (`--roles-file`). Z terminala
+  bez pliku role i członkowie są jak w źródle, `--no-roles` - nikogo.
+- **Tablice:** filtr z podmienionym projektem i tymi samymi udostępnieniami, tablica,
+  kolumny i **przypisanie statusów do kolumn** jak w źródle (przez API GreenHopper,
+  tokenem, bez przeglądarki). Workflow są wspólne ze źródłem, więc statusy mają te same
+  ID. Po zapisie skrypt odczytuje nową tablicę i porównuje każdą kolumnę z jej statusami
+  ze źródłem (w logu lista kolumn i statusów albo ostrzeżenie o różnicy).
+- **Dodatkowo (każde można wyłączyć):** komponenty, wersje, konteksty pól
+  niestandardowych ograniczone do źródła.
 - **Nie kopiuje:** zgłoszeń, torów (swimlanes), szybkich filtrów i wyglądu kart tablic.
 
 Zacznij od **Podglądu (dry-run)** - pokazuje schematy źródła, nazwy kopii, role,

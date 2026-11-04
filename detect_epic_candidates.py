@@ -117,7 +117,7 @@ def get_asana_top_level_tasks(project_gid):
     podzadanie może być członkiem projektu i wtedy widać je na liście).
     Bez filtra takie podzadanie z własnymi podzadaniami wyglądało na zadanie
     najwyższego poziomu i zostawało Epikiem — potwierdzony przypadek:
-    AKMPUN-127 (podzadanie AKMPUN-107) zamienione na Epik, przez co retrofit
+    PROJ11-127 (podzadanie PROJ11-107) zamienione na Epik, przez co retrofit
     najpierw zrobił z niego Task pod 107, a chwilę później Epik.
 
     Wykluczamy zadania, których rodzic JEST w tym samym projekcie (tamte

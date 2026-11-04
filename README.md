@@ -644,7 +644,7 @@ ręcznie w kolumnie `jira_key` dla danego wiersza, a skrypt go nie nadpisze.
 projekty Asany mogą mieć identyczną nazwę (np. dwa etapy tej samej umowy,
 "Miniaudit" i "Umsetzung", nazwane tak samo w arkuszu) — kluczowanie po
 nazwie błędnie przypisywało im TEN SAM klucz Jiry, mieszając ich zadania w
-jednym projekcie (kosztowna lekcja: przypadek `HBGRMU`, poprawione). Każdy
+jednym projekcie (kosztowna lekcja: przypadek `PROJ9`, poprawione). Każdy
 unikalny link Asany zawsze dostaje własny, osobny klucz.
 
 **Ważne ograniczenie Jiry, niezależne od klucza:** Jira wymaga też **unikalnych
@@ -932,7 +932,7 @@ zadań odhaczonych w Asanie (domyślnie `Fertig`):
 ```
 Sprawdzenie, czy plik jest wczytywany (pusty słownik = zła nazwa pliku):
 ```bash
-python3 -c "import asana_jira_sync as a; print(a.project_section_overrides('SWIDRORB'))"
+python3 -c "import asana_jira_sync as a; print(a.project_section_overrides('PROJ'))"
 ```
 Kierunek zwrotny (Jira → Asana) korzysta z tego samego pliku. Wyłączenie mapy
 projektu: zmień nazwę pliku (np. dopisz `.wylaczona`). Przed powrotem do głównej
@@ -1293,7 +1293,7 @@ wszystkie poziomy rekurencyjnie, każde zadanie raz, i porównuje po identyfikat
 ze stanu (zduplikowane tytuły nie mylą wyniku). Tylko odczyt:
 ```bash
 python compare_project_totals.py PROJ5
-python compare_project_totals.py PROJ5,AKMPUN --details --attachments   # z treścią i liczbą załączników
+python compare_project_totals.py PROJ5,PROJ11 --details --attachments   # z treścią i liczbą załączników
 python compare_project_totals.py --all --top-level                        # szybki przegląd całego arkusza (bez podzadań)
 python compare_project_totals.py --all --shard 1/3                        # pełne porównanie wszystkich, równolegle (osobny CSV na część)
 ```
@@ -1541,8 +1541,8 @@ korzysta z tego samego mechanizmu co audyt, łącznie z wymaganym polem "Type".
 ### 15b. Fałszywe Epiki
 
 Przed wprowadzeniem filtra z sekcji 11 podzadanie dodane dodatkowo do projektu
-w Asanie mogło zostać Epikiem (np. `AKMPUN-127`, w Asanie podzadanie
-`AKMPUN-107`). Procedura naprawy, w tej kolejności:
+w Asanie mogło zostać Epikiem (np. `PROJ11-127`, w Asanie podzadanie
+`PROJ11-107`). Procedura naprawy, w tej kolejności:
 
 1. **Audyt** (tylko odczyt, zapisuje `epic_candidates_audit.csv`):
    ```bash
@@ -2581,7 +2581,7 @@ statusy i osoby, historia uruchomień) opisuje [`migration_app/README.md`](migra
 | `add_group_to_projects.py` | dodaje grupę do jednej lub wielu ról w istniejących projektach |
 | `assign_category_to_projects.py` | przypisuje istniejącą kategorię projektu do podanych projektów |
 | `copy_permission_scheme.py` | kopiuje schemat uprawnień pod nową nazwą i opcjonalnie podpina go do projektu |
-| `empty_notification.py` | podpina wskazany schemat powiadomień do listy projektów (klucze w `RAW_PROJECT_KEYS`, dane logowania z `.env`) |
+| `empty_notification.py` | podpina wskazany schemat powiadomień do listy projektów (klucze w `RAW_PROJECT_KEYS`, dane logowania ze zmiennych środowiskowych `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`) |
 | `atlassian_suspend_to_deactivate.py` | dezaktywuje konta o statusie „suspended” w organizacji Atlassian (Lifecycle API) |
 | `backfill_jira_links.py` | jednorazowo uzupełnia kolumnę `jira_link` w arkuszu dla wierszy z `jira_key` |
 | `list_sheet_tabs.py` | wypisuje dokładne nazwy zakładek arkusza Google |

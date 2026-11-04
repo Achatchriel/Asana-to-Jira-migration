@@ -269,7 +269,7 @@ def validate_no_conflicting_jira_keys(sheet_rows: list[SheetRow]) -> None:
     """Sprawdza, czy w arkuszu nie ma DWÓCH różnych wierszy z TYM SAMYM
     jira_key, ale RÓŻNYMI asana_project_link - to prowadzi do wymieszania
     zadań z dwóch różnych, niepowiązanych projektów Asany w jednym
-    projekcie Jiry (potwierdzony ręcznie przypadek: HBGRMU - dwa etapy
+    projekcie Jiry (potwierdzony ręcznie przypadek: PROJ9 - dwa etapy
     tego samego klienta, "Miniaudit" i "Umsetzung", przez pomyłkę
     dostały ten sam klucz Jiry w arkuszu, zamiast osobnych kluczy).
 
@@ -609,7 +609,7 @@ def assign_jira_key(
     2. jeśli TEN SAM projekt Asany (po GID, NIE po nazwie!) jest już w cache —
        użyj zapamiętanego klucza (idempotentność). WAŻNE: kluczowanie po GID,
        nie po nazwie - dwa RÓŻNE projekty Asany mogą mieć IDENTYCZNĄ nazwę
-       (potwierdzony ręcznie przypadek: HBGRMU, dwa etapy "Miniaudit" i
+       (potwierdzony ręcznie przypadek: PROJ9, dwa etapy "Miniaudit" i
        "Umsetzung" tego samego klienta, ta sama nazwa w arkuszu, różne
        linki) - kluczowanie po nazwie błędnie przypisywało im TEN SAM
        klucz Jiry, mieszając ich zadania w jednym projekcie.

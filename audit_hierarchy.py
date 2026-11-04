@@ -35,7 +35,7 @@ Statusy:
 Zadania niezmigrowane w ogóle nie są tu poprawiane - to robi asana_jira_sync.py.
 
 Użycie:
-    python audit_hierarchy.py --project-keys PROJ4,AKMPUN        # raport
+    python audit_hierarchy.py --project-keys PROJ4,PROJ11        # raport
     python audit_hierarchy.py                                       # wszystkie projekty z arkusza
     python audit_hierarchy.py --shard 1/3                           # równolegle
     python audit_hierarchy.py --project-keys PROJ4 --apply --only-keys PROJ4-123   # test na jednym

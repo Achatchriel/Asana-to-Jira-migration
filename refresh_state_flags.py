@@ -23,9 +23,9 @@ czasu, zsynchronizowanych komentarzy/załączników ani wpisów deleted_in_jira.
 Typy pobierane hurtowo przez JQL (100 zgłoszeń na zapytanie), nie po jednym.
 
 Użycie:
-    python refresh_state_flags.py --project-keys AKMPUN,CMANBE
+    python refresh_state_flags.py --project-keys PROJ11,CMANBE
         (raport: co by się zmieniło - nic nie zapisuje)
-    python refresh_state_flags.py --project-keys AKMPUN,CMANBE --apply
+    python refresh_state_flags.py --project-keys PROJ11,CMANBE --apply
         (zapis; przed zapisem kopia zapasowa task_sync_state.json)
     python refresh_state_flags.py --apply
         (wszystkie projekty ze stanu - dłużej, ok. 1 zapytanie na 100 zadań)

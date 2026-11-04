@@ -9,7 +9,7 @@ tłumaczyło niespójne wyniki między skryptami, które inaczej wybierają
 
 Użycie:
     python check_duplicate_sheet_rows.py           # wszystkie klucze z duplikatami
-    python check_duplicate_sheet_rows.py HBGRMU    # tylko ten jeden klucz
+    python check_duplicate_sheet_rows.py PROJ9    # tylko ten jeden klucz
 """
 import sys
 from pathlib import Path

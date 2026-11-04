@@ -25,7 +25,7 @@ Tylko odczyt - niczego nie zmienia.
 
 Użycie:
     python compare_project_totals.py PROJ5
-    python compare_project_totals.py PROJ5,AKMPUN,CMANBE
+    python compare_project_totals.py PROJ5,PROJ11,CMANBE
     python compare_project_totals.py --all                   # wszystkie projekty z arkusza
     python compare_project_totals.py --all --shard 1/3       # równolegle (osobny CSV na shard)
     python compare_project_totals.py --all --attachments     # dodatkowo załączniki (tylko pliki,

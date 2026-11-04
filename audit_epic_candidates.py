@@ -6,7 +6,7 @@ Sprawdza każdego kandydata na Epik z epic_candidates.json i wykrywa
 FAŁSZYWYCH kandydatów: zadania, które w Asanie są PODZADANIAMI (mają
 rodzica w tym samym projekcie), a trafiły na listę tylko dlatego, że ktoś
 dodał je dodatkowo do projektu (błąd poprawiony w detect_epic_candidates.py
-— przypadek AKMPUN-127 pod AKMPUN-107).
+— przypadek PROJ11-127 pod PROJ11-107).
 
 Dla każdego fałszywego kandydata pokazuje, co się już stało w Jirze
 (obecny typ i rodzic), żeby było wiadomo, co trzeba naprawić.
@@ -15,7 +15,7 @@ Wynik: podsumowanie na ekranie + epic_candidates_audit.csv
 
 Użycie:
     python audit_epic_candidates.py
-    python audit_epic_candidates.py --project-keys AKMPUN,EFSSXEG
+    python audit_epic_candidates.py --project-keys PROJ11,EFSSXEG
 """
 import argparse
 import csv

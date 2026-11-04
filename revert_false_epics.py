@@ -64,7 +64,7 @@ Użycie:
         (naprawia NAPRAWIALNE_SAM_RODZIC i NAPRAWIALNE_TYP_I_RODZIC —
         bezpieczne, bez dzieci)
 
-    python revert_false_epics.py --csv epic_candidates_audit.csv --apply-cascade --only-keys AKMPUN-127
+    python revert_false_epics.py --csv epic_candidates_audit.csv --apply-cascade --only-keys PROJ11-127
         (TEST na jednym: naprawia WYMAGA_RECZNEJ_DECYZJI dla wskazanego
         klucza. Sprawdź ręcznie wynik w Jirze przed odpaleniem na reszcie.)
 

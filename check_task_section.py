@@ -12,8 +12,8 @@ zwraca nieaktualne dane (jakiś wewnętrzny cache/indeks po stronie Asany).
 Użycie:
     python check_task_section.py <task_gid> <project_gid>
 
-Przykład (na podstawie ostatniego logu):
-    python check_task_section.py 1216988554374932 1216984763687260
+Przykład:
+    python check_task_section.py 1234567890123456 9876543210987654
 """
 import os
 import sys

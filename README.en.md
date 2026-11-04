@@ -1,12 +1,126 @@
 # Migration and sync: Asana → Jira (driven by a Google Sheet)
 
+A toolkit for moving selected projects from Asana to Jira and keeping them in sync.
+**You work with it through the web panel** (`migration_app/`): a local app in the
+browser from which you run every migration step, check statuses and people, edit
+the configuration and browse reports. Under the hood the panel calls ordinary
+Python scripts, documented in detail in part II.
+
+**The Google Sheet is the source of truth** for which projects should exist in
+Jira: the tools create and sync only the projects in the sheet's rows.
+
+- **Part I — the panel:** installation, starting it, the panel views and everyday work.
+- **Part II — the scripts:** documentation of every tool, options, state files,
+  repair procedures and troubleshooting.
+
+> The panel and the scripts are in Polish. Script messages quoted in this README
+> are kept in the original wording (with a translation where helpful) so you can
+> search for them in the console output.
+
+---
+
+# Part I. The panel
+
+## Quick start
+
+**1. Installation.** The panel runs the scripts with the interpreter from `.venv` in
+the main folder, so the environment must have exactly this name:
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/playwright install chromium     # browser steps (board columns and statuses)
+```
+
+**2. Configuration.**
+```bash
+cp .env.example .env
+```
+Fill in at least access to Jira (URL, e-mail, [API token](https://id.atlassian.com/manage-profile/security/api-tokens)),
+Asana ([Personal Access Token](https://app.asana.com/0/my-apps), workspace GID) and
+the Google Sheet (service account key, sheet ID; the sheet must be **shared** with the
+service account's address as Editor). The remaining values can be filled in later in
+the panel (the **Konfiguracja** view). What every variable means: sections 2-6 in part II.
+
+**3. Start the panel.**
+```bash
+./migration_app/panel.sh                 # http://127.0.0.1:8765
+./migration_app/panel.sh --port 9000     # another port
+```
+Open the address in the browser. The server listens only on `127.0.0.1`; the panel
+itself needs no extra libraries (only the Python standard library). Stop: `Ctrl+C`
+in the terminal.
+
+## Panel views
+
+| View | What it is for |
+|---|---|
+| **Przegląd** (Overview) | the state of everything on one screen: gaps in `.env`, the age of the browser session (needed by the column and status steps), sync state, protected and excluded projects, recent runs |
+| **Projekty** (Projects) | projects from the sheet (without sheet access: from the state file and `project_key_cache.json`), number of entries in the state, section map, flags, the result of the last check. **Selected projects are filled in automatically into the "Projekty" fields of the tools** |
+| **Narzędzia** (Tools) | 67 scripts in seven groups (table below), each with a form for its options. The panel shows the exact command before starting |
+| **Statusy i osoby** (Statuses and people) | a read-only check: Asana sections → Jira statuses (the same rules as the sync: project map, template, main map, `__ukonczone__`), people → Jira accounts (whether they are in `user_map.json`, active, assignable in the project) and status/assignee differences in already migrated tasks. A missing section mapping can be saved right away to `section_status_map.<KEY>.json` |
+| **Uruchomienia** (Runs) | history with full live logs; an answer field for scripts that ask for confirmation; stopping a whole run (with its child processes) |
+| **Konfiguracja** (Configuration) | editing `.env` (secrets masked, empty field = unchanged), status maps, templates, `user_map.json`, `sync_exclude.txt`, `protected_projects.txt` and YAML schemas |
+| **Raporty** (Reports) | `logs/`, `pipeline_summaries/`, `repair_reports/` and CSV/JSON reports (CSV shown as a table) |
+
+## Tool groups
+
+| Group in the panel | What it contains | Described in part II |
+|---|---|---|
+| **Pipeline migracji** (migration pipeline) | the whole pipeline, creating projects, board columns and statuses, Epic candidates, sync in both directions, saving the browser session, project-level files from Asana | sections 8, 11-12 |
+| **Asana: statusy i przypisania** (statuses and assignments) | status and people check, project sections, Asana members, user map, token | section 11 ("Configuration before the first run") |
+| **Weryfikacja** (verification) | counting and comparing with Asana, duplicates, hierarchy audits, diagnostics | section 14 |
+| **Naprawy** (repairs) | restoring links, removing duplicates, "migriert zu Jira", false Epics, state flags, batch repairs | section 15 |
+| **Konfiguracja Jiry** (Jira configuration) | schema from YAML, workflow layout and updates, screens, field schemes, groups on transitions | section 17 |
+| **Kopia projektów** (project copy) | copying a project within the same instance and from another Jira instance | section 4a |
+| **Inne** (other) | Epics and Stories from the scope sheet and export back, "Analysis" issues for Stories, deactivating suspended Atlassian accounts | sections 20 and 22 |
+
+## How the panel protects data
+
+- **Preview by default.** Tools that have a preview mode start with `--dry-run`
+  checked; writing requires unchecking it or checking `--apply`.
+- **Confirmation before writing.** Every run that will change data in Jira, Asana or
+  in files is flagged by the panel and requires confirmation.
+- **File copies.** Before every save from the Konfiguracja view the panel copies the
+  file to `migration_app/backups/`.
+- **The same safeguards as the scripts:** `protected_projects.txt`, `sync_exclude.txt`,
+  project locks and the atomic state write work exactly as when running from the
+  terminal (section 11).
+
+## Everyday work in the panel
+
+**First migration of the projects in the sheet:**
+1. **Przegląd** — fix the gaps in `.env`; if the browser session is old or missing:
+   Narzędzia → *Pipeline* → save the browser session (you log in in the window that opens).
+2. **Statusy i osoby** — check that every Asana section has a Jira status and every
+   person a Jira account; add missing sections right away, missing people in
+   Konfiguracja (`user_map.json`) or with the user map tool.
+3. **Projekty** — select the projects to migrate (or nothing, then the tools take the
+   whole sheet).
+4. **Narzędzia → Pipeline** — run the whole pipeline in preview, review the log in
+   **Uruchomienia**, then run the same pipeline without the preview.
+5. **Weryfikacja** — compare the migrated projects with Asana.
+
+**Routine sync:** Narzędzia → *Pipeline* → Epic candidates, then the Asana → Jira sync
+(optionally Jira → Asana, never in parallel with the first one). The summary of every
+step is in the log and, if configured, on Slack. How to react to the summary: section 18.
+
+**Repairs and checks:** the *Weryfikacja* and *Naprawy* groups — always a report first,
+then the write. The order of steps when repairing projects synced with an older
+version is described in sections 15i and 18.
+
+---
+
+# Part II. The scripts — detailed documentation
+
+Every panel tool is an ordinary script in the main folder. The panel form matches its
+command-line options, so everything below can also be run from the terminal
+(`.venv/bin/python <script> ...` or after `source .venv/bin/activate`).
+
+## Toolkit overview
+
 A toolkit that moves selected projects from Asana to Jira and keeps them in
 sync. **The Google Sheet is the source of truth** for which projects should
 exist in Jira: the scripts create projects only for rows in the sheet.
-
-> The scripts print their messages in Polish. Messages quoted in this README
-> are kept in the original wording (with a translation where helpful) so you can
-> search for them in the console output.
 
 What the toolkit does, step by step:
 
@@ -38,14 +152,13 @@ The toolkit also includes:
 - **Jira configuration from a YAML file** (`build_jira_schema.py`, section 17) and
   **Epics and Stories from a scope sheet** (`create_epics_stories_from_sheet.py`,
   section 20); both tools are independent of the Asana migration,
-- **a web panel** `migration_app/` — a local app that runs the scripts from the
-  browser and shows project state and live logs (section 21).
+- **the web panel** `migration_app/` (part I; panel files: section 21).
 
 Every sheet row must have an `asana_project_link`. A row without a link (or with
 a link the token cannot access) is **skipped entirely**: the project is not
 created in Jira. Name-based matching has been deliberately disabled (section 7).
 
-**Contents:** 1-3 installation and configuration · 4-4a template project and copying
+**Contents of part II:** 1-3 installation and configuration · 4-4a template project and copying
 projects · 5-6 roles · 7 sheet format · 8-10 creating projects · 11 task sync
 (including the Epic hierarchy) · 11a the whole pipeline and parallelism · 11b statuses
 in columns · 12 reverse direction · 13 logs and Slack · 14 verification and cleanup ·
@@ -53,14 +166,13 @@ in columns · 12 reverse direction · 13 logs and Slack · 14 verification and c
 17 Jira configuration from YAML (fields, statuses, workflows, screens, schemes) ·
 18 working procedure (repair, routine, periodic) · 19 troubleshooting
 (19a sync and repairs, 19b Jira configuration in practice) ·
-20 Epics and Stories from the "Zakres MVP" (MVP scope) sheet · 21 web panel ·
+20 Epics and Stories from the "Zakres MVP" (MVP scope) sheet · 21 panel files ·
 22 other helper scripts
 
 ## 1. Installation
 
-```bash
-pip install -r requirements.txt
-```
+As in part I ("Quick start"): the `.venv` environment and `requirements.txt`.
+The browser scripts also need `playwright install chromium`.
 
 ## 2. Configuration
 
@@ -2482,18 +2594,28 @@ python export_stories_to_sheet.py --project PROJ --out stories_PROJ.xlsx
 python export_stories_to_sheet.py --project PROJ --jql 'project = PROJ AND component = MVP'
 ```
 
-## 21. Web panel (`migration_app/`)
+## 21. Panel files (`migration_app/`)
 
-A local app for running the scripts from the browser. It changes nothing in them: every tool
-starts the script as a subprocess, shows the command before starting and a live log. It runs on the
-Python standard library and listens only on `127.0.0.1`.
+Using the panel is described in part I. Files:
 
-```bash
-./migration_app/panel.sh
-```
+| Path | What it is |
+|---|---|
+| `panel.sh` | starts the panel (`--port` changes the port, default 8765) |
+| `server.py` | HTTP server and API |
+| `catalog.py` | tool catalogue: groups, form parameters, when a tool writes |
+| `runner.py` | subprocesses, logs, input for script prompts, stopping |
+| `asana_check.py` | status and assignment check (can also be run by hand) |
+| `sheet_projects.py` | reads projects from the sheet (JSON) |
+| `static/` | the user interface (HTML, JS, CSS) |
+| `runs/` | run history (metadata and log) — not in the repository |
+| `checks/` | results of status and people checks — not in the repository |
+| `backups/` | copies of files from before every save in the panel — not in the repository |
 
-Then open http://127.0.0.1:8765. The views (overview, projects, tools, statuses and people, run
-history) are described in [`migration_app/README.md`](migration_app/README.md) (in Polish).
+**A new script in the panel** is added with one entry in the `TOOLS` list in
+`catalog.py`: the group, the script path, the form parameters (kinds described at the
+top of the file: `bool`, `str`/`int`, `keys`, `choice`, `pos`, `repeat`) and the
+`writes` field (`never`, `always`, `unless:--dry-run`, `with:--apply`), which decides
+whether the panel asks for confirmation.
 
 ## 22. Other helper scripts
 

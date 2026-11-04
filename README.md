@@ -1,5 +1,122 @@
 # Migracja i synchronizacja: Asana → Jira (sterowana arkuszem Google)
 
+Pakiet narzędzi do przeniesienia wybranych projektów z Asany do Jiry i utrzymania
+ich w synchronizacji. **Pracuje się w nim przez panel webowy** (`migration_app/`):
+lokalną aplikację w przeglądarce, z której uruchamiasz wszystkie kroki migracji,
+sprawdzasz statusy i osoby, edytujesz konfigurację i przeglądasz raporty. Pod
+spodem panel wywołuje zwykłe skrypty Pythona, opisane szczegółowo w części II.
+
+**Arkusz Google jest źródłem prawdy** o tym, które projekty mają powstać w Jirze:
+narzędzia tworzą i synchronizują tylko projekty z wierszy arkusza.
+
+- **Część I — panel:** instalacja, uruchomienie, widoki panelu i typowa praca.
+- **Część II — skrypty:** dokumentacja każdego narzędzia, opcje, pliki stanu,
+  procedury naprawcze i rozwiązywanie problemów.
+
+---
+
+# Część I. Panel
+
+## Szybki start
+
+**1. Instalacja.** Panel uruchamia skrypty interpreterem z `.venv` w głównym
+folderze, więc środowisko musi się nazywać właśnie tak:
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/playwright install chromium     # kroki przeglądarkowe (kolumny i statusy tablic)
+```
+
+**2. Konfiguracja.**
+```bash
+cp .env.example .env
+```
+Uzupełnij co najmniej dostęp do Jiry (adres, e-mail, [token API](https://id.atlassian.com/manage-profile/security/api-tokens)),
+Asany ([Personal Access Token](https://app.asana.com/0/my-apps), GID workspace'u)
+i arkusza Google (klucz konta serwisowego, ID arkusza; arkusz trzeba
+**udostępnić** adresowi konta serwisowego jako Edytor). Dalsze wartości możesz
+uzupełniać już w panelu (widok **Konfiguracja**). Znaczenie wszystkich zmiennych:
+sekcje 2-6 w części II.
+
+**3. Start panelu.**
+```bash
+./migration_app/panel.sh                 # http://127.0.0.1:8765
+./migration_app/panel.sh --port 9000     # inny port
+```
+Otwórz adres w przeglądarce. Serwer nasłuchuje wyłącznie na `127.0.0.1`, sam
+panel nie potrzebuje żadnych dodatkowych bibliotek (tylko biblioteka standardowa
+Pythona). Zatrzymanie: `Ctrl+C` w terminalu.
+
+## Widoki panelu
+
+| Widok | Do czego służy |
+|---|---|
+| **Przegląd** | stan całości na jednym ekranie: braki w `.env`, wiek sesji przeglądarki (potrzebnej w krokach kolumn i statusów), stan synchronizacji, projekty chronione i wyłączone, ostatnie uruchomienia |
+| **Projekty** | projekty z arkusza (bez dostępu do arkusza: z pliku stanu i `project_key_cache.json`), liczba wpisów w stanie, mapa sekcji, flagi, wynik ostatniego sprawdzenia. **Zaznaczone projekty trafiają automatycznie do pól „Projekty” w narzędziach** |
+| **Narzędzia** | 67 skryptów w siedmiu grupach (tabela niżej), każdy z formularzem opcji. Panel pokazuje dokładne polecenie przed startem |
+| **Statusy i osoby** | sprawdzenie bez zapisu: sekcje Asany → statusy Jiry (te same reguły co synchronizacja: mapa projektu, szablon, mapa główna, `__ukonczone__`), osoby → konta Jiry (czy są w `user_map.json`, czy aktywne, czy można je przypisać w projekcie) oraz różnice statusu i przypisanego w już zmigrowanych zadaniach. Brakujące mapowanie sekcji zapiszesz od razu do `section_status_map.<KLUCZ>.json` |
+| **Uruchomienia** | historia z pełnymi logami na żywo; pole odpowiedzi dla skryptów, które pytają o potwierdzenie; przerwanie całego uruchomienia (z procesami potomnymi) |
+| **Konfiguracja** | edycja `.env` (sekrety zamaskowane, puste pole = bez zmian), map statusów, szablonów, `user_map.json`, `sync_exclude.txt`, `protected_projects.txt` i schematów YAML |
+| **Raporty** | `logs/`, `pipeline_summaries/`, `repair_reports/` i raporty CSV/JSON (CSV wyświetlany jako tabela) |
+
+## Grupy narzędzi
+
+| Grupa w panelu | Co zawiera | Opis w części II |
+|---|---|---|
+| **Pipeline migracji** | cały pipeline, tworzenie projektów, kolumny i statusy tablic, kandydaci na Epiki, synchronizacja w obie strony, zapis sesji przeglądarki, pliki projektu z Asany | sekcje 8, 11-12 |
+| **Asana: statusy i przypisania** | sprawdzenie statusów i osób, sekcje projektów, członkowie Asany, mapa użytkowników, token | sekcja 11 („Konfiguracja przed pierwszym uruchomieniem”) |
+| **Weryfikacja** | liczenie i porównanie z Asaną, duplikaty, audyty hierarchii, diagnostyka | sekcja 14 |
+| **Naprawy** | odtwarzanie powiązań, usuwanie duplikatów, „migriert zu Jira”, fałszywe Epiki, flagi stanu, naprawy partiami | sekcja 15 |
+| **Konfiguracja Jiry** | schemat z YAML, układ i aktualizacja workflow, ekrany, field schemes, grupy na przejściach | sekcja 17 |
+| **Kopia projektów** | kopia projektu w tej samej instancji i z innej instancji Jiry | sekcja 4a |
+| **Inne** | Epiki i Story z arkusza zakresu i eksport z powrotem, zadania „Analysis” dla Story, dezaktywacja zawieszonych kont Atlassian | sekcje 20 i 22 |
+
+## Jak panel chroni dane
+
+- **Podgląd domyślnie.** Narzędzia, które mają tryb podglądu, startują z
+  zaznaczonym `--dry-run`; zapis wymaga jego odznaczenia albo zaznaczenia `--apply`.
+- **Potwierdzenie przed zapisem.** Każde uruchomienie, które zmieni dane w Jirze,
+  Asanie albo w plikach, panel oznacza i wymaga potwierdzenia.
+- **Kopie plików.** Przed każdym zapisem z widoku Konfiguracja panel kopiuje
+  plik do `migration_app/backups/`.
+- **Te same zabezpieczenia co skrypty:** `protected_projects.txt`,
+  `sync_exclude.txt`, blokady projektów i atomowy zapis stanu działają tak samo
+  jak przy uruchomieniu z terminala (sekcja 11).
+
+## Typowa praca w panelu
+
+**Pierwsza migracja projektów z arkusza:**
+1. **Przegląd** — usuń braki w `.env`; jeśli sesja przeglądarki jest stara albo
+   jej brak: Narzędzia → *Pipeline* → zapis sesji przeglądarki (zalogujesz się
+   w otwartym oknie).
+2. **Statusy i osoby** — sprawdź, czy wszystkie sekcje Asany mają status w Jirze,
+   a osoby konta w Jirze; brakujące sekcje dopisz od razu, brakujące osoby
+   uzupełnij w Konfiguracji (`user_map.json`) albo narzędziem mapy użytkowników.
+3. **Projekty** — zaznacz projekty do migracji (albo nic, wtedy narzędzia biorą
+   cały arkusz).
+4. **Narzędzia → Pipeline** — uruchom cały pipeline z podglądem, przejrzyj log
+   w **Uruchomieniach**, potem ten sam pipeline bez podglądu.
+5. **Weryfikacja** — porównanie z Asaną dla zmigrowanych projektów.
+
+**Rutynowa synchronizacja:** Narzędzia → *Pipeline* → kandydaci na Epiki, potem
+synchronizacja Asana → Jira (opcjonalnie Jira → Asana, nigdy równolegle z
+pierwszą). Podsumowanie każdego kroku jest w logu i, jeśli skonfigurowany, na
+Slacku. Jak reagować na podsumowanie: sekcja 18.
+
+**Naprawy i kontrola:** grupy *Weryfikacja* i *Naprawy* — zawsze najpierw raport,
+potem zapis. Kolejność kroków przy naprawie projektów zsynchronizowanych starszą
+wersją opisują sekcje 15i i 18.
+
+---
+
+# Część II. Skrypty — dokumentacja szczegółowa
+
+Każde narzędzie panelu to zwykły skrypt w głównym folderze. Formularz panelu
+odpowiada jego opcjom wiersza poleceń, więc wszystko poniżej da się uruchomić
+także z terminala (`.venv/bin/python <skrypt> ...` albo po `source .venv/bin/activate`).
+
+## Przegląd pakietu
+
 Pakiet skryptów, który przenosi wybrane projekty z Asany do Jiry i utrzymuje je
 w synchronizacji. **Arkusz Google jest źródłem prawdy** o tym, które projekty
 mają powstać w Jirze: skrypty tworzą projekty tylko dla wierszy z arkusza.
@@ -34,14 +151,13 @@ Dodatkowo pakiet zawiera:
 - **konfigurację Jiry z pliku YAML** (`build_jira_schema.py`, sekcja 17) oraz
   **Epiki i Story z arkusza zakresu** (`create_epics_stories_from_sheet.py`,
   sekcja 20); oba narzędzia są niezależne od migracji z Asany,
-- **panel webowy** `migration_app/` — lokalna aplikacja, która uruchamia skrypty
-  z przeglądarki, pokazuje stan projektów i logi na żywo (sekcja 21).
+- **panel webowy** `migration_app/` (część I; pliki panelu: sekcja 21).
 
 Każdy wiersz arkusza musi mieć `asana_project_link`. Wiersz bez linku (albo z
 linkiem, do którego token nie ma dostępu) jest **pomijany w całości**: projekt
 nie powstaje w Jirze. Dopasowanie po nazwie zostało celowo wyłączone (sekcja 7).
 
-**Spis treści:** 1-3 instalacja i konfiguracja · 4-4a projekt wzorcowy i kopiowanie
+**Spis treści części II:** 1-3 instalacja i konfiguracja · 4-4a projekt wzorcowy i kopiowanie
 projektów · 5-6 role · 7 format arkusza · 8-10 tworzenie projektów · 11 synchronizacja
 zadań (w tym hierarchia Epików) · 11a cały pipeline i równoległość · 11b statusy
 w kolumnach · 12 kierunek zwrotny · 13 logi i Slack · 14 weryfikacja i sprzątanie ·
@@ -49,14 +165,13 @@ w kolumnach · 12 kierunek zwrotny · 13 logi i Slack · 14 weryfikacja i sprzą
 17 konfiguracja Jiry z YAML (pola, statusy, workflow, ekrany, schematy) ·
 18 procedura pracy (naprawa, rutynowo, okresowo) · 19 rozwiązywanie problemów
 (19a synchronizacja i naprawy, 19b konfiguracja Jiry w praktyce) ·
-20 Epiki i Story z arkusza "Zakres MVP" · 21 panel webowy ·
+20 Epiki i Story z arkusza "Zakres MVP" · 21 pliki panelu ·
 22 pozostałe skrypty pomocnicze
 
 ## 1. Instalacja
 
-```bash
-pip install -r requirements.txt
-```
+Jak w części I („Szybki start”): środowisko `.venv` i `requirements.txt`.
+Skrypty przeglądarkowe wymagają też `playwright install chromium`.
 
 ## 2. Konfiguracja
 
@@ -2559,19 +2674,28 @@ python export_stories_to_sheet.py --project PROJ --out stories_PROJ.xlsx
 python export_stories_to_sheet.py --project PROJ --jql 'project = PROJ AND component = MVP'
 ```
 
-## 21. Panel webowy (`migration_app/`)
+## 21. Pliki panelu (`migration_app/`)
 
-Lokalna aplikacja do uruchamiania skryptów z przeglądarki. Niczego w nich nie
-zmienia: każde narzędzie odpala skrypt jako podproces, pokazuje polecenie przed
-startem i log na żywo. Działa na bibliotece standardowej Pythona i nasłuchuje
-tylko na `127.0.0.1`.
+Obsługę panelu opisuje część I. Pliki:
 
-```bash
-./migration_app/panel.sh
-```
+| Ścieżka | Co to |
+|---|---|
+| `panel.sh` | start panelu (`--port` zmienia port, domyślnie 8765) |
+| `server.py` | serwer HTTP i API |
+| `catalog.py` | katalog narzędzi: grupy, parametry formularzy, kiedy narzędzie zapisuje |
+| `runner.py` | podprocesy, logi, wejście dla pytań skryptów, przerywanie |
+| `asana_check.py` | sprawdzenie statusów i przypisań (można też uruchomić ręcznie) |
+| `sheet_projects.py` | odczyt projektów z arkusza (JSON) |
+| `static/` | interfejs (HTML, JS, CSS) |
+| `runs/` | historia uruchomień (metadane i log) — nie jest w repozytorium |
+| `checks/` | wyniki sprawdzeń statusów i osób — nie jest w repozytorium |
+| `backups/` | kopie plików sprzed każdego zapisu z panelu — nie jest w repozytorium |
 
-Potem otwórz http://127.0.0.1:8765. Widoki (przegląd, projekty, narzędzia,
-statusy i osoby, historia uruchomień) opisuje [`migration_app/README.md`](migration_app/README.md).
+**Nowy skrypt w panelu** dodaje się jednym wpisem w liście `TOOLS` w
+`catalog.py`: grupa, ścieżka skryptu, parametry formularza (rodzaje opisane na
+początku pliku: `bool`, `str`/`int`, `keys`, `choice`, `pos`, `repeat`) i pole
+`writes` (`never`, `always`, `unless:--dry-run`, `with:--apply`), od którego
+zależy, czy panel poprosi o potwierdzenie.
 
 ## 22. Pozostałe skrypty pomocnicze
 

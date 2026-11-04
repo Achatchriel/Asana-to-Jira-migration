@@ -1109,6 +1109,64 @@ VIEWS.people = async main => {
   drawMapping();
 };
 
+// ------------------------------------------------------------------ Kopia projektu
+
+const SCHEME_LABELS = ["Permission Scheme", "Notification Scheme", "Issue Security Scheme", "Workflow Scheme",
+  "Issue Type Scheme", "Issue Type Screen Scheme", "Field Configuration Scheme", "Priority Scheme"];
+
+VIEWS.copy = async main => {
+  await ensureCatalog();
+  const v = { "--name-base": "key" };
+  const input = (name, label, opts = {}) => h("div", { class: "field" }, h("span", {}, label, opts.required ? " *" : ""),
+    h("input", { type: "text", placeholder: opts.placeholder || "", oninput: e => { v[name] = e.target.value.trim(); if (opts.upper) { e.target.value = e.target.value.toUpperCase(); v[name] = e.target.value.trim(); } draw(); } }),
+    opts.help ? h("small", { class: "muted" }, opts.help) : null);
+  const check = (name, label) => h("label", { class: "check" }, h("input", { type: "checkbox", onchange: e => { v[name] = e.target.checked; } }), label);
+  const names = h("ul", { class: "mono", style: "margin:6px 0 0;padding-left:18px;font-size:12.5px" });
+  const draw = () => {
+    const base = v["--name-base"] === "name" ? (v["--target-name"] || "Nazwa projektu") : (v["--target-key"] || "KLUCZ");
+    names.replaceChildren(...SCHEME_LABELS.map(l => h("li", {}, `${base} ${l}`)));
+  };
+  const logBox = h("div", { style: "margin-top:12px" });
+  const run = dry => async () => {
+    for (const [k, l] of [["--source", "projekt źródłowy"], ["--target-key", "klucz nowego projektu"], ["--target-name", "nazwę nowego projektu"]])
+      if (!v[k]) return toast(`Podaj ${l}.`, true);
+    await runInline(logBox, "clone_project", { ...v, "--source": (v["--source"] || "").toUpperCase(), "--dry-run": dry });
+  };
+  draw();
+  main.replaceChildren(
+    h("div", { class: "page-head" }, h("div", {}, h("h1", {}, "Kopia projektu"),
+      h("small", {}, "Nowy projekt z konfiguracją projektu źródłowego - każdy schemat dostaje własną kopię z nazwą nowego projektu. Nie korzysta z projektu wzorcowego ani ustawień z .env (poza dostępem do Jiry)."))),
+    h("div", { class: "card" },
+      h("h2", {}, "Projekty"),
+      h("div", { class: "form-grid" },
+        input("--source", "Projekt źródłowy (klucz)", { required: true, upper: true, placeholder: "ABC" }),
+        input("--target-key", "Klucz nowego projektu", { required: true, upper: true, placeholder: "XYZ", help: "2-10 znaków: wielkie litery i cyfry, na początku litera." }),
+        input("--target-name", "Nazwa nowego projektu", { required: true }),
+        input("--lead-account-id", "Lead (accountId)", { help: "Puste = lead projektu źródłowego." }),
+        input("--description", "Opis", { help: "Puste = opis projektu źródłowego." }))),
+    h("div", { class: "card" },
+      h("h2", {}, "Nazwy kopii schematów"),
+      h("div", { class: "row" },
+        h("label", { class: "check" }, h("input", { type: "radio", name: "nb", checked: true, onchange: () => { v["--name-base"] = "key"; draw(); } }), "od klucza nowego projektu"),
+        h("label", { class: "check" }, h("input", { type: "radio", name: "nb", onchange: () => { v["--name-base"] = "name"; draw(); } }), "od nazwy nowego projektu")),
+      names,
+      h("p", { class: "muted", style: "margin-top:8px" }, "Kopiowane są tylko schematy, których źródło używa (np. bez schematu bezpieczeństwa nie powstaje jego kopia). Schemat o takiej nazwie, który już istnieje, jest używany ponownie. Same workflow, ekrany i konfiguracje pól pozostają wspólne ze źródłem - wskazują na nie nowe schematy.")),
+    h("div", { class: "card" },
+      h("h2", {}, "Co jeszcze skopiować"),
+      h("p", { class: "muted" }, "Domyślnie wszystko: ustawienia projektu (kategoria, URL, domyślne przypisanie), komponenty, wersje, członków ról, konteksty pól niestandardowych ograniczone do źródła oraz tablice z filtrami i kolumnami (bez przeglądarki)."),
+      h("div", { class: "form-grid" },
+        check("--no-roles", "bez członków ról"), check("--no-versions", "bez wersji"), check("--no-components", "bez komponentów"),
+        check("--no-field-contexts", "bez kontekstów pól (szybciej - pomija przegląd wszystkich pól)"), check("--no-boards", "bez tablic"),
+        check("--existing-target", "projekt docelowy już istnieje (dokończenie przerwanej kopii)")),
+      h("div", { style: "margin-top:10px" }, input("--board-ids", "ID tablic źródła", { help: "Puste = tablice przypisane do projektu źródłowego." }))),
+    h("div", { class: "card" },
+      h("div", { class: "row" }, h("h2", { style: "margin:0" }, "Uruchomienie"), h("span", { class: "spacer" }),
+        h("button", { onclick: run(true) }, "Podgląd (dry-run)"),
+        h("button", { class: "primary", onclick: run(false) }, "Utwórz kopię")),
+      h("p", { class: "muted", style: "margin:8px 0 0" }, "Zacznij od podglądu - pokazuje schematy źródła, nazwy kopii, role, komponenty i tablice. „Utwórz kopię” poprosi o potwierdzenie."),
+      logBox));
+};
+
 // ------------------------------------------------------------------ Konfiguracja
 
 VIEWS.config = async (main, tab, ...rest) => {

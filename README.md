@@ -89,6 +89,38 @@ Wpisy wskazujące status spoza wzorca są oznaczane, a krok 5 jest gotowy dopier
 Mapy pojedynczych projektów (`section_status_map.<KLUCZ>.json`) edytujesz w widoku
 **Statusy i osoby** albo w **Konfiguracji**.
 
+## Kopia projektu
+
+Osobna karta do skopiowania istniejącego projektu (company-managed) jako nowego.
+Działa niezależnie od migracji: skrypt `clone_project.py` nie importuje innych
+skryptów, nie korzysta z projektu wzorcowego i z `.env` czyta tylko dostęp do Jiry -
+**wszystko bierze z projektu źródłowego**.
+
+- **Schematy:** każdy schemat, którego używa źródło, dostaje kopię z nazwą opartą na
+  nowym projekcie - od klucza albo od nazwy (wybór w karcie, z podglądem nazw), np.
+  `XYZ Permission Scheme`, `XYZ Notification Scheme`, `XYZ Issue Security Scheme`,
+  `XYZ Workflow Scheme`, `XYZ Issue Type Scheme`, `XYZ Issue Type Screen Scheme`,
+  `XYZ Field Configuration Scheme`, `XYZ Priority Scheme`. Schemat o takiej nazwie, który
+  już istnieje (np. po przerwanym uruchomieniu), jest używany ponownie. Same workflow,
+  ekrany i konfiguracje pól pozostają wspólne ze źródłem (wskazują na nie nowe schematy).
+- **Projekt:** typ, lead (albo podany), opis, URL, kategoria i domyślne przypisanie jak
+  w źródle; projekt powstaje od razu z kopiami schematów.
+- **Dodatkowo (każde można wyłączyć):** komponenty, wersje, członkowie ról, konteksty
+  pól niestandardowych ograniczone do źródła, tablice - filtr z podmienionym projektem
+  i tymi samymi udostępnieniami, tablica oraz kolumny z przypisaniem statusów (przez
+  API, bez przeglądarki).
+- **Nie kopiuje:** zgłoszeń, torów (swimlanes), szybkich filtrów i wyglądu kart tablic.
+
+Zacznij od **Podglądu (dry-run)** - pokazuje schematy źródła, nazwy kopii, role,
+komponenty i tablice. „Utwórz kopię” prosi o potwierdzenie. Po przerwaniu uruchom
+ponownie z „projekt docelowy już istnieje”. Z terminala:
+```bash
+.venv/bin/python clone_project.py --source ABC --target-key XYZ --target-name "Nowy projekt" --dry-run
+.venv/bin/python clone_project.py --source ABC --target-key XYZ --target-name "Nowy projekt" --name-base name
+```
+Starszy `copy_project.py` (sekcja 4a) podpina do nowego projektu **te same** schematy co
+źródło i konfiguruje kolumny przez przeglądarkę.
+
 ## Widoki panelu
 
 | Widok | Do czego służy |
@@ -99,6 +131,7 @@ Mapy pojedynczych projektów (`section_status_map.<KLUCZ>.json`) edytujesz w wid
 | **Narzędzia** | 69 skryptów w siedmiu grupach (tabela niżej), każdy z formularzem opcji. Panel pokazuje dokładne polecenie przed startem |
 | **Statusy i osoby** | sprawdzenie bez zapisu, per projekt: sekcje Asany → statusy Jiry (te same reguły co synchronizacja: mapa projektu, szablon, mapa główna, `__ukonczone__`), osoby → konta Jiry (czy są w `user_map.json`, czy aktywne, czy można je przypisać - przy braku uprawnienia panel pokazuje schemat uprawnień i role, które je dają) oraz różnice statusu i przypisanego w już zmigrowanych zadaniach. Brakujące mapowanie sekcji zapiszesz od razu do `section_status_map.<KLUCZ>.json`, osobę oznaczysz „nie w Jirze” |
 | **Mapowanie osób** / **Mapowanie statusów** | jak wyżej |
+| **Kopia projektu** | nowy projekt z konfiguracją istniejącego, z własnymi kopiami schematów (niżej) |
 | **Uruchomienia** | historia z pełnymi logami na żywo; pole odpowiedzi dla skryptów, które pytają o potwierdzenie; przerwanie całego uruchomienia (z procesami potomnymi) |
 | **Konfiguracja** | edycja `.env` (sekrety zamaskowane, puste pole = bez zmian), map statusów, szablonów, `user_map.json`, `asana_users_not_in_jira.json`, `sync_exclude.txt`, `protected_projects.txt` i schematów YAML; pliki, których jeszcze nie ma, powstają przy pierwszym zapisie |
 | **Raporty** | `logs/`, `pipeline_summaries/`, `repair_reports/` i raporty CSV/JSON (CSV wyświetlany jako tabela) |
@@ -298,6 +331,11 @@ wzorcowej — wystarczy przeciągnąć statusy w te same miejsca na nowej tablic
 projektów zobacz też `browser_automation/` — automatyzację Playwright do tego kroku.
 
 ## 4a. Pełna kopia JEDNEGO projektu, WŁĄCZNIE z tablicami i kolumnami (`copy_project.py`)
+
+> Do kopii projektu z **własnymi** schematami (nazwanymi od nowego projektu), bez
+> przeglądarki i bez innych skryptów, służy `clone_project.py` - karta „Kopia projektu”
+> w panelu (część I). Ten rozdział opisuje starszy `copy_project.py`, który podpina te
+> same schematy co źródło.
 
 Osobny skrypt do innego scenariusza niż główny `jira_sync.py` (masowe tworzenie
 z arkusza) — kopiuje **jeden konkretny, istniejący** projekt Jiry w całości,
@@ -1222,6 +1260,7 @@ DEBUG_SYNC=1 python asana_jira_sync.py --limit 1 --project-keys KLUCZ
 | `create_epics_stories_from_sheet.py`, `export_stories_to_sheet.py` | Epiki i Story z arkusza zakresu i eksport z powrotem (sekcja 20) |
 | `section_status_map.<KLUCZ>.json` | mapa statusów dla jednego projektu (sekcja 11) |
 | `notify.py` | log do pliku + opcjonalne powiadomienie na Slack |
+| `clone_project.py` | samodzielna kopia projektu z kopiami schematów nazwanymi od nowego projektu (część I, „Kopia projektu”) |
 | `task_sync_state.json` | **automatycznie tworzony** stan synchronizacji (obu kierunków) — nie kasować |
 | `workflow_graph_cache.json` | **automatycznie tworzony** cache mapy przejść workflow — bezpieczny do skasowania |
 

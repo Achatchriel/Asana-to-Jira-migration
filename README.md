@@ -100,7 +100,10 @@ skryptów, nie korzysta z projektu wzorcowego i z `.env` czyta tylko dostęp do 
   nowym projekcie - od klucza albo od nazwy (wybór w karcie, z podglądem nazw), np.
   `XYZ Permission Scheme`, `XYZ Notification Scheme`, `XYZ Issue Security Scheme`,
   `XYZ Workflow Scheme`, `XYZ Issue Type Scheme`, `XYZ Issue Type Screen Scheme`,
-  `XYZ Field Configuration Scheme`, `XYZ Priority Scheme`. Schemat o takiej nazwie, który
+  `XYZ Field Scheme` (w instancjach sprzed migracji na Field Schemes: `XYZ Field
+  Configuration Scheme`), `XYZ Priority Scheme`. Uprawnień, których Jira nie przyjmuje
+  przy tworzeniu schematu (np. Product Discovery, `COPY_PROJECT`), nie da się skopiować -
+  log je wymienia. Schemat o takiej nazwie, który
   już istnieje (np. po przerwanym uruchomieniu), jest używany ponownie. Same workflow,
   ekrany i konfiguracje pól pozostają wspólne ze źródłem (wskazują na nie nowe schematy).
 - **Projekt:** typ, lead (albo podany), opis, URL, kategoria i domyślne przypisanie jak

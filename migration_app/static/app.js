@@ -1195,7 +1195,7 @@ function rolesEditor(sourceKey) {
 }
 
 const SCHEME_LABELS = ["Permission Scheme", "Notification Scheme", "Issue Security Scheme", "Workflow Scheme",
-  "Issue Type Scheme", "Issue Type Screen Scheme", "Field Configuration Scheme", "Priority Scheme"];
+  "Issue Type Scheme", "Issue Type Screen Scheme", "Field Scheme", "Priority Scheme"];
 
 VIEWS.copy = async main => {
   await ensureCatalog();
@@ -1246,7 +1246,7 @@ VIEWS.copy = async main => {
         h("label", { class: "check" }, h("input", { type: "radio", name: "nb", checked: true, onchange: () => { v["--name-base"] = "key"; draw(); } }), "od klucza nowego projektu"),
         h("label", { class: "check" }, h("input", { type: "radio", name: "nb", onchange: () => { v["--name-base"] = "name"; draw(); } }), "od nazwy nowego projektu")),
       names,
-      h("p", { class: "muted", style: "margin-top:8px" }, "Kopiowane są tylko schematy, których źródło używa (np. bez schematu bezpieczeństwa nie powstaje jego kopia). Schemat o takiej nazwie, który już istnieje, jest używany ponownie. Same workflow, ekrany i konfiguracje pól pozostają wspólne ze źródłem - wskazują na nie nowe schematy.")),
+      h("p", { class: "muted", style: "margin-top:8px" }, "Kopiowane są tylko schematy, których źródło używa (np. bez schematu bezpieczeństwa nie powstaje jego kopia). W instancjach sprzed migracji na Field Schemes zamiast „Field Scheme” powstaje „Field Configuration Scheme”. Uprawnień, których Jira nie przyjmuje przy tworzeniu schematu (np. Product Discovery, COPY_PROJECT), nie da się skopiować - log je wymienia. Schemat o takiej nazwie, który już istnieje, jest używany ponownie. Same workflow, ekrany i konfiguracje pól pozostają wspólne ze źródłem - wskazują na nie nowe schematy.")),
     roles.card,
     h("div", { class: "card" },
       h("h2", {}, "Co jeszcze skopiować"),

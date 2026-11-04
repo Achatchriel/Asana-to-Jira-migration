@@ -10,7 +10,9 @@ Co robi, w kolejności:
   1. Kopiuje KAŻDY schemat źródła pod nazwą opartą na nowym projekcie,
      np. "XYZ Permission Scheme" (--name-base: klucz albo nazwa nowego projektu):
        uprawnienia, powiadomienia, bezpieczeństwo zgłoszeń, workflow, typy zadań,
-       ekrany typów zadań, konfiguracja pól, priorytety.
+       ekrany typów zadań, field scheme (albo schemat konfiguracji pól w instancjach
+       sprzed Field Schemes), priorytety. Uprawnień, których Jira nie przyjmuje przy
+       tworzeniu schematu (np. Product Discovery, COPY_PROJECT), nie da się skopiować.
      Schemat o takiej nazwie, który już istnieje (np. z przerwanego uruchomienia),
      jest używany ponownie zamiast tworzenia drugiego.
   2. Tworzy projekt (typ, lead, opis, URL, kategoria, domyślne przypisanie jak w
@@ -59,6 +61,7 @@ LABELS = {
     "issuetype": "Issue Type Scheme",
     "screen": "Issue Type Screen Scheme",
     "fieldconfig": "Field Configuration Scheme",
+    "fieldscheme": "Field Scheme",
     "priority": "Priority Scheme",
 }
 ADDON_ROLE = "atlassian-addons-project-access"  # zarządzana przez Jirę (aplikacje)
@@ -130,7 +133,15 @@ def source_schemes(src_key: str, src_id: str) -> dict:
     out["workflow"] = association("workflowscheme/project", "workflowScheme", src_id)
     out["issuetype"] = association("issuetypescheme/project", "issueTypeScheme", src_id)
     out["screen"] = association("issuetypescreenscheme/project", "issueTypeScreenScheme", src_id)
-    out["fieldconfig"] = association("fieldconfigurationscheme/project", "fieldConfigurationScheme", src_id)
+    # Instancje po migracji na „Field Schemes” nie pozwalają tworzyć schematów konfiguracji pól -
+    # wtedy kopiowany jest field scheme projektu.
+    fs = call("GET", "/rest/api/3/config/fieldschemes/projects", ok_404=True, params={"projectId": src_id})
+    fs_id = next((v.get("schemeId") for v in (fs or {}).get("values", [])), None)
+    if fs_id is not None:
+        out["fieldscheme"] = get(f"/rest/api/3/config/fieldschemes/{fs_id}")
+        out["fieldconfig"] = None
+    else:
+        out["fieldconfig"] = association("fieldconfigurationscheme/project", "fieldConfigurationScheme", src_id)
     out["priority"] = next((s for s in paged("/rest/api/3/priorityscheme", expand="projects,priorities")
                             if any(str(p.get("id")) == str(src_id) for p in (s.get("projects") or {}).get("values", []))), None)
     return out
@@ -144,6 +155,7 @@ def existing_by_name(kind: str, name: str):
         items = get("/rest/api/3/issuesecurityschemes").get("issueSecuritySchemes", [])
     else:
         path = {"notification": "/rest/api/3/notificationscheme", "workflow": "/rest/api/3/workflowscheme",
+                "fieldscheme": "/rest/api/3/config/fieldschemes",
                 "issuetype": "/rest/api/3/issuetypescheme", "screen": "/rest/api/3/issuetypescreenscheme",
                 "fieldconfig": "/rest/api/3/fieldconfigurationscheme", "priority": "/rest/api/3/priorityscheme"}[kind]
         items = paged(path)
@@ -215,6 +227,8 @@ def build_copy(kind: str, src: dict, name: str):
             if maps:
                 call("PUT", f"/rest/api/3/fieldconfigurationscheme/{new_id}/mapping", json={"mappings": maps})
         return "/rest/api/3/fieldconfigurationscheme", {"name": name, "description": desc}, finish
+    if kind == "fieldscheme":
+        return f"/rest/api/3/config/fieldschemes/{sid}/clone", {"name": name, "description": desc}, None
     if kind == "priority":
         d = src  # Jira nie udostępnia odczytu pojedynczego schematu (405) - dane z listy (expand=priorities)
         prios = [str(p["id"]) for p in (d.get("priorities") or {}).get("values", [])]
@@ -224,12 +238,32 @@ def build_copy(kind: str, src: dict, name: str):
     raise ValueError(kind)
 
 
+def post_scheme(kind: str, path: str, body: dict):
+    """POST kopii. Schemat uprawnień: Jira zwraca przy odczycie uprawnienia, których nie przyjmuje
+    przy tworzeniu (np. COPY_PROJECT) - takie są usuwane po kolei z komunikatem."""
+    skipped = []
+    while True:
+        try:
+            res = call("POST", path, json=body)
+            if skipped:
+                warn(f"{LABELS[kind]}: pominięto uprawnienia, których Jira nie przyjmuje przy tworzeniu: {', '.join(skipped)}")
+            return res
+        except RuntimeError as exc:
+            m = re.search(r"Unrecognized permission: ([A-Z_]+)", str(exc))
+            if kind != "permission" or not m or len(skipped) > 50:
+                raise
+            skipped.append(m.group(1))
+            body["permissions"] = [p for p in body["permissions"] if p["permission"] != m.group(1)]
+
+
 def copy_schemes(srcs: dict, base: str) -> dict:
     """{rodzaj: id nowego schematu} - tworzy kopie albo używa istniejących o tej nazwie."""
     new = {}
     for kind, label in LABELS.items():
         src = srcs.get(kind)
-        if not src and kind not in ("fieldconfig",):
+        if kind == "fieldconfig" and srcs.get("fieldscheme"):
+            continue  # zastąpiony przez field scheme
+        if not src and kind != "fieldconfig":
             print(f"   {label}: źródło go nie używa - pomijam.")
             continue
         name = f"{base} {label}"
@@ -249,7 +283,7 @@ def copy_schemes(srcs: dict, base: str) -> dict:
             new[kind] = f"(nowy: {name})"
             continue
         try:
-            res = call("POST", path, json=body)
+            res = post_scheme(kind, path, body)
             new_id = str(res.get("id") or res.get("issueTypeSchemeId") or res.get("issueTypeScreenSchemeId"))
             if finish:
                 finish(new_id)
@@ -289,11 +323,17 @@ def assign_schemes(project_id: str, schemes: dict, existing_target: bool) -> Non
              ("workflow", "workflowscheme/project", "workflowSchemeId"),
              ("screen", "issuetypescreenscheme/project", "issueTypeScreenSchemeId"),
              ("fieldconfig", "fieldconfigurationscheme/project", "fieldConfigurationSchemeId")]
-    if existing_target:  # projekt istniał - uprawnienia i powiadomienia podpinamy osobno
-        for kind, path in (("permission", "permissionscheme"), ("notification", "notificationscheme")):
-            if schemes.get(kind):
-                write("PUT", f"/rest/api/3/project/{project_id}/{path}", f"podpięcie {LABELS[kind]}",
-                      json={"id": int(schemes[kind]) if not DRY else 0})
+    if existing_target:  # projekt istniał - uprawnienia i powiadomienia przez aktualizację projektu
+        body = {field: (int(schemes[kind]) if not DRY else 0)
+                for kind, field in (("permission", "permissionScheme"), ("notification", "notificationScheme"))
+                if schemes.get(kind)}
+        if body:
+            try:
+                write("PUT", f"/rest/api/3/project/{project_id}", "podpięcie schematów uprawnień i powiadomień", json=body)
+                if not DRY:
+                    print(f"   Podpięto {', '.join(LABELS[k] for k in ('permission', 'notification') if schemes.get(k))}.")
+            except Exception as exc:  # noqa: BLE001
+                warn(f"podpięcie schematów uprawnień/powiadomień: {exc}")
         if schemes.get("security"):
             warn("projekt już istniał - schemat bezpieczeństwa podepnij ręcznie (Jira robi to zadaniem asynchronicznym).")
     for kind, endpoint, field in pairs:
@@ -306,14 +346,37 @@ def assign_schemes(project_id: str, schemes: dict, existing_target: bool) -> Non
                 print(f"   Podpięto {LABELS[kind]} (id {schemes[kind]}).")
         except Exception as exc:  # noqa: BLE001
             warn(f"podpięcie {LABELS[kind]}: {exc}")
+    if schemes.get("fieldscheme"):
+        try:
+            write("PUT", "/rest/api/3/config/fieldschemes/projects", f"podpięcie {LABELS['fieldscheme']}",
+                  json={str(schemes["fieldscheme"]): {"projectIds": [int(project_id) if not DRY else 0]}})
+            if not DRY:
+                print(f"   Podpięto {LABELS['fieldscheme']} (id {schemes['fieldscheme']}).")
+        except Exception as exc:  # noqa: BLE001
+            warn(f"podpięcie {LABELS['fieldscheme']}: {exc}")
     if schemes.get("priority"):
         try:
             write("PUT", f"/rest/api/3/priorityscheme/{schemes['priority']}", f"podpięcie {LABELS['priority']}",
-                  json={"projects": {"add": {"ids": [int(project_id) if not DRY else 0]}}})
+                  json={"projects": {"add": {"ids": [int(project_id) if not DRY else 0]}},
+                        "mappings": {"in": {} if DRY else priority_mapping(project_id, schemes["priority"]), "out": {}}})
             if not DRY:
                 print(f"   Podpięto {LABELS['priority']} (id {schemes['priority']}).")
         except Exception as exc:  # noqa: BLE001
             warn(f"podpięcie {LABELS['priority']}: {exc}")
+
+
+def priority_mapping(project_id: str, new_scheme: str) -> dict:
+    """Mapowanie priorytetów obecnego schematu projektu, których nie ma w nowym, na domyślny nowego
+    (Jira wymaga go przy zmianie schematu priorytetów projektu)."""
+    schemes = list(paged("/rest/api/3/priorityscheme", expand="projects,priorities"))
+    new = next(s for s in schemes if str(s["id"]) == str(new_scheme))
+    new_ids = {str(p["id"]) for p in (new.get("priorities") or {}).get("values", [])}
+    cur = next((s for s in schemes if any(str(p.get("id")) == str(project_id)
+                                          for p in (s.get("projects") or {}).get("values", []))), None)
+    if cur is None:
+        cur = next((s for s in schemes if s.get("isDefault")), None)
+    cur_ids = {str(p["id"]) for p in ((cur or {}).get("priorities") or {}).get("values", [])}
+    return {pid: int(new["defaultPriorityId"]) for pid in sorted(cur_ids - new_ids)}
 
 
 def copy_components(src_key: str, dst_key: str) -> None:

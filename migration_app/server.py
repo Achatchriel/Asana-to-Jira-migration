@@ -506,6 +506,23 @@ def save_status_map(entries: dict, keep_unlisted: bool) -> dict:
             "changed": sum(1 for k in new if k in old and old[k] != new[k])}
 
 
+def project_status_maps() -> dict:
+    """Mapy pojedynczych projektów razem z profilem („__szablon__”) - tak jak je składa
+    asana_jira_sync.project_section_overrides. Do widoku „Mapowanie statusów”: sekcja
+    zmapowana w mapach wszystkich swoich projektów nie jest „bez mapowania”."""
+    out = {}
+    for path in ROOT.glob("section_status_map.*.json"):
+        key = path.name.split(".")[1]
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
+            continue
+        data = read_json_file(path, {})
+        profile = data.pop("__szablon__", None) if isinstance(data, dict) else None
+        if profile:
+            data = {**read_json_file(ROOT / "section_status_profiles" / f"{profile}.json", {}), **data}
+        out[key] = data
+    return out
+
+
 def update_status_map(project_key: str, section: str, value) -> dict:
     if not re.fullmatch(r"[A-Z][A-Z0-9_]*", project_key):
         raise ValueError("Niepoprawny klucz projektu.")
@@ -723,7 +740,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(save_google_key(self.read_json().get("key", "")))
         if p == ["statusmap"] and method == "GET":
             return self.send_json({"source": read_json_file(CACHE_DIR / "statuses.json", None),
-                                   "map": read_json_file(ROOT / "section_status_map.json", {})})
+                                   "map": read_json_file(ROOT / "section_status_map.json", {}),
+                                   "project_maps": project_status_maps()})
         if p == ["statusmap"] and method == "PUT":
             body = self.read_json()
             return self.send_json(save_status_map(body.get("entries") or {}, bool(body.get("keep_unlisted"))))

@@ -373,10 +373,17 @@ VIEWS.statusmap = async main => {
   const sug = Object.fromEntries(src.sections.map(s => [s.name, suggestStatus(s.name, statuses)]));
   let work = {};
   const SKIP = "__pomin__";
-  const valueOf = v => v && typeof v === "object" ? (v.pomin ? SKIP : (v.status || "")) : (Array.isArray(v) ? v[0] : (v || ""));
+  const valueOf = v => Array.isArray(v) ? (v[0] || "") : v && typeof v === "object" ? (v.pomin ? SKIP : (v.status || "")) : (v || "");
+  // Synchronizacja porównuje nazwy statusów bez wielkości liter - „To Clarify” trafia do „To clarify”.
+  const canon = new Map(statuses.map(x => [x.name.toLowerCase(), x.name]));
+  const canonOf = v => (v && v !== SKIP && canon.get(v.toLowerCase())) || v;
+  // Sekcja zmapowana w mapach (albo profilu) WSZYSTKICH swoich projektów - synchronizacja jej nie zgubi.
+  const pmaps = data.project_maps || {};
+  const inProject = s => s.projects.filter(k => pmaps[k] && valueOf(pmaps[k][s.name]));
+  const projectCovered = s => s.projects.length > 0 && inProject(s).length === s.projects.length;
   const init = mode => {
     work = {};
-    [...src.sections.map(s => s.name), "__ukonczone__"].forEach(n => { work[n] = mode === "current" ? valueOf(data.map[n]) : ""; });
+    [...src.sections.map(s => s.name), "__ukonczone__"].forEach(n => { work[n] = mode === "current" ? canonOf(valueOf(data.map[n])) : ""; });
     // Propozycja dla ukończonych: status „zakończony” wzorca. Zapisywana jawnie - bez wpisu skrypt
     // synchronizacji użyłby „Fertig”, którego w innej Jirze może nie być.
     if (!work.__ukonczone__ || !statuses.some(s => s.name === work.__ukonczone__)) { const d = categoryStatus("done", statuses); work.__ukonczone__ = d ? d.name : ""; }
@@ -400,20 +407,25 @@ VIEWS.statusmap = async main => {
     if (!work.__ukonczone__) doneSel.prepend(h("option", { value: "", selected: true }, "(wybierz status)"));
     const secs = src.sections.filter(s => s.projects.length >= minProjects);
     const cnt = f => secs.filter(s => f(work[s.name])).length;
+    const todo = s => !work[s.name] && !projectCovered(s);
+    const nTodo = secs.filter(todo).length, nProj = secs.filter(s => !work[s.name] && projectCovered(s)).length;
     summary.replaceChildren(pill(`${cnt(v => v && v !== SKIP)} zmapowanych`, "ok"), pill(`${cnt(v => v === SKIP)} pomijanych`, "info"),
-      pill(`${cnt(v => !v)} bez mapowania`, cnt(v => !v) ? "warn" : "ok"),
+      nProj ? pill(`${nProj} w mapach projektów`, "ok") : null,
+      pill(`${nTodo} bez mapowania`, nTodo ? "warn" : "ok"),
       cnt(invalid) ? pill(`${cnt(invalid)} ze statusem spoza wzorca`, "bad") : null, h("small", {}, `z ${secs.length} sekcji (min. ${minProjects} projektów)`));
     const rows = secs.filter(s => {
       const v = work[s.name];
       if (q && !normS(s.name).includes(normS(q))) return false;
-      return filter === "all" || (filter === "invalid" && invalid(v)) || (filter === "todo" && !v) || (filter === "mapped" && v && v !== SKIP) || (filter === "skip" && v === SKIP) || (filter === "suggested" && !v && sug[s.name]);
+      return filter === "all" || (filter === "invalid" && invalid(v)) || (filter === "todo" && todo(s)) || (filter === "project" && !v && inProject(s).length) || (filter === "mapped" && v && v !== SKIP) || (filter === "skip" && v === SKIP) || (filter === "suggested" && !v && sug[s.name]);
     });
     tbody.replaceChildren(...rows.slice(0, 400).map(s => {
       const g = sug[s.name];
       const sel = h("select", { style: "max-width:260px", onchange: e => { work[s.name] = e.target.value; draw(); } }, opts(work[s.name]));
       return h("tr", {},
         h("td", {}, s.name), h("td", { class: "num", title: s.projects.slice(0, 30).join(", ") }, s.projects.length), h("td", { class: "num" }, s.tasks),
-        h("td", {}, sel),
+        h("td", {}, sel, !work[s.name] && inProject(s).length ? h("div", { class: "muted", style: "font-size:12px" },
+          projectCovered(s) ? "zmapowana w mapach projektów: " : `w mapach projektów: ${inProject(s).length} z ${s.projects.length}: `,
+          inProject(s).slice(0, 6).map(k => `${k} → ${valueOf(pmaps[k][s.name]) === SKIP ? "pomiń" : valueOf(pmaps[k][s.name])}`).join(", ")) : null),
         h("td", {}, g && g.status !== work[s.name] ? h("button", { class: "small", title: g.reason, onclick: () => { work[s.name] = g.status; draw(); } }, "← " + g.status, h("small", { class: "muted" }, ` (${g.reason})`)) : h("span", { class: "muted" }, g ? "✓" : "—")));
     }), rows.length > 400 ? h("tr", {}, h("td", { colspan: 5, class: "muted" }, `Pokazano 400 z ${rows.length} - zawęź filtr albo podnieś próg projektów.`)) : null);
   }
@@ -423,7 +435,12 @@ VIEWS.statusmap = async main => {
     const bad = Object.entries(work).filter(([, v]) => invalid(v));
     if (bad.length && !confirm(`${bad.length} wpisów wskazuje status, którego nie ma w projekcie ${src.status_project} (np. „${bad[0][1]}”). Synchronizacja zostawi takie zadania w statusie startowym. Zapisać mimo to?`)) return;
     const entries = {};
-    Object.entries(work).forEach(([k, v]) => { if (v === SKIP) entries[k] = { pomin: true }; else if (v) entries[k] = v; });
+    Object.entries(work).forEach(([k, v]) => {
+      // Niezmieniony wpis-lista (kierunek zwrotny) albo rozszerzony (etykiety, komponenty…) zostaje w całości.
+      const orig = data.map[k];
+      if (orig && typeof orig === "object" && v && canonOf(valueOf(orig)) === v) entries[k] = orig;
+      else if (v === SKIP) entries[k] = { pomin: true }; else if (v) entries[k] = v;
+    });
     if (!confirm(`Zapisać ${Object.keys(entries).length} wpisów do section_status_map.json?` + (keep.checked ? "" : "\nWpisy sekcji spoza wczytanej listy zostaną usunięte."))) return;
     try {
       const r = await api("PUT", "statusmap", { entries, keep_unlisted: keep.checked });
@@ -442,7 +459,7 @@ VIEWS.statusmap = async main => {
     summary,
     h("div", { class: "row", style: "margin-bottom:10px" },
       h("select", { style: "max-width:200px", onchange: e => { filter = e.target.value; draw(); } },
-        [["todo", "Bez mapowania"], ["invalid", "Status spoza wzorca"], ["suggested", "Z propozycją"], ["mapped", "Zmapowane"], ["skip", "Pomijane"], ["all", "Wszystkie"]].map(([v, l]) => h("option", { value: v }, l))),
+        [["todo", "Bez mapowania"], ["project", "W mapach projektów"], ["invalid", "Status spoza wzorca"], ["suggested", "Z propozycją"], ["mapped", "Zmapowane"], ["skip", "Pomijane"], ["all", "Wszystkie"]].map(([v, l]) => h("option", { value: v }, l))),
       h("input", { type: "search", placeholder: "Szukaj sekcji…", style: "max-width:220px", oninput: e => { q = e.target.value; draw(); } }),
       h("label", { class: "check" }, "min. projektów:", h("input", { type: "number", min: 1, value: 1, style: "width:70px", oninput: e => { minProjects = Math.max(1, +e.target.value || 1); draw(); } })),
       h("span", { class: "spacer" }),

@@ -8,8 +8,8 @@ jako podprocesy (NIE przepisuje ich logiki — zero ryzyka wprowadzenia
 nowych błędów do wewnętrznej logiki każdego kroku):
 
   1. jira_sync.py               - tworzy projekty
-  2. bulk_configure_columns.py  - tworzy kolumny (browser_automation/)
-  3. run_column_assignments.py  - przypisuje statusy do kolumn (browser_automation/, Playwright)
+  2. board_columns.py           - kolumny tablic i przypisanie statusów do kolumn (API, bez przeglądarki)
+  3. board_columns.py --check   - kontrola zgodności tablic ze wzorcem (tylko odczyt)
   4. detect_epic_candidates.py  - wykrywa zadania z podzadaniami podzadań (przed synchronizacją zadań)
   5. asana_jira_sync.py         - synchronizuje zadania Asana -> Jira (w tym Epic/Task/Sub-task dla wykrytych w kroku 4)
 
@@ -52,16 +52,16 @@ OCHRONA PROJEKTÓW (działa w skryptach kroków, pipeline tylko o niej informuje
 KONTROLA PRZED STARTEM:
   - poprawność map statusów (section_status_map*.json) i szablonów
     (section_status_profiles/*.json, w tym istnienie szablonu z "__szablon__"),
-  - wiek zapisanej sesji przeglądarki, gdy uruchamiane są kroki 2-3.
+  - (sesja przeglądarki nie jest już potrzebna - kroki 2-3 działają przez API).
 
 WAŻNE ograniczenia (wynikające z możliwości poszczególnych skryptów, nie z
 tego orkiestratora):
   - Krok 1 (jira_sync.py) NIE wspiera --limit — zawsze przetwarza cały
     arkusz (albo swój shard, jeśli użyjesz --parallel).
-  - Krok 3 (run_column_assignments.py) NIE MA trybu --dry-run (nie ma
-    bezpiecznego podglądu — działa bezpośrednio przez przeglądarkę). Jeśli
-    poprosisz o --dry-run dla całego pipeline'u, ten krok jest POMIJANY
-    z ostrzeżeniem, zamiast wykonać się naprawdę wbrew Twojej intencji.
+  - Kroki 2-3 (board_columns.py) działają przez API - nie potrzebują przeglądarki
+    ani sesji logowania. Krok 2 w trybie --dry-run pokazuje obecny i docelowy układ
+    tablic; krok 3 tylko czyta. Tablica, której workflow nie pasuje do wzorca (zapis
+    zdjąłby z niej własne statusy projektu), jest pomijana z ostrzeżeniem.
 
 CZĘŚCIOWE niepowodzenia (WAŻNE):
   - Krok 1: jeśli NIEKTÓRE projekty się nie utworzą (np. duplikat klucza,
@@ -141,26 +141,28 @@ STEPS = [
         "tolerable_exit_codes": {2},
     },
     {
+        # Kolumny i przypisanie statusów do kolumn zapisywane razem, przez API (board_columns.py) -
+        # bez przeglądarki i bez sesji logowania (wcześniej bulk_configure_columns.py + run_column_assignments.py).
         "key": "columns",
-        "name": "2/5 Tworzenie kolumn",
-        "script": BROWSER_DIR / "bulk_configure_columns.py",
+        "name": "2/5 Kolumny i statusy w kolumnach (API)",
+        "script": SCRIPT_DIR / "board_columns.py",
         "supports_dry_run": True,
         "supports_limit": True,
         "supports_shard": True,
         "supports_project_keys": True,
-        "uses_browser": True,
-        "tolerable_exit_codes": set(),
+        "tolerable_exit_codes": {2},  # część projektów z błędem - pozostałe są gotowe
     },
     {
         "key": "statuses",
-        "name": "3/5 Przypisywanie statusów do kolumn",
-        "script": BROWSER_DIR / "run_column_assignments.py",
-        "supports_dry_run": False,  # brak trybu podglądu w tym skrypcie - patrz docstring
+        "name": "3/5 Kontrola kolumn i statusów (tylko odczyt)",
+        "script": SCRIPT_DIR / "board_columns.py",
+        "extra_args": ["--check"],
+        "read_only": True,  # tylko odczyt - wykonywany także przy --dry-run
+        "supports_dry_run": False,
         "supports_limit": True,
         "supports_shard": True,
         "supports_project_keys": True,
-        "uses_browser": True,
-        "tolerable_exit_codes": set(),
+        "tolerable_exit_codes": {2},
     },
     {
         "key": "epics",
@@ -232,6 +234,7 @@ def build_cmd(step: dict, args: argparse.Namespace, shard: "str | None") -> list
         cmd += ["--shard", shard]
     if step["key"] == "epics" and args.force_epics:
         cmd.append("--force")
+    cmd += step.get("extra_args", [])
     return cmd
 
 

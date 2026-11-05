@@ -40,8 +40,8 @@ cd jiraSync
 ```
 
 On first run `start.sh` creates `.venv`, installs the dependencies (`requirements.txt`,
-again only when it changes) and the browser for Playwright (about 300 MB, once per
-machine), then starts the panel and opens it in your browser. Options:
+again only when it changes), then starts the panel and opens it in your browser. No
+browser automation is needed: the pipeline and "Copy project" work through the API. Options:
 `./start.sh --port 9000` (another port), `NO_BROWSER=1 ./start.sh` (don't open a browser),
 `PYTHON=python3.12 ./start.sh` (another interpreter). The server listens on `127.0.0.1`
 only. Stop it with `Ctrl+C`. Language: **PL / EN** at the bottom of the sidebar.
@@ -61,10 +61,9 @@ what is ready. The order matters - each step builds on the previous ones.
 | 3 | **Project sheet** | loads the project list (with rows lacking a name - a few minutes, names are fetched from Asana) | `migration_app/cache/sheet.json` |
 | 4 | **People mapping** | Asana people ↔ accounts from selected Jira groups, with suggestions; people without an account are marked "not in Jira" | `user_map.json`, `asana_users_not_in_jira.json` |
 | 5 | **Status mapping** | Asana sections from all projects ↔ **statuses of the template project**; the status for tasks completed in Asana | `section_status_map.json` |
-| 6 | **Browser session** | one-off Jira login (SSO/2FA) for the board column and status steps; after logging in send Enter in the run's input field | `auth_state.json` |
-| 7 | **Preview** | the whole pipeline in dry-run mode - writes nothing | log in Runs |
-| 8 | **Migration** | the full pipeline; the panel shows the command and asks for confirmation | projects and issues in Jira |
-| 9 | **Verification** | status and assignee consistency, task counts compared with Asana | `migration_app/checks/` |
+| 6 | **Preview** | the whole pipeline in dry-run mode - writes nothing | log in Runs |
+| 7 | **Migration** | the full pipeline; the panel shows the command and asks for confirmation | projects and issues in Jira |
+| 8 | **Verification** | status and assignee consistency, task counts compared with Asana | `migration_app/checks/` |
 
 Step 2 also runs from the terminal: `.venv/bin/python migration_app/setup_check.py`.
 Start with a sheet tab containing 1-2 test projects (`GOOGLE_SHEET_RANGE`), go through
@@ -143,7 +142,7 @@ new project and configures columns through the browser.
 | View | What it is for |
 |---|---|
 | **Start** | the steps of a new migration (above) |
-| **Overview** | the whole picture on one screen: gaps in `.env`, age of the browser session (needed by the column and status steps), sync state, protected and excluded projects, recent runs |
+| **Overview** | the whole picture on one screen: gaps in `.env`, sync state, protected and excluded projects, recent runs |
 | **Projects** | projects from the sheet (without a loaded sheet: from the state file and `project_key_cache.json`), number of state entries, section map, flags, result of the last check. **Selected projects automatically fill the "Projects" fields in the tools** |
 | **Tools** | 69 scripts in seven groups (table below), each with an options form. The panel shows the exact command before starting |
 | **Statuses and people** | a read-only check per project: Asana sections → Jira statuses (the same rules as the sync: project map, profile, main map, `__ukonczone__`), people → Jira accounts (whether they are in `user_map.json`, active, assignable - when they lack the permission the panel shows the permission scheme and the roles granting it) and status/assignee differences in already migrated issues. A missing section mapping can be saved straight to `section_status_map.<KEY>.json`, a person can be marked "not in Jira" |
@@ -181,7 +180,7 @@ new project and configures columns through the browser.
 
 ## Everyday work in the panel
 
-**A new migration:** the **Start** tab, steps 1-9. Before creating issues in bulk, ask a
+**A new migration:** the **Start** tab, steps 1-8. Before creating issues in bulk, ask a
 Jira administrator to switch off notifications and automation for the new projects (Jira
 sends e-mails for every issue created through the API).
 
@@ -214,7 +213,7 @@ exist in Jira: the scripts create projects only for rows in the sheet.
 What the toolkit does, step by step:
 
 1. creates projects in Jira (`jira_sync.py`),
-2. configures board columns and assigns statuses to them (`browser_automation/`),
+2. configures board columns and assigns statuses to them, through the API (`board_columns.py`),
 3. detects tasks that need the Epic → Task → Sub-task hierarchy (`detect_epic_candidates.py`),
 4. syncs tasks, subtasks, comments and attachments (`asana_jira_sync.py`),
 5. optionally syncs changes back from Jira to Asana (`jira_asana_sync.py`).
@@ -265,7 +264,7 @@ the environment in `.venv`:
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m playwright install chromium   # browser steps (board columns and statuses)
+.venv/bin/python -m playwright install chromium   # optional: only the older browser tools
 ```
 
 ## 2. Configuration
@@ -1307,7 +1306,8 @@ DEBUG_SYNC=1 python asana_jira_sync.py --limit 1 --project-keys KEY
 | `create_epics_stories_from_sheet.py`, `export_stories_to_sheet.py` | Epics and Stories from the scope sheet and export back (section 20) |
 | `section_status_map.<KEY>.json` | status map for a single project (section 11) |
 | `notify.py` | log to file + optional Slack notification |
-| `start.sh` | installation (`.venv`, dependencies, browser) and panel start |
+| `start.sh` | installation (`.venv`, dependencies) and panel start |
+| `board_columns.py` | board columns and status-to-column mapping through the API - pipeline steps 2-3 (section 11a) |
 | `clone_project.py` | standalone project copy with scheme copies named after the new project (part I, "Copy project") |
 | `asana_users_not_in_jira.json` | Asana people deliberately without a Jira account (panel, "People mapping") |
 | `task_sync_state.json` | **automatically created** sync state (both directions) — do not delete |
@@ -1320,8 +1320,8 @@ The steps must run in this order, because each assumes the previous one has fini
 | Step | Key | Script | What it does |
 |---|---|---|---|
 | 1 | `projects` | `jira_sync.py` | creates projects from the sheet |
-| 2 | `columns` | `browser_automation/bulk_configure_columns.py` | creates board columns (template from `.env` or from the `board_template_id` column) |
-| 3 | `statuses` | `browser_automation/run_column_assignments.py` | assigns statuses to columns (section 11b) |
+| 2 | `columns` | `board_columns.py` | board columns **and** the status-to-column mapping from the template board (the `board_template_id` column, otherwise `JIRA_TEMPLATE_BOARD_ID` / the template project's board), through the API - no browser |
+| 3 | `statuses` | `board_columns.py --check` | read-only check that every board matches its template |
 | 4 | `epics` | `detect_epic_candidates.py` | detects Epic candidates (section 11) |
 | 5 | `sync` | `asana_jira_sync.py` | syncs tasks onto the ready, configured boards |
 
@@ -1337,7 +1337,7 @@ logic of any step.
 ```bash
 python run_full_pipeline.py                            # the whole pipeline, sequentially
 python run_full_pipeline.py --parallel 3               # each step as 3 parallel processes
-python run_full_pipeline.py --dry-run                  # preview (step 3 skipped: it has no preview mode)
+python run_full_pipeline.py --dry-run                  # preview (step 2 shows current vs target boards, step 3 only reads)
 python run_full_pipeline.py --limit 5                  # first 5 projects in the steps that support it
 python run_full_pipeline.py --only sync --parallel 3   # just one step (--only takes exactly one)
 python run_full_pipeline.py --skip columns --skip statuses
@@ -1351,62 +1351,48 @@ moving to the next step. The processes share the same Jira and Asana rate limits
 a larger N does not speed things up proportionally. 3-5 is recommended. With
 `--parallel` every output line has a process prefix (`[2/3] ...`).
 
-**Exit codes:** `0` success, `2` partial failure (step 1 only: the pipeline continues
-for the projects that were created), any other code stops the pipeline. The next run
+**Exit codes:** `0` success, `2` partial failure (steps 1-3: the pipeline continues
+for the projects that succeeded), any other code stops the pipeline. The next run
 can skip finished steps with `--only` / `--skip`.
 
-**Note on step 3:** if it requires logging in by hand in the browser (expired
-session), run it without `--parallel`, because prompts from several processes would
-get mixed up in one line. Refresh the session first:
-`python browser_automation/save_login_session.py`.
+**Steps 2-3 and non-matching workflows:** a board is only written when the project's
+workflow matches the template. If template statuses are missing from the project's
+workflow, or the project has its own statuses on the board that the template does not
+know (they would disappear from the board), the board is **skipped** with a warning
+("workflow projektu nie pasuje do wzorca"). Set the right `board_template_id` in the
+sheet, or write anyway with `python board_columns.py --project-keys KEY --force`. A board
+that already matches the template is left untouched.
+
+**Summaries are sent to Slack even in `--dry-run`** when `SLACK_WEBHOOK_URL` is set.
 
 **A summary after each step** goes to Slack as one message for all processes:
 status, time, summed counts and a list of errors (section 13).
 
-## 11b. Automatically assigning statuses to columns (`run_column_assignments.py`)
+## 11b. Board columns and statuses through the API (`board_columns.py`)
 
-Jira **has no public, documented API** for saving the assignment of statuses to
-board columns — hence the earlier (failed) attempts by simulating mouse dragging.
-We did, however, find a working **internal** endpoint that the Jira UI itself uses
-(spotted via DevTools -> Network while dragging by hand):
-
-- **Read** — GraphQL, persisted query `ColumnsSettingsPageNewContentQuery`.
-- **Write** — `PUT /rest/greenhopper/1.0/rapidviewconfig/columns` (the old,
-  undocumented "GreenHopper" API, the predecessor of today's "Jira Software").
-
-**Important caveat:** this is an UNOFFICIAL API. Atlassian does not guarantee its
-stability — it may change without warning in a Jira update (especially
-`atl-client-version` and `x-experimentalapi`, tied to a specific frontend build). If
-after some future Jira update the script starts returning 400/415 errors from
-GraphQL, you will need to capture these two values from Network again (see the
-comments in `assign_statuses_to_columns.js`) and replace them in the script.
-
-These endpoints require a **browser session** (cookies, CSRF token), not a regular
-API token — which is why execution goes through Playwright with a saved login session
-(`auth_state.json`), not through `requests` with a token like the rest of the scripts.
-
-### Files of this mechanism
-
-| File | Role |
-|---|---|
-| `assign_statuses_to_columns.js` | JS library (functions `assignStatusesToColumns`, `assignStatusesToManyBoards`) — can also be pasted by hand into the browser console, independently of Python |
-| `generate_column_assignments.py` | generates a list of {boardId, projectKey, mapping} for the projects in the sheet (read-only, regular API) |
-| `run_column_assignments.py` | **the main end-to-end script** — combines the two above, executes via Playwright, without manual interaction |
-
-### Running
+Jira has no **public, documented** API for board columns. The internal endpoint the Jira
+UI itself uses - `PUT /rest/greenhopper/1.0/rapidviewconfig/columns` (the old
+"GreenHopper" API), with `GET .../rapidviewconfig/editmodel.json` for reading - **accepts
+a regular API token**, so `board_columns.py` (pipeline steps 2-3) and `clone_project.py`
+set columns and the status-to-column mapping without a browser, in a single call per
+board, and re-read the board afterwards to verify it.
 
 ```bash
-python save_login_session.py                                   # if the session expired
-python run_column_assignments.py --limit 1 --project-keys KEY    # test on 1 project
-python run_column_assignments.py                                 # all projects
+python board_columns.py --dry-run                          # current vs target layout, writes nothing
+python board_columns.py --project-keys KEY1,KEY2           # write for selected projects
+python board_columns.py --check                            # read-only consistency check
+python board_columns.py --project-keys KEY --template-board-id 1234   # another template
 ```
 
-The result is saved to `column_assignment_report.json`.
+Statuses are matched by ID, and by name when the project's workflow lacks that ID. With
+`--project-keys` the template comes from the sheet (the panel's cache), unless
+`--template-board-id` is given.
 
-**Alternative without Playwright:** you can also paste `assign_statuses_to_columns.js`
-by hand into the browser console (F12) and call the functions directly — useful for a
-quick one-off test. To avoid pasting every time, save the script as a DevTools Snippet
-(Sources -> Snippets -> saved permanently in the browser, run with Ctrl+Enter).
+**Caveat:** this is an UNOFFICIAL API - Atlassian may change it without warning. If the
+write starts failing after a Jira update, the older browser tools are still in the
+repository (`bulk_configure_columns.py`, `browser_automation/run_column_assignments.py`,
+`assign_statuses_to_columns.js`; they need a saved browser session from
+`browser_automation/save_login_session.py` and `playwright install chromium`).
 
 ## 12. Reverse sync direction (`jira_asana_sync.py`, Jira → Asana)
 
@@ -2641,7 +2627,8 @@ check that no shard processes are left.
 | the number in `Zdjęto z wykluczeń` (removed from exclusions) is higher than the number of projects | duplicate entries in `sync_exclude.txt` | harmless; deduplication: section 11 |
 | the sync preview shows nothing for a project | the project is in `sync_exclude.txt` or `protected_projects.txt` | `grep KEY sync_exclude.txt protected_projects.txt` |
 | `./start.sh`: `Address already in use` | port 8765 is taken (e.g. a running panel) | open the running panel or `./start.sh --port 9000` |
-| steps 2-3 don't start the browser | missing system libraries for Chromium (Linux) | `sudo .venv/bin/python -m playwright install-deps chromium` |
+| an older browser tool doesn't start the browser | Chromium not installed or missing system libraries (Linux) | `.venv/bin/python -m playwright install chromium`, then if needed `sudo .venv/bin/python -m playwright install-deps chromium` |
+| step 2: "workflow projektu nie pasuje do wzorca" (workflow does not match the template) | the board's project uses statuses the template board does not have | set `board_template_id` in the sheet or use `board_columns.py --force` (section 11a) |
 | panel: empty project list | the sheet is loaded only on request | Start → step 3 or Projects → "Refresh from sheet" |
 | connection test: no access to the sheet (403) | the sheet is not shared with the service account | share it with the address shown in step 1 |
 | issues without an assignee although the person is in `user_map.json` | the person's role lacks "Assignable User" in the permission scheme | "Statuses and people" → People (scheme and roles with the permission) |
@@ -2759,7 +2746,7 @@ Using the panel is described in part I. Files:
 
 | Path | What it is |
 |---|---|
-| `../start.sh` | installation (`.venv`, dependencies, browser) and panel start; `panel.sh` just calls it |
+| `../start.sh` | installation (`.venv`, dependencies) and panel start; `panel.sh` just calls it |
 | `server.py` | HTTP server and API |
 | `catalog.py` | tool catalogue: groups, form parameters, when a tool writes |
 | `runner.py` | subprocesses, logs, input for script prompts, stopping |

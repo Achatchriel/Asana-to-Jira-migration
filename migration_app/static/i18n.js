@@ -241,6 +241,17 @@ const EN = {
 // Katalog narzędzi: tytuły, opisy i etykiety pól.
 Object.assign(EN, {
   "Wczytaj arkusz projektów": "Load project sheet",
+  "2. Kolumny i statusy w kolumnach": "2. Columns and statuses in columns",
+  "Układ kolumn i przypisanie statusów według tablicy wzorcowej - przez API, bez przeglądarki. Tablica, której workflow nie pasuje do wzorca, jest pomijana (chyba że --force).": "Column layout and status mapping from the template board - via the API, no browser. A board whose workflow does not match the template is skipped (unless --force).",
+  "ID tablicy wzorcowej (domyślnie z arkusza / .env)": "Template board ID (default from the sheet / .env)",
+  "Zapisz mimo niepasującego workflow (--force)": "Write despite a non-matching workflow (--force)",
+  "3. Kontrola kolumn i statusów": "3. Column and status check", "Czy tablice mają kolumny i statusy jak wzorzec - tylko odczyt.": "Whether boards have the template's columns and statuses - read-only.",
+  "Kolumny tablic (stara wersja, przeglądarka)": "Board columns (old version, browser)",
+  "Poprzednia wersja kroku 2 - przez przeglądarkę (Playwright). Zastąpiona przez „2. Kolumny i statusy w kolumnach”.": "The previous step 2 - through the browser (Playwright). Replaced by \"2. Columns and statuses in columns\".",
+  "Statusy w kolumnach (stara wersja, przeglądarka)": "Statuses in columns (old version, browser)",
+  "Poprzednia wersja kroku 3 - przez przeglądarkę (Playwright), bez trybu podglądu. Zastąpiona przez „2. Kolumny i statusy w kolumnach”.": "The previous step 3 - through the browser (Playwright), no preview mode. Replaced by \"2. Columns and statuses in columns\".",
+  "Otwiera przeglądarkę do ręcznego logowania (SSO/2FA). Potrzebne tylko starszym narzędziom przez przeglądarkę (stare kroki kolumn, copy_project.py, kopia z innej instancji) - pipeline i „Kopia projektu” działają bez niej. Naciśnij Enter w polu wejścia po zalogowaniu.": "Opens a browser for manual login (SSO/2FA). Only needed by the older browser tools (old column steps, copy_project.py, copy from another instance) - the pipeline and \"Copy project\" work without it. Press Enter in the input field after logging in.",
+  "Projekty → kolumny i statusy tablic (API) → kontrola tablic → kandydaci na Epiki → synchronizacja zadań (opcjonalnie weryfikacja). Bez przeglądarki.": "Projects → board columns and statuses (API) → board check → Epic candidates → task sync (optional verification). No browser.",
   "Odczyt arkusza Google do cache panelu (lista projektów). Może potrwać kilka minut, gdy wiersze nie mają nazw.": "Reads the Google Sheet into the panel cache (project list). Can take a few minutes when rows have no names.",
   "Pełny pipeline": "Full pipeline", "Projekty → kolumny → statusy kolumn → kandydaci na Epiki → synchronizacja zadań (opcjonalnie weryfikacja).": "Projects → columns → column statuses → Epic candidates → task sync (optional verification).",
   "Tylko podgląd (dry-run)": "Preview only (dry-run)", "Plik z kluczami": "Keys file", "Limit projektów": "Project limit", "Równolegle (N procesów, maks. 3)": "In parallel (N processes, max 3)",

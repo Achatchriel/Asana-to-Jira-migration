@@ -4,8 +4,8 @@ python-dotenv>=1.0
 google-auth>=2.29
 google-auth-httplib2>=0.2
 google-api-python-client>=2.126
-# Kroki 2-3 (kolumny i statusy tablic) i kopiowanie projektów - przez przeglądarkę.
-# Po instalacji pakietu potrzebna jest jeszcze przeglądarka: python -m playwright install chromium
+# Tylko starsze narzędzia przez przeglądarkę (stare kroki kolumn, copy_project.py, kopia z innej instancji).
+# Przeglądarka na żądanie: python -m playwright install chromium (pipeline i kopia projektu jej nie potrzebują)
 playwright>=1.44
 # Konfiguracja Jiry z YAML (build_jira_schema.py i pokrewne)
 pyyaml>=6.0

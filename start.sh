@@ -29,15 +29,9 @@ if [ "$(cat .venv/.requirements.sha 2>/dev/null || true)" != "$REQ_HASH" ]; then
   echo "$REQ_HASH" > .venv/.requirements.sha
 fi
 
-if [ ! -f .venv/.playwright_ok ]; then
-  echo "==> Pobieram przeglądarkę dla Playwright (kroki 2-3: kolumny i statusy tablic)"
-  if .venv/bin/python -m playwright install chromium; then
-    touch .venv/.playwright_ok
-  else
-    echo "    Nie udało się pobrać przeglądarki - panel działa, ale kroki 2-3 nie zadziałają." >&2
-    echo "    Na Linuksie mogą brakować bibliotek systemowych: sudo .venv/bin/python -m playwright install-deps chromium" >&2
-  fi
-fi
+# Przeglądarka (Playwright/Chromium, ok. 300 MB) jest potrzebna tylko starszym narzędziom
+# (stare kroki kolumn, copy_project.py, kopia z innej instancji) - pipeline i kopia projektu
+# działają przez API. Instalacja na żądanie: .venv/bin/python -m playwright install chromium
 
 [ -f .env ] || echo "==> Brak pliku .env - uzupełnisz go w panelu (zakładka Start)."
 

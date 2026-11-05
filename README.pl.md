@@ -35,8 +35,9 @@ cd jiraSync
 ```
 
 `start.sh` przy pierwszym uruchomieniu tworzy `.venv`, instaluje zależności
-(`requirements.txt`, ponownie tylko po jego zmianie) i przeglądarkę dla Playwright
-(ok. 300 MB, raz na komputer), a potem uruchamia panel i otwiera go w przeglądarce.
+(`requirements.txt`, ponownie tylko po jego zmianie), a potem uruchamia panel i otwiera go
+w przeglądarce. Automatyzacja przeglądarki nie jest potrzebna: pipeline i „Kopia projektu”
+działają przez API.
 Opcje: `./start.sh --port 9000` (inny port), `NO_BROWSER=1 ./start.sh` (bez otwierania
 przeglądarki), `PYTHON=python3.12 ./start.sh` (inny interpreter). Serwer nasłuchuje
 wyłącznie na `127.0.0.1`. Zatrzymanie: `Ctrl+C`. Język panelu: **PL / EN** na dole panelu
@@ -57,10 +58,9 @@ co jest gotowe. Kolejność ma znaczenie - każdy krok korzysta z poprzednich.
 | 3 | **Arkusz projektów** | wczytanie listy projektów (przy wierszach bez nazwy - kilka minut, bo nazwy pobierane są z Asany) | `migration_app/cache/sheet.json` |
 | 4 | **Mapowanie osób** | osoby z Asany ↔ konta z wybranych grup Jiry, z propozycjami; osoby bez konta oznaczasz „nie w Jirze” | `user_map.json`, `asana_users_not_in_jira.json` |
 | 5 | **Mapowanie statusów** | sekcje Asany ze wszystkich projektów ↔ **statusy projektu wzorcowego**; status dla zadań ukończonych w Asanie | `section_status_map.json` |
-| 6 | **Sesja przeglądarki** | jednorazowe logowanie do Jiry (SSO/2FA) dla kroków kolumn i statusów tablic; po zalogowaniu wysyłasz Enter w polu odpowiedzi uruchomienia | `auth_state.json` |
-| 7 | **Podgląd** | cały pipeline w trybie dry-run - nic nie zapisuje | log w Uruchomieniach |
-| 8 | **Migracja** | pełny pipeline; panel pokazuje polecenie i prosi o potwierdzenie | projekty i zadania w Jirze |
-| 9 | **Weryfikacja** | zgodność statusów i przypisań, porównanie liczby zadań z Asaną | `migration_app/checks/` |
+| 6 | **Podgląd** | cały pipeline w trybie dry-run - nic nie zapisuje | log w Uruchomieniach |
+| 7 | **Migracja** | pełny pipeline; panel pokazuje polecenie i prosi o potwierdzenie | projekty i zadania w Jirze |
+| 8 | **Weryfikacja** | zgodność statusów i przypisań, porównanie liczby zadań z Asaną | `migration_app/checks/` |
 
 Krok 2 da się uruchomić też z terminala: `.venv/bin/python migration_app/setup_check.py`.
 Zacznij od zakładki arkusza z 1-2 projektami testowymi (`GOOGLE_SHEET_RANGE`), przejdź
@@ -140,7 +140,7 @@ Starszy `copy_project.py` (sekcja 4a) podpina do nowego projektu **te same** sch
 | Widok | Do czego służy |
 |---|---|
 | **Start** | kroki nowej migracji (wyżej) |
-| **Przegląd** | stan całości na jednym ekranie: braki w `.env`, wiek sesji przeglądarki (potrzebnej w krokach kolumn i statusów), stan synchronizacji, projekty chronione i wyłączone, ostatnie uruchomienia |
+| **Przegląd** | stan całości na jednym ekranie: braki w `.env`, stan synchronizacji, projekty chronione i wyłączone, ostatnie uruchomienia |
 | **Projekty** | projekty z arkusza (bez wczytanego arkusza: z pliku stanu i `project_key_cache.json`), liczba wpisów w stanie, mapa sekcji, flagi, wynik ostatniego sprawdzenia. **Zaznaczone projekty trafiają automatycznie do pól „Projekty” w narzędziach** |
 | **Narzędzia** | 69 skryptów w siedmiu grupach (tabela niżej), każdy z formularzem opcji. Panel pokazuje dokładne polecenie przed startem |
 | **Statusy i osoby** | sprawdzenie bez zapisu, per projekt: sekcje Asany → statusy Jiry (te same reguły co synchronizacja: mapa projektu, szablon, mapa główna, `__ukonczone__`), osoby → konta Jiry (czy są w `user_map.json`, czy aktywne, czy można je przypisać - przy braku uprawnienia panel pokazuje schemat uprawnień i role, które je dają) oraz różnice statusu i przypisanego w już zmigrowanych zadaniach. Brakujące mapowanie sekcji zapiszesz od razu do `section_status_map.<KLUCZ>.json`, osobę oznaczysz „nie w Jirze” |
@@ -178,7 +178,7 @@ Starszy `copy_project.py` (sekcja 4a) podpina do nowego projektu **te same** sch
 
 ## Typowa praca w panelu
 
-**Nowa migracja:** zakładka **Start**, kroki 1-9. Przed masowym tworzeniem zgłoszeń
+**Nowa migracja:** zakładka **Start**, kroki 1-8. Przed masowym tworzeniem zgłoszeń
 poproś administratora Jiry o wyłączenie powiadomień i automatyzacji dla nowych
 projektów (Jira wysyła maile przy każdym zgłoszeniu tworzonym przez API).
 
@@ -212,7 +212,7 @@ mają powstać w Jirze: skrypty tworzą projekty tylko dla wierszy z arkusza.
 Co robi pakiet, w kolejności kroków:
 
 1. tworzy projekty w Jirze (`jira_sync.py`),
-2. konfiguruje kolumny tablic i przypisuje do nich statusy (`browser_automation/`),
+2. konfiguruje kolumny tablic i przypisuje do nich statusy, przez API (`board_columns.py`),
 3. wykrywa zadania wymagające hierarchii Epic → Task → Sub-task (`detect_epic_candidates.py`),
 4. synchronizuje zadania, podzadania, komentarze i załączniki (`asana_jira_sync.py`),
 5. opcjonalnie przenosi zmiany z powrotem z Jiry do Asany (`jira_asana_sync.py`).
@@ -263,7 +263,7 @@ oczekują środowiska właśnie w `.venv`:
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m playwright install chromium   # kroki przeglądarkowe (kolumny i statusy tablic)
+.venv/bin/python -m playwright install chromium   # opcjonalnie: tylko starsze narzędzia przez przeglądarkę
 ```
 
 ## 2. Konfiguracja
@@ -1314,6 +1314,7 @@ DEBUG_SYNC=1 python asana_jira_sync.py --limit 1 --project-keys KLUCZ
 | `create_epics_stories_from_sheet.py`, `export_stories_to_sheet.py` | Epiki i Story z arkusza zakresu i eksport z powrotem (sekcja 20) |
 | `section_status_map.<KLUCZ>.json` | mapa statusów dla jednego projektu (sekcja 11) |
 | `notify.py` | log do pliku + opcjonalne powiadomienie na Slack |
+| `board_columns.py` | kolumny tablic i przypisanie statusów do kolumn przez API - kroki 2-3 pipeline'u (sekcja 11a) |
 | `clone_project.py` | samodzielna kopia projektu z kopiami schematów nazwanymi od nowego projektu (część I, „Kopia projektu”) |
 | `task_sync_state.json` | **automatycznie tworzony** stan synchronizacji (obu kierunków) — nie kasować |
 | `workflow_graph_cache.json` | **automatycznie tworzony** cache mapy przejść workflow — bezpieczny do skasowania |
@@ -1325,8 +1326,8 @@ Kroki muszą iść w tej kolejności, bo każdy zakłada, że poprzedni się sko
 | Krok | Klucz | Skrypt | Co robi |
 |---|---|---|---|
 | 1 | `projects` | `jira_sync.py` | tworzy projekty z arkusza |
-| 2 | `columns` | `browser_automation/bulk_configure_columns.py` | tworzy kolumny tablic (wzorzec z `.env` albo z kolumny `board_template_id`) |
-| 3 | `statuses` | `browser_automation/run_column_assignments.py` | przypisuje statusy do kolumn (sekcja 11b) |
+| 2 | `columns` | `board_columns.py` | kolumny tablic **i** przypisanie statusów do kolumn według tablicy wzorcowej (kolumna `board_template_id`, inaczej `JIRA_TEMPLATE_BOARD_ID` / tablica projektu wzorcowego), przez API - bez przeglądarki |
+| 3 | `statuses` | `board_columns.py --check` | kontrola tylko do odczytu, czy każda tablica jest zgodna ze wzorcem |
 | 4 | `epics` | `detect_epic_candidates.py` | wykrywa kandydatów na Epic (sekcja 11) |
 | 5 | `sync` | `asana_jira_sync.py` | synchronizuje zadania na gotowe, skonfigurowane tablice |
 
@@ -1342,7 +1343,7 @@ Nie zmienia logiki żadnego kroku.
 ```bash
 python run_full_pipeline.py                            # cały pipeline, sekwencyjnie
 python run_full_pipeline.py --parallel 3               # każdy krok jako 3 równoległe procesy
-python run_full_pipeline.py --dry-run                  # podgląd (krok 3 pominięty: nie ma trybu podglądu)
+python run_full_pipeline.py --dry-run                  # podgląd (krok 2 pokazuje obecny i docelowy układ tablic, krok 3 tylko czyta)
 python run_full_pipeline.py --limit 5                  # pierwsze 5 projektów w krokach, które to wspierają
 python run_full_pipeline.py --only sync --parallel 3   # tylko jeden krok (--only przyjmuje dokładnie jeden)
 python run_full_pipeline.py --skip columns --skip statuses
@@ -1356,66 +1357,47 @@ przejdzie do następnego kroku. Procesy dzielą ten sam limit zapytań Jiry i
 Asany, więc większe N nie przyspiesza proporcjonalnie. Zalecane 3-5. Przy
 `--parallel` każda linia wyjścia ma prefiks procesu (`[2/3] ...`).
 
-**Kody wyjścia:** `0` sukces, `2` częściowe niepowodzenie (tylko krok 1: pipeline
-idzie dalej dla projektów, które powstały), każdy inny kod zatrzymuje pipeline.
+**Kody wyjścia:** `0` sukces, `2` częściowe niepowodzenie (kroki 1-3: pipeline idzie
+dalej dla projektów, którym się udało), każdy inny kod zatrzymuje pipeline.
 Kolejne uruchomienie może pominąć gotowe kroki przez `--only` / `--skip`.
 
-**Uwaga o kroku 3:** jeśli wymaga ręcznego zalogowania w przeglądarce (wygasła
-sesja), uruchamiaj go bez `--parallel`, bo prompty z kilku procesów wymieszają
-się w jednej linii. Najpierw odśwież sesję: `python browser_automation/save_login_session.py`.
+**Kroki 2-3 a niepasujący workflow:** tablica jest zapisywana tylko wtedy, gdy workflow
+projektu pasuje do wzorca. Gdy w workflow projektu brakuje statusów wzorca albo na tablicy
+są własne statusy projektu, których wzorzec nie zna (zniknęłyby z tablicy), tablica jest
+**pomijana** z ostrzeżeniem („workflow projektu nie pasuje do wzorca”). Ustaw właściwy
+`board_template_id` w arkuszu albo wymuś zapis: `python board_columns.py --project-keys KLUCZ --force`.
+Tablica już zgodna ze wzorcem nie jest ruszana.
+
+**Podsumowania trafiają na Slack także przy `--dry-run`**, gdy ustawiony jest `SLACK_WEBHOOK_URL`.
 
 **Podsumowanie po każdym kroku** trafia na Slack jako jedna wiadomość za
 wszystkie procesy: status, czas, zsumowane liczby i lista błędów (sekcja 13).
 
-## 11b. Automatyczne przypisywanie statusów do kolumn (`run_column_assignments.py`)
+## 11b. Kolumny tablic i statusy przez API (`board_columns.py`)
 
-Jira **nie ma publicznego, udokumentowanego API** do zapisu przypisania
-statusów do kolumn tablicy — stąd wcześniejsze (nieudane) próby przez
-symulację przeciągania myszą. Znaleźliśmy jednak działający **wewnętrzny**
-endpoint, którego używa samo UI Jiry (podejrzany przez DevTools -> Network
-podczas ręcznego przeciągania):
-
-- **Odczyt** — GraphQL, persisted query `ColumnsSettingsPageNewContentQuery`.
-- **Zapis** — `PUT /rest/greenhopper/1.0/rapidviewconfig/columns` (stare,
-  nieudokumentowane API "GreenHopper", poprzednik dzisiejszej nazwy
-  "Jira Software").
-
-**Ważne zastrzeżenie:** to NIEOFICJALNE API. Atlassian nie gwarantuje jego
-stabilności — może się zmienić bez ostrzeżenia przy aktualizacji Jiry
-(zwłaszcza `atl-client-version` i `x-experimentalapi`, przywiązane do
-konkretnego builda frontendu). Jeśli po jakiejś przyszłej aktualizacji Jiry
-skrypt zacznie zwracać błąd 400/415 z GraphQL, trzeba będzie świeżo
-przechwycić te dwie wartości z Network (patrz komentarze w
-`assign_statuses_to_columns.js`) i podmienić w skrypcie.
-
-Wymaga tego, że te endpointy używają **sesji przeglądarki** (ciasteczka,
-token CSRF), nie zwykłego tokenu API — dlatego wykonanie odbywa się przez
-Playwright z zapisaną sesją logowania (`auth_state.json`), a nie przez
-`requests` z tokenem, jak reszta skryptów.
-
-### Pliki tego mechanizmu
-
-| Plik | Rola |
-|---|---|
-| `assign_statuses_to_columns.js` | biblioteka JS (funkcje `assignStatusesToColumns`, `assignStatusesToManyBoards`) — może być też wklejona ręcznie w konsoli przeglądarki, niezależnie od Pythona |
-| `generate_column_assignments.py` | generuje listę {boardId, projectKey, mapping} dla projektów z arkusza (tylko odczyt, zwykłe API) |
-| `run_column_assignments.py` | **główny skrypt end-to-end** — łączy oba powyższe, wykonuje przez Playwright, bez ręcznej interakcji |
-
-### Uruchomienie
+Jira nie ma **publicznego, udokumentowanego** API do kolumn tablic. Wewnętrzny endpoint,
+którego używa sam interfejs Jiry - `PUT /rest/greenhopper/1.0/rapidviewconfig/columns`
+(stare API „GreenHopper”), z odczytem `GET .../rapidviewconfig/editmodel.json` - **przyjmuje
+zwykły token API**, więc `board_columns.py` (kroki 2-3 pipeline'u) i `clone_project.py`
+ustawiają kolumny i przypisanie statusów bez przeglądarki, jednym wywołaniem na tablicę,
+i po zapisie odczytują tablicę kontrolnie.
 
 ```bash
-python save_login_session.py                                   # jeśli sesja wygasła
-python run_column_assignments.py --limit 1 --project-keys KLUCZ  # test na 1 projekcie
-python run_column_assignments.py                                 # wszystkie projekty
+python board_columns.py --dry-run                          # obecny i docelowy układ, nic nie zapisuje
+python board_columns.py --project-keys KLUCZ1,KLUCZ2       # zapis dla wybranych projektów
+python board_columns.py --check                            # tylko kontrola zgodności
+python board_columns.py --project-keys KLUCZ --template-board-id 1234   # inny wzorzec
 ```
 
-Wynik zapisywany do `column_assignment_report.json`.
+Statusy są dopasowywane po ID, a gdy workflow projektu go nie ma - po nazwie. Przy
+`--project-keys` wzorzec bierze się z arkusza (z cache panelu), chyba że podasz
+`--template-board-id`.
 
-**Alternatywa bez Playwrighta:** można też wkleić `assign_statuses_to_columns.js`
-ręcznie w konsoli przeglądarki (F12) i wywołać funkcje bezpośrednio — przydatne
-do szybkiego, jednorazowego testu. Żeby nie wklejać za każdym razem, zapisz
-skrypt jako DevTools Snippet (Sources -> Snippets -> zapisuje się na stałe
-w przeglądarce, uruchamiane przez Ctrl+Enter).
+**Zastrzeżenie:** to NIEOFICJALNE API - Atlassian może je zmienić bez zapowiedzi. Gdyby
+zapis przestał działać po aktualizacji Jiry, w repo zostały starsze narzędzia przez
+przeglądarkę (`bulk_configure_columns.py`, `browser_automation/run_column_assignments.py`,
+`assign_statuses_to_columns.js`; wymagają sesji z `browser_automation/save_login_session.py`
+i `playwright install chromium`).
 
 ## 12. Kierunek zwrotny synchronizacji (`jira_asana_sync.py`, Jira → Asana)
 
@@ -2709,7 +2691,8 @@ ponowne uruchomienie tej samej komendy pomija zrobione). Po zatrzymaniu
 | liczba w `Zdjęto z wykluczeń` większa niż liczba projektów | podwójne wpisy w `sync_exclude.txt` | nieszkodliwe; deduplikacja: sekcja 11 |
 | podgląd synchronizacji nic nie pokazuje dla projektu | projekt w `sync_exclude.txt` albo `protected_projects.txt` | `grep KLUCZ sync_exclude.txt protected_projects.txt` |
 | `./start.sh`: `Address already in use` | port 8765 zajęty (np. działający panel) | otwórz działający panel albo `./start.sh --port 9000` |
-| kroki 2-3 nie uruchamiają przeglądarki | brak bibliotek systemowych dla Chromium (Linux) | `sudo .venv/bin/python -m playwright install-deps chromium` |
+| starsze narzędzie nie uruchamia przeglądarki | brak Chromium albo bibliotek systemowych (Linux) | `.venv/bin/python -m playwright install chromium`, w razie potrzeby `sudo .venv/bin/python -m playwright install-deps chromium` |
+| krok 2: „workflow projektu nie pasuje do wzorca” | projekt tablicy używa statusów, których tablica wzorcowa nie ma | ustaw `board_template_id` w arkuszu albo `board_columns.py --force` (sekcja 11a) |
 | panel: pusta lista projektów | arkusz wczytuje się tylko na żądanie | Start → krok 3 albo Projekty → „Odśwież z arkusza” |
 | test połączeń: brak dostępu do arkusza (403) | arkusz nieudostępniony kontu serwisowemu | udostępnij arkusz adresowi pokazanemu w kroku 1 |
 | zadania bez przypisanego, choć osoba jest w `user_map.json` | rola osoby nie ma „Assignable User” w schemacie uprawnień | „Statusy i osoby” → Osoby (schemat i role z uprawnieniem) |
@@ -2836,7 +2819,7 @@ Obsługę panelu opisuje część I. Pliki:
 
 | Ścieżka | Co to |
 |---|---|
-| `../start.sh` | instalacja (`.venv`, zależności, przeglądarka) i start panelu; `panel.sh` tylko go wywołuje |
+| `../start.sh` | instalacja (`.venv`, zależności) i start panelu; `panel.sh` tylko go wywołuje |
 | `server.py` | serwer HTTP i API |
 | `catalog.py` | katalog narzędzi: grupy, parametry formularzy, kiedy narzędzie zapisuje |
 | `runner.py` | podprocesy, logi, wejście dla pytań skryptów, przerywanie |

@@ -200,7 +200,6 @@ const START_STEPS = {
   sheet: ["Arkusz projektów", "Wczytuje listę projektów do migracji. Każdy wiersz potrzebuje asana_project_link."],
   people: ["Mapowanie osób", "Kto z Asany odpowiada komu w Jirze; osoby bez konta oznaczasz „nie w Jirze”."],
   statuses: ["Mapowanie statusów", "Która sekcja Asany trafia na który status Jiry i jaki status dostają zadania ukończone."],
-  session: ["Sesja przeglądarki", "Kroki 2-3 (kolumny i statusy tablic) działają przez przeglądarkę - zaloguj się raz do Jiry (SSO/2FA)."],
   trial: ["Podgląd całej migracji", "Pipeline w trybie dry-run: pokazuje, co zostanie utworzone i zsynchronizowane, nic nie zapisując."],
   migrate: ["Migracja", "Pełny pipeline. Zalecane: najpierw zakładka arkusza z 1-2 projektami testowymi (GOOGLE_SHEET_RANGE)."],
   verify: ["Weryfikacja", "Zgodność statusów, przypisań i liczby zadań z Asaną."],
@@ -231,9 +230,6 @@ VIEWS.start = async main => {
     })()),
     card(...S_.people, h("button", { class: S_.people[0].done ? "" : "primary", onclick: () => go("#/people") }, "Otwórz mapowanie osób")),
     card(...S_.statuses, h("button", { class: S_.statuses[0].done ? "" : "primary", onclick: () => go("#/statusmap") }, "Otwórz mapowanie statusów")),
-    card(...S_.session, h("div", { class: "row" },
-      h("button", { class: S_.session[0].done ? "" : "primary", onclick: async () => { const r = await startTool("save_login", {}).catch(e => toast(e.message, true)); if (r) go("#/runs/" + r.id); } }, "Otwórz przeglądarkę do logowania"),
-      h("small", {}, "Po zalogowaniu wróć do panelu i wyślij Enter w polu odpowiedzi uruchomienia."))),
     card(...S_.trial, h("button", { class: S_.trial[0].done ? "" : "primary", onclick: async () => {
       const r = await startTool("full_pipeline", { "--dry-run": true }).catch(e => toast(e.message, true)); if (r) go("#/runs/" + r.id);
     } }, "Uruchom podgląd (dry-run)")),
@@ -465,9 +461,6 @@ VIEWS.overview = async main => {
   const notices = [];
   if (!o.env_exists) notices.push(h("div", { class: "notice bad" }, "Brak pliku .env. ", h("button", { class: "link", onclick: () => go("#/config/env") }, "Uzupełnij konfigurację →")));
   else if (o.env_missing.length) notices.push(h("div", { class: "notice warn" }, "Brakujące zmienne w .env: ", o.env_missing.join(", "), ". ", h("button", { class: "link", onclick: () => go("#/config/env") }, "Uzupełnij →")));
-  const oldSession = o.browser_sessions.filter(s => s.age_hours > 24);
-  if (!o.browser_sessions.length) notices.push(h("div", { class: "notice warn" }, "Brak zapisanej sesji przeglądarki - kroki 2-3 (kolumny, statusy kolumn) jej wymagają. ", h("button", { class: "link", onclick: () => go("#/tools/save_login") }, "Zapisz sesję →")));
-  else if (oldSession.length) notices.push(h("div", { class: "notice warn" }, `Sesja przeglądarki ma ${oldSession[0].age_hours} h - może wymagać ponownego logowania przed krokami 2-3.`));
 
   const stat = (value, label) => h("div", { class: "card stat" }, h("div", { class: "value" }, value), h("div", { class: "label" }, label));
   const quick = (label, onclick, cls) => h("button", { class: cls || "", onclick }, label);

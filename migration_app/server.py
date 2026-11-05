@@ -455,7 +455,6 @@ def setup_status() -> dict:
     user_map = read_json_file(ROOT / "user_map.json", {})
     skipped = read_json_file(ROOT / "asana_users_not_in_jira.json", {})
     status_map = read_json_file(ROOT / "section_status_map.json", {})
-    session = ROOT / "auth_state.json"
     runs = runner.list()
     trial = next((r for r in runs if r["tool_id"] in ("full_pipeline", "asana_jira_sync") and "--dry-run" in r["argv"]
                   and r["status"] in ("ok", "partial")), None)
@@ -476,8 +475,6 @@ def setup_status() -> dict:
         {"id": "people", "done": bool(user_map or skipped),
          "detail": f"user_map.json: {len(user_map)} osób, nie w Jirze: {len(skipped)}" if (user_map or skipped) else "Brak mapy osób."},
         {"id": "statuses", **status_map_step(status_map)},
-        {"id": "session", "done": session.exists(),
-         "detail": f"Sesja sprzed {round((time.time() - session.stat().st_mtime) / 3600, 1)} h" if session.exists() else "Brak zapisanej sesji."},
         {"id": "trial", "done": bool(trial), "detail": f"Ostatni podgląd: {trial['command']}" if trial else "Jeszcze nie uruchomiono."},
         {"id": "migrate", "done": bool(counts), "detail": f"{len(counts)} projektów, {sum(counts.values())} zadań w stanie" if counts else "Jeszcze nic nie zmigrowano."},
         {"id": "verify", "done": any(CHECKS_DIR.glob("*.json")), "detail": f"{len(list(CHECKS_DIR.glob('*.json')))} sprawdzonych projektów"},

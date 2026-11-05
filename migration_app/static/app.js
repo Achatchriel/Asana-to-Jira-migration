@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Tomasz Strona (GitHub: Achatchriel). All rights reserved.
+// Private, non-commercial use only. Any commercial use is strictly prohibited. See LICENSE.
 "use strict";
 
 // ------------------------------------------------------------------ stan i narzędzia
@@ -1102,6 +1104,168 @@ VIEWS.people = async main => {
   drawMapping();
 };
 
+// ------------------------------------------------------------------ Migracja jednego projektu
+
+// Link do projektu w Asanie → nowy projekt w Jirze: konfiguracja ze wzorca albo z projektu
+// źródłowego, indywidualna mapa sekcji na statusy tego projektu, role, potem zadania.
+VIEWS.migrate = async main => {
+  await ensureCatalog();
+  const setup = await api("GET", "setup").catch(() => ({ env: {} }));
+  const templateKey = (setup.env || {}).JIRA_TEMPLATE_PROJECT_KEY || "";
+  const globalMap = (await api("GET", "statusmap").catch(() => ({ map: {} }))).map || {};
+  const v = { "--config": templateKey ? "template" : "source", "--name-base": "key" };
+  let asana = null, statuses = null, work = {};
+  const SKIP = "__pomin__";
+
+  const field = (name, label, opts = {}) => {
+    const input = h("input", { type: "text", placeholder: opts.placeholder || "", value: v[name] || "",
+      oninput: e => { if (opts.upper) e.target.value = e.target.value.toUpperCase(); v[name] = e.target.value.trim(); if (opts.onchange) opts.onchange(); } });
+    return Object.assign(h("div", { class: "field" }, h("span", {}, label, opts.required ? " *" : ""), input,
+      opts.help ? h("small", { class: "muted" }, opts.help) : null), { input });
+  };
+
+  // --- 1. Asana
+  const asanaInfo = h("div", { style: "margin-top:8px" });
+  const linkF = field("--asana-link", "Link do projektu w Asanie", { required: true, placeholder: "https://app.asana.com/…" });
+  const nameF = field("--name", "Nazwa projektu w Jirze", { help: "Puste = nazwa z Asany." });
+  const loadAsana = h("button", { class: "primary", onclick: async () => {
+    if (!v["--asana-link"]) return toast("Wklej link do projektu Asany.", true);
+    loadAsana.disabled = true; loadAsana.textContent = "Wczytuję…";
+    try {
+      asana = await api("GET", "asana/project?link=" + encodeURIComponent(v["--asana-link"]));
+      if (!v["--name"]) { v["--name"] = asana.name; nameF.input.value = asana.name; }
+      asanaInfo.replaceChildren(h("div", { class: "notice ok", style: "margin:0" }, `${asana.name}: ${asana.tasks} zadań w ${asana.sections.length} sekcjach.`));
+      initWork(); drawMap();
+    } catch (e) { asanaInfo.replaceChildren(h("div", { class: "notice bad", style: "margin:0" }, e.message)); }
+    loadAsana.disabled = false; loadAsana.textContent = "Wczytaj projekt";
+  } }, "Wczytaj projekt");
+
+  // --- 2. Konfiguracja i statusy
+  const statusInfo = h("small", { class: "muted" });
+  const srcF = field("--source", "Projekt źródłowy (klucz)", { upper: true, placeholder: "ABC" });
+  const srcBox = h("div", {}, h("div", { class: "form-grid" }, srcF,
+    h("div", { class: "field" }, h("span", {}, "Nazwy kopii schematów"), h("div", { class: "row" },
+      h("label", { class: "check" }, h("input", { type: "radio", name: "mnb", checked: true, onchange: () => { v["--name-base"] = "key"; } }), "od klucza"),
+      h("label", { class: "check" }, h("input", { type: "radio", name: "mnb", onchange: () => { v["--name-base"] = "name"; } }), "od nazwy")))),
+    h("p", { class: "muted", style: "margin:6px 0 0" }, "Jak „Kopia projektu”: każdy schemat źródła dostaje kopię z nazwą nowego projektu, tablice z kolumnami i statusami są kopiowane."));
+  const configKey = () => v["--config"] === "template" ? templateKey : (v["--source"] || "").toUpperCase();
+  const loadStatuses = h("button", { onclick: async () => {
+    const key = configKey();
+    if (!key) return toast(v["--config"] === "template" ? "Brak JIRA_TEMPLATE_PROJECT_KEY w .env." : "Podaj projekt źródłowy.", true);
+    loadStatuses.disabled = true;
+    try {
+      statuses = await api("GET", "jira/statuses?project=" + encodeURIComponent(key));
+      statusInfo.textContent = `Statusy projektu ${key}: ${statuses.length}.`;
+      initWork(); drawMap();
+    } catch (e) { toast(e.message, true); }
+    loadStatuses.disabled = false;
+  } }, "Wczytaj statusy");
+  const drawConfig = () => { srcBox.style.display = v["--config"] === "source" ? "" : "none"; statuses = null; statusInfo.textContent = ""; drawMap(); };
+
+  // --- 3. Mapa sekcji
+  const mapBox = h("div");
+  const doneSel = h("select", { style: "max-width:240px", onchange: e => { work.__ukonczone__ = e.target.value; } });
+  function initWork() {
+    if (!asana || !statuses) return;
+    const known = new Set(statuses.map(s => s.name));
+    work = {};
+    for (const s of asana.sections) {
+      const g = globalMap[s.name];
+      const fromGlobal = typeof g === "string" ? g : (g && typeof g === "object" ? (g.pomin ? SKIP : g.status) : "");
+      const sug = suggestStatus(s.name, statuses);
+      work[s.name] = fromGlobal === SKIP || known.has(fromGlobal) ? fromGlobal : (sug ? sug.status : "");
+    }
+    const gd = globalMap.__ukonczone__;
+    work.__ukonczone__ = known.has(gd) ? gd : ((categoryStatus("done", statuses) || {}).name || "");
+  }
+  function drawMap() {
+    if (!asana || !statuses) {
+      mapBox.replaceChildren(h("p", { class: "muted" }, "Wczytaj projekt Asany (krok 1) i statusy konfiguracji (krok 2) - wtedy pojawią się sekcje do zmapowania."));
+      return;
+    }
+    doneSel.replaceChildren(...statuses.map(s => h("option", { value: s.name, selected: s.name === work.__ukonczone__ }, `${s.name}${s.category === "done" ? "" : " (nie jest „zakończony”)"}`)));
+    const opts = cur => [h("option", { value: "" }, "(bez mapowania - status startowy)"),
+      ...["new", "indeterminate", "done"].map(cat => h("optgroup", { label: { new: "Do zrobienia", indeterminate: "W toku", done: "Zakończone" }[cat] },
+        statuses.filter(s => s.category === cat).map(s => h("option", { value: s.name, selected: s.name === cur }, s.name)))),
+      h("option", { value: SKIP, selected: cur === SKIP }, "— pomiń: nie migruj zadań z tej sekcji —")];
+    const unmapped = asana.sections.filter(s => !work[s.name] && (s.open || s.completed)).length;
+    mapBox.replaceChildren(
+      h("div", { class: "notice" }, h("div", { class: "row" }, h("strong", {}, "Zadania ukończone w Asanie →"), doneSel)),
+      unmapped ? h("div", { class: "notice warn" }, `${unmapped} sekcji z zadaniami bez mapowania - ich zadania zostaną w statusie startowym workflow.`) : null,
+      h("div", { class: "table-wrap" }, h("table", {},
+        h("thead", {}, h("tr", {}, h("th", {}, "Sekcja Asany"), h("th", { class: "num" }, "Otwarte"), h("th", { class: "num" }, "Ukończone"), h("th", {}, "Status w Jirze"), h("th", {}, "Propozycja"))),
+        h("tbody", {}, asana.sections.map(s => {
+          const g = suggestStatus(s.name, statuses);
+          return h("tr", {}, h("td", {}, s.name), h("td", { class: "num" }, s.open), h("td", { class: "num" }, s.completed),
+            h("td", {}, h("select", { style: "max-width:260px", onchange: e => { work[s.name] = e.target.value; drawMap(); } }, opts(work[s.name]))),
+            h("td", {}, g && g.status !== work[s.name] ? h("button", { class: "small", onclick: () => { work[s.name] = g.status; drawMap(); } }, "← " + g.status, h("small", { class: "muted" }, ` (${g.reason})`)) : h("span", { class: "muted" }, g ? "✓" : "—")));
+        })))),
+      h("p", { class: "muted", style: "margin-top:8px" }, "Mapa trafia do section_status_map.<KLUCZ>.json i dotyczy tylko tego projektu (pierwszeństwo przed mapą główną). Propozycje: wpis z mapy głównej, jeśli wskazuje istniejący status, inaczej nazwa i znaczenie sekcji."));
+  }
+
+  // --- 4. Role i uruchomienie
+  const roles = rolesEditor();
+  const logBox = h("div", { style: "margin-top:12px" });
+  const flags = { "--no-sync": false, "--existing-target": false };
+  const run = dry => async () => {
+    if (!v["--asana-link"] || !asana) return toast("Wczytaj projekt Asany (krok 1).", true);
+    if (!v["--key"]) return toast("Podaj klucz nowego projektu.", true);
+    if (v["--config"] === "source" && !v["--source"]) return toast("Podaj projekt źródłowy.", true);
+    if (!statuses) return toast("Wczytaj statusy konfiguracji (krok 2).", true);
+    if (!work.__ukonczone__) return toast("Wybierz status dla zadań ukończonych w Asanie.", true);
+    if (roles.missingRole().length) return toast("Wybierz rolę dla: " + roles.missingRole().join(", "), true);
+    let files;
+    try {
+      const map = {};
+      for (const [k, val] of Object.entries(work)) if (val) map[k] = val === SKIP ? { pomin: true } : val;
+      files = await api("POST", "migrate/files", { key: v["--key"], map, roles: roles.selection() });
+    } catch (e) { return toast(e.message, true); }
+    const values = { ...v, "--dry-run": dry, "--map-file": files.map_file, "--roles-file": files.roles_file || "",
+      "--no-roles": v["--config"] === "source" && !roles.count(), ...flags };
+    if (v["--config"] === "template") delete values["--source"];
+    await runInline(logBox, "migrate_project", values);
+  };
+
+  const myId = (((setup.check || {}).jira || {}).data || {}).account_id;
+  function leadField() {
+    const f = field("--lead", "Lead (accountId)", { help: "Puste = DEFAULT_LEAD_ACCOUNT_ID z .env (wzorzec) albo lead projektu źródłowego." });
+    if (myId) f.append(h("button", { class: "link small", type: "button", onclick: () => { v["--lead"] = myId; f.input.value = myId; } }, "użyj mojego konta"));
+    return f;
+  }
+
+  draw();
+  function draw() {
+    main.replaceChildren(
+      h("div", { class: "page-head" }, h("div", {}, h("h1", {}, "Migracja projektu"),
+        h("small", {}, "Jeden projekt z Asany do Jiry na podstawie linku - bez arkusza. Statusy mapujesz indywidualnie na statusy projektu wzorcowego albo źródłowego."))),
+      h("div", { class: "card" }, h("h2", {}, "1. Projekt w Asanie"),
+        h("div", { class: "form-grid" }, linkF, h("div", { class: "field" }, h("span", {}, " "), loadAsana)), asanaInfo),
+      h("div", { class: "card" }, h("h2", {}, "2. Nowy projekt w Jirze"),
+        h("div", { class: "form-grid" },
+          field("--key", "Klucz nowego projektu", { required: true, upper: true, placeholder: "XYZ", help: "2-10 znaków: wielkie litery i cyfry, na początku litera." }),
+          nameF, leadField(),
+          field("--description", "Opis", { help: "Puste = projekt bez opisu." }))),
+      h("div", { class: "card" }, h("h2", {}, "3. Konfiguracja projektu"),
+        h("div", { class: "row" },
+          h("label", { class: "check" }, h("input", { type: "radio", name: "mcfg", checked: v["--config"] === "template", disabled: !templateKey,
+            onchange: () => { v["--config"] = "template"; drawConfig(); } }), templateKey ? `projekt wzorcowy (${templateKey})` : "projekt wzorcowy (brak JIRA_TEMPLATE_PROJECT_KEY)"),
+          h("label", { class: "check" }, h("input", { type: "radio", name: "mcfg", checked: v["--config"] === "source",
+            onchange: () => { v["--config"] = "source"; drawConfig(); } }), "projekt źródłowy (jak w „Kopii projektu”)")),
+        h("p", { class: "muted", style: "margin:6px 0" }, "Wzorzec: nowy projekt dostaje te same schematy co projekt wzorcowy, tablica - kolumny i statusy tablicy wzorcowej, a role - grupę deweloperów i administratorów z .env (albo osoby z sekcji „Role i dostęp”)."),
+        srcBox, h("div", { class: "row", style: "margin-top:10px" }, loadStatuses, statusInfo)),
+      h("div", { class: "card" }, h("h2", {}, "4. Sekcje Asany → statusy Jiry"), mapBox),
+      roles.card,
+      h("div", { class: "card" }, h("div", { class: "row" }, h("h2", { style: "margin:0" }, "5. Uruchomienie"), h("span", { class: "spacer" }),
+          h("button", { onclick: run(true) }, "Podgląd (dry-run)"), h("button", { class: "primary", onclick: run(false) }, "Utwórz i migruj")),
+        h("div", { class: "row", style: "margin-top:8px" },
+          h("label", { class: "check" }, h("input", { type: "checkbox", onchange: e => { flags["--no-sync"] = e.target.checked; } }), "tylko utwórz i skonfiguruj (bez zadań)"),
+          h("label", { class: "check" }, h("input", { type: "checkbox", onchange: e => { flags["--existing-target"] = e.target.checked; } }), "projekt już istnieje (dokończ pozostałe kroki)")),
+        h("p", { class: "muted", style: "margin:8px 0 0" }, "Role: przy projekcie wzorcowym pusta lista oznacza grupę deweloperów i administratorów z .env; przy projekcie źródłowym - nikogo (poza leadem). Projekt spoza arkusza nie wchodzi do pełnego pipeline'u - kolejne synchronizacje uruchamiasz stąd (z „projekt już istnieje”)."),
+        logBox));
+    drawConfig();
+  }
+};
+
 // ------------------------------------------------------------------ Kopia projektu
 
 // Kto i z jakimi rolami trafia do nowego projektu: osoby i grupy wyszukiwane w całej Jirze,
@@ -1230,7 +1394,7 @@ VIEWS.copy = async main => {
         input("--target-key", "Klucz nowego projektu", { required: true, upper: true, placeholder: "XYZ", help: "2-10 znaków: wielkie litery i cyfry, na początku litera." }),
         input("--target-name", "Nazwa nowego projektu", { required: true }),
         input("--lead-account-id", "Lead (accountId)", { help: "Puste = lead projektu źródłowego." }),
-        input("--description", "Opis", { help: "Puste = opis projektu źródłowego." }))),
+        input("--description", "Opis", { help: "Puste = projekt bez opisu (opis źródła nie jest kopiowany)." }))),
     h("div", { class: "card" },
       h("h2", {}, "Nazwy kopii schematów"),
       h("div", { class: "row" },

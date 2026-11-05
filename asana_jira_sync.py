@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Tomasz Strona (GitHub: Achatchriel). All rights reserved.
+# Private, non-commercial use only. Any commercial use is strictly prohibited. See LICENSE.
 """
 asana_jira_sync.py - synchronizacja Asana -> Jira (krok 5 run_full_pipeline.py)
 
@@ -2031,7 +2033,15 @@ def get_project_pairs(args) -> list[tuple[str, str, str]]:
     arkusza. Klucz Jiry z kolumny jira_key, a gdy jej brak - z
     project_key_cache.json (tak jak jira_sync.py). link_do_Asany może być
     pusty - wtedy sync_project() POMIJA projekt z ostrzeżeniem (dopasowanie
-    po nazwie jest celowo wyłączone)."""
+    po nazwie jest celowo wyłączone).
+
+    Z --asana-link (i jednym kluczem w --project-keys) arkusz jest pomijany - projekt
+    spoza arkusza, np. z karty „Migracja projektu” w panelu."""
+    if getattr(args, "asana_link", None):
+        keys = [k.strip().upper() for k in (args.project_keys or "").split(",") if k.strip()]
+        if len(keys) != 1:
+            raise SystemExit("--asana-link wymaga dokładnie jednego klucza w --project-keys.")
+        return drop_excluded([(args.asana_name or keys[0], keys[0], args.asana_link)], 1)
     sheet_rows = core.get_sheet_rows()
     cache = core.load_key_cache()
     pairs = []
@@ -2057,6 +2067,9 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--project-keys", type=str, default=None)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--asana-link", default=None,
+                        help="Link do projektu Asany dla JEDNEGO projektu z --project-keys - bez arkusza")
+    parser.add_argument("--asana-name", default=None, help="Nazwa projektu Asany (do komunikatów) przy --asana-link")
     parser.add_argument(
         "--shard", type=str, default=None,
         help="Podział pracy między kilka RÓWNOLEGLE uruchomionych procesów, bez ręcznego "

@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Tomasz Strona (GitHub: Achatchriel). All rights reserved.
+# Private, non-commercial use only. Any commercial use is strictly prohibited. See LICENSE.
 import os
 import time
 import requests

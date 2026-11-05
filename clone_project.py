@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Tomasz Strona (GitHub: Achatchriel). All rights reserved.
+# Private, non-commercial use only. Any commercial use is strictly prohibited. See LICENSE.
 """
 clone_project.py — kopia projektu Jiry (company-managed) z WŁASNYMI kopiami schematów.
 
@@ -15,9 +17,9 @@ Co robi, w kolejności:
        tworzeniu schematu (np. Product Discovery, COPY_PROJECT), nie da się skopiować.
      Schemat o takiej nazwie, który już istnieje (np. z przerwanego uruchomienia),
      jest używany ponownie zamiast tworzenia drugiego.
-  2. Tworzy projekt (typ, lead, opis, URL, kategoria, domyślne przypisanie jak w
-     źródle) od razu ze schematami uprawnień, powiadomień i bezpieczeństwa, a potem
-     podpina kopie pozostałych schematów.
+  2. Tworzy projekt (typ, lead, URL, kategoria, domyślne przypisanie jak w źródle;
+     opis tylko podany w --description) od razu ze schematami uprawnień, powiadomień
+     i bezpieczeństwa, a potem podpina kopie pozostałych schematów.
   3. Kopiuje komponenty, wersje i konteksty pól niestandardowych ograniczone do
      projektu źródłowego (nowy projekt jest do nich dopisywany). Do ról dodaje osoby
      i grupy z --roles-file (wybór w panelu) - albo, z --roles-from-source, jak w źródle.
@@ -299,11 +301,11 @@ def copy_schemes(srcs: dict, base: str) -> dict:
 # Projekt
 # --------------------------------------------------------------------------- #
 
-def create_project(src: dict, key: str, name: str, lead: str, schemes: dict, keep_desc: str) -> str:
+def create_project(src: dict, key: str, name: str, lead: str, schemes: dict, description: str) -> str:
     body = {"key": key, "name": name, "projectTypeKey": src["projectTypeKey"],
             "leadAccountId": lead, "assigneeType": src.get("assigneeType") or "UNASSIGNED"}
-    if keep_desc or src.get("description"):
-        body["description"] = keep_desc or src["description"]
+    if description:  # opis tylko podany wprost - opisu źródła nie kopiujemy
+        body["description"] = description
     if src.get("url"):
         body["url"] = src["url"]
     if (src.get("projectCategory") or {}).get("id"):
@@ -609,7 +611,7 @@ def main() -> None:
     ap.add_argument("--target-key", required=True, help="Klucz nowego projektu")
     ap.add_argument("--target-name", required=True, help="Nazwa nowego projektu")
     ap.add_argument("--lead-account-id", default="", help="Lead nowego projektu (domyślnie lead źródła)")
-    ap.add_argument("--description", default="", help="Opis nowego projektu (domyślnie opis źródła)")
+    ap.add_argument("--description", default="", help="Opis nowego projektu (domyślnie pusty)")
     ap.add_argument("--name-base", choices=["key", "name"], default="key",
                     help="Początek nazw kopii schematów: klucz (XYZ Permission Scheme) albo nazwa nowego projektu")
     ap.add_argument("--existing-target", action="store_true",

@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Tomasz Strona (GitHub: Achatchriel). All rights reserved.
+# Private, non-commercial use only. Any commercial use is strictly prohibited. See LICENSE.
 """
 jira_lookup.py — TYLKO ODCZYT. Małe zapytania do Jiry dla panelu (karta „Kopia projektu”).
 Wynik: JSON na stdout. Z .env czyta tylko JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN.
 
   python migration_app/jira_lookup.py allroles              # wszystkie role projektowe w Jirze
   python migration_app/jira_lookup.py roles --project ABC   # role projektu z osobami i grupami + wszystkie role
+  python migration_app/jira_lookup.py statuses --project ABC  # statusy projektu z kategorią
   python migration_app/jira_lookup.py users --query jan     # wyszukiwanie osób
   python migration_app/jira_lookup.py groups --query staff  # wyszukiwanie grup
 """
@@ -51,6 +54,15 @@ def all_roles() -> list:
                    for r in get("/rest/api/3/role") if r["name"] != ADDON_ROLE), key=lambda r: r["name"].lower())
 
 
+def statuses(project: str) -> list:
+    """Statusy projektu (unikalne nazwy z kategorią) - cel mapowania sekcji Asany."""
+    out = {}
+    for it in get(f"/rest/api/3/project/{project}/statuses"):
+        for s in it.get("statuses", []):
+            out.setdefault(s["name"], (s.get("statusCategory") or {}).get("key"))
+    return [{"name": n, "category": c} for n, c in sorted(out.items(), key=lambda x: x[0].lower())]
+
+
 def users(query: str) -> list:
     return [{"accountId": u["accountId"], "name": u.get("displayName"), "email": u.get("emailAddress"),
              "active": u.get("active", True)}
@@ -70,13 +82,14 @@ def groups(query: str) -> list:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["allroles", "roles", "users", "groups"])
+    ap.add_argument("cmd", choices=["allroles", "roles", "statuses", "users", "groups"])
     ap.add_argument("--project", default="")
     ap.add_argument("--query", default="")
     a = ap.parse_args()
     if not (BASE and all(AUTH)):
         sys.exit("Brak dostępu do Jiry w .env.")
     data = (all_roles() if a.cmd == "allroles" else roles(a.project) if a.cmd == "roles"
+            else statuses(a.project) if a.cmd == "statuses"
             else users(a.query) if a.cmd == "users" else groups(a.query))
     json.dump(data, sys.stdout, ensure_ascii=False)
 

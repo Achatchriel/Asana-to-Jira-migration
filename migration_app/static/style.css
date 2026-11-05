@@ -168,3 +168,7 @@ dialog .cmd { margin: 10px 0 14px; }
 .lang-switch button { flex: 1; }
 .lang-switch button.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); font-weight: 600; }
 @media (max-width: 900px) { .lang-switch { width: auto; } }
+
+.legal { margin-top: auto; padding: 10px 6px 0; border-top: 1px solid var(--border); font-size: 11px; line-height: 1.45; color: var(--muted); }
+.legal-warn { display: block; margin: 4px 0; color: var(--bad); font-weight: 600; }
+.legal a { font-size: 11px; }

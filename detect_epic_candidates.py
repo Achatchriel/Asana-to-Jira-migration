@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Tomasz Strona (GitHub: Achatchriel). All rights reserved.
+# Private, non-commercial use only. Any commercial use is strictly prohibited. See LICENSE.
 """
 detect_epic_candidates.py
 
@@ -170,10 +172,19 @@ def main() -> None:
                         help="Przeskanuj wszystkie projekty od nowa, nawet te już obecne w "
                              "epic_candidates.json. Domyślnie skrypt WZNAWIA - pomija już zapisane "
                              "projekty, żeby po padzie można było po prostu uruchomić go ponownie.")
+    parser.add_argument("--asana-link", default=None,
+                        help="Link do projektu Asany dla JEDNEGO projektu z --project-keys - bez arkusza")
     args = parser.parse_args()
 
-    sheet_rows = core.get_sheet_rows()
-    rows_by_key = {r.jira_key: r for r in sheet_rows if r.jira_key}
+    if args.asana_link:
+        keys = [k.strip() for k in (args.project_keys or "").split(",") if k.strip()]
+        if len(keys) != 1:
+            raise SystemExit("--asana-link wymaga dokładnie jednego klucza w --project-keys.")
+        from types import SimpleNamespace
+        rows_by_key = {keys[0]: SimpleNamespace(jira_key=keys[0], asana_project_link=args.asana_link)}
+    else:
+        sheet_rows = core.get_sheet_rows()
+        rows_by_key = {r.jira_key: r for r in sheet_rows if r.jira_key}
 
     if args.project_keys:
         jira_keys = [k.strip() for k in args.project_keys.split(",") if k.strip()]

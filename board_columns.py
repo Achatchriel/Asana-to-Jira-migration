@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Tomasz Strona (GitHub: Achatchriel). All rights reserved.
+# Private, non-commercial use only. Any commercial use is strictly prohibited. See LICENSE.
 """
 board_columns.py — kolumny tablic i przypisanie statusów do kolumn PRZEZ API (kroki 2-3
 run_full_pipeline.py). Zastępuje bulk_configure_columns.py i run_column_assignments.py:

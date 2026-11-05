@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Tomasz Strona (GitHub: Achatchriel). All rights reserved.
+# Private, non-commercial use only. Any commercial use is strictly prohibited. See LICENSE.
 """
 sheet_projects.py — TYLKO ODCZYT. Zapisuje do migration_app/cache/sheet.json
 projekty z arkusza Google tak, jak widzą je skrypty jiraSync: klucz z kolumny

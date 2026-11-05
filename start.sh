@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Tomasz Strona (GitHub: Achatchriel). All rights reserved.
+# Private, non-commercial use only. Any commercial use is strictly prohibited. See LICENSE.
 # Instaluje wszystko, czego potrzeba (przy pierwszym uruchomieniu), i otwiera panel migracji.
 #   ./start.sh               -> http://127.0.0.1:8765
 #   ./start.sh --port 9000   -> inny port

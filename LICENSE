@@ -1,0 +1,48 @@
+Asana-to-Jira migration toolkit and panel
+Copyright (c) 2026 Tomasz Strona (GitHub: Achatchriel). All rights reserved.
+
+PRIVATE, NON-COMMERCIAL USE ONLY
+
+This software (the scripts, the migration panel and the documentation) is NOT open
+source. Its publication does not grant any license except the one stated below.
+
+1. You may download, run and modify this software solely for your own private,
+   non-commercial purposes.
+2. ANY COMMERCIAL USE IS STRICTLY PROHIBITED. This includes, without limitation:
+   use within or on behalf of a company or organisation, use in paid or client work
+   (including migrations performed for customers or employers), selling, licensing,
+   renting, offering it as a service, or including it, in whole or in part, in a
+   commercial product.
+3. You may not redistribute, sublicense or publish this software or modified versions
+   of it without the prior written permission of the author.
+4. This notice and the copyright headers must remain in all copies and parts of the
+   software.
+5. Commercial use requires a separate written license from the author.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
+IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+INCLUDING LOSS OR CORRUPTION OF DATA IN JIRA, ASANA OR GOOGLE SHEETS, ARISING FROM
+THE USE OF THE SOFTWARE.
+
+---
+
+Wersja polska (informacyjnie; w razie wątpliwości obowiązuje wersja angielska)
+
+Copyright (c) 2026 Tomasz Strona (GitHub: Achatchriel). Wszelkie prawa zastrzeżone.
+
+TYLKO DO UŻYTKU PRYWATNEGO, NIEKOMERCYJNEGO
+
+1. Oprogramowanie można pobierać, uruchamiać i modyfikować wyłącznie na własny,
+   prywatny, niekomercyjny użytek.
+2. JAKIEKOLWIEK UŻYCIE KOMERCYJNE JEST CAŁKOWICIE ZABRONIONE - w tym w firmie lub
+   organizacji albo na ich rzecz, w pracy płatnej lub dla klientów (także migracje
+   wykonywane dla klientów lub pracodawcy), sprzedaż, licencjonowanie, udostępnianie
+   jako usługa oraz włączanie w całości lub części do produktu komercyjnego.
+3. Bez pisemnej zgody autora nie wolno rozpowszechniać, sublicencjonować ani
+   publikować oprogramowania ani jego zmienionych wersji.
+4. Ta informacja i nagłówki praw autorskich muszą pozostać we wszystkich kopiach.
+5. Użycie komercyjne wymaga osobnej, pisemnej licencji od autora.
+
+Oprogramowanie jest dostarczane „TAK JAK JEST”, bez jakichkolwiek gwarancji. Autor nie
+odpowiada za szkody, w tym utratę lub uszkodzenie danych w Jirze, Asanie czy arkuszach
+Google, wynikające z jego użycia.

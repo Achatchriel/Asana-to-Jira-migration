@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Tomasz Strona (GitHub: Achatchriel). All rights reserved.
+# Private, non-commercial use only. Any commercial use is strictly prohibited. See LICENSE.
 """Pomocniczy skrypt: wypisuje dokładne nazwy zakładek w arkuszu Google."""
 import os
 from pathlib import Path

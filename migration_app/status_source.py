@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Tomasz Strona (GitHub: Achatchriel). All rights reserved.
+# Private, non-commercial use only. Any commercial use is strictly prohibited. See LICENSE.
 """
 status_source.py — TYLKO ODCZYT. Źródła do mapowania sekcji Asany na statusy Jiry
 (strona „Mapowanie statusów” w panelu). Wynik: migration_app/cache/statuses.json

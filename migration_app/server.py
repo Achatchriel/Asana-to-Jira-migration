@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Tomasz Strona (GitHub: Achatchriel). All rights reserved.
+# Private, non-commercial use only. Any commercial use is strictly prohibited. See LICENSE.
 """
 server.py — lokalny panel migracji Asana → Jira.
 
@@ -547,8 +549,11 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(length) or b"{}")
 
     def send_static(self, rel: str):
-        path = (STATIC_DIR / (rel or "index.html")).resolve()
-        if STATIC_DIR not in path.parents or not path.is_file():
+        if rel == "LICENSE.txt":  # licencja leży w katalogu głównym repo
+            path = ROOT / "LICENSE"
+        else:
+            path = (STATIC_DIR / (rel or "index.html")).resolve()
+        if (rel != "LICENSE.txt" and STATIC_DIR not in path.parents) or not path.is_file():
             return self.send_error_json(404, "Nie znaleziono")
         body = path.read_bytes()
         self.send_response(200)
@@ -659,8 +664,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_error_json(404, "Brak wyniku sprawdzenia dla tego projektu.")
             return self.send_json(json.loads(f.read_text(encoding="utf-8")))
         # -- karta „Kopia projektu”: odczyty z Jiry i wybór ról
-        if len(p) == 2 and p[0] == "jira" and method == "GET" and p[1] in ("allroles", "roles", "users", "groups"):
-            arg = (["--project", q.get("project", "")] if p[1] == "roles" else ["--query", q.get("q", "")]
+        if len(p) == 2 and p[0] == "jira" and method == "GET" and p[1] in ("allroles", "roles", "statuses", "users", "groups"):
+            arg = (["--project", q.get("project", "")] if p[1] in ("roles", "statuses") else ["--query", q.get("q", "")]
                    if p[1] != "allroles" else ["--query", "-"])
             if not arg[1].strip():
                 raise ValueError("Podaj projekt albo tekst do wyszukania.")
@@ -669,6 +674,32 @@ class Handler(BaseHTTPRequestHandler):
             if out.returncode != 0:
                 raise RuntimeError((out.stdout + out.stderr).strip()[-800:])
             return self.send_json(json.loads(out.stdout))
+        if p == ["asana", "project"] and method == "GET":
+            out = subprocess.run([python_executable(), str(APP_DIR / "asana_lookup.py"), q.get("link", "")], cwd=ROOT,
+                                 capture_output=True, text=True, timeout=300)
+            if out.returncode != 0:
+                raise RuntimeError((out.stdout + out.stderr).strip()[-800:])
+            return self.send_json(json.loads(out.stdout))
+        if p == ["migrate", "files"] and method == "POST":
+            # Mapa sekcji i wybór ról dla migrate_project.py - pliki w cache panelu.
+            body = self.read_json()
+            key = str(body.get("key", "")).upper()
+            if not re.fullmatch(r"[A-Z][A-Z0-9]{1,9}", key):
+                raise ValueError("Niepoprawny klucz nowego projektu.")
+            out = {}
+            section_map = {str(k): v for k, v in (body.get("map") or {}).items()
+                           if (isinstance(v, str) and v.strip()) or (isinstance(v, dict) and v.get("pomin"))}
+            path = CACHE_DIR / f"migrate_map_{key}.json"
+            path.write_text(json.dumps(section_map, ensure_ascii=False, indent=1), encoding="utf-8")
+            out["map_file"] = str(path.relative_to(ROOT))
+            roles = [{"id": str(r["id"]), "name": str(r.get("name") or r["id"]),
+                      "users": [str(u) for u in r.get("users") or []], "groups": [str(g) for g in r.get("groups") or []]}
+                     for r in body.get("roles") or [] if r.get("users") or r.get("groups")]
+            if roles:
+                rpath = CACHE_DIR / f"migrate_roles_{key}.json"
+                rpath.write_text(json.dumps(roles, ensure_ascii=False, indent=1), encoding="utf-8")
+                out["roles_file"] = str(rpath.relative_to(ROOT))
+            return self.send_json(out)
         if p == ["clone", "roles"] and method == "POST":
             body = self.read_json()
             key = str(body.get("target_key", "")).upper()
@@ -768,6 +799,8 @@ def main() -> None:
     httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     httpd.daemon_threads = True
     print(f"Panel migracji: http://127.0.0.1:{args.port}  (folder: {ROOT})")
+    print("© 2026 Tomasz Strona (GitHub: Achatchriel). Wszelkie prawa zastrzeżone. "
+          "Tylko do użytku prywatnego - użycie komercyjne całkowicie zabronione (LICENSE).")
     print("Zatrzymanie: Ctrl+C. Trwające uruchomienia narzędzi zostaną przerwane razem z panelem.")
     try:
         httpd.serve_forever()

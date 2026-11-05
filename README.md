@@ -2,6 +2,12 @@
 
 **English** · [Polski](README.pl.md)
 
+> **© 2026 Tomasz Strona (GitHub: Achatchriel). All rights reserved.**
+> This repository is for **private, non-commercial use only**. **Any commercial use is
+> strictly prohibited** - including use in or for a company, in paid or client work and
+> as part of a commercial product or service. It is not open source; redistribution
+> requires the author's written permission. See [LICENSE](LICENSE).
+
 A toolkit for moving selected projects from Asana to Jira and keeping them in sync.
 **You work with it through the web panel** (`migration_app/`): a local app in the
 browser from which you run every migration step, check statuses and people, edit
@@ -111,8 +117,9 @@ from the source project**.
   `COPY_PROJECT`) cannot be copied - the log lists them. A scheme with that name that already
   exists (e.g. after an interrupted run) is reused. The workflows, screens and field
   configurations themselves stay shared with the source (the new schemes point to them).
-- **Project:** type, lead (or the one you give), description, URL, category and default
-  assignee as in the source; the project is created with the scheme copies right away.
+- **Project:** type, lead (or the one you give), URL, category and default assignee as in
+  the source; the project is created with the scheme copies right away. The **description
+  is not copied** - it stays empty unless you type one in the tab (`--description`).
 - **Roles and access:** you search the whole Jira for people and groups and give each of them
   one or more roles (any project role in Jira) - the source project's members are not used.
   An empty list adds nobody (except the lead). The selection goes to the script as
@@ -137,6 +144,49 @@ again with "target project already exists". From the terminal:
 The older `copy_project.py` (section 4a) attaches **the same** schemes as the source to the
 new project and configures columns through the browser.
 
+## Project migration (one project from an Asana link)
+
+A tab for migrating a single project **without the Google Sheet**: you paste a link to the
+Asana project and the panel creates the Jira project, maps statuses and moves the tasks.
+Under the hood it runs `migrate_project.py`.
+
+1. **Project in Asana** - "Load project" reads the name, the sections (in Asana order) and
+   the number of open/completed tasks in each (`migration_app/asana_lookup.py`, read-only).
+2. **New project in Jira** - key, name (defaults to the Asana name), lead ("use my account"
+   fills in your accountId) and description (empty by default).
+3. **Project configuration** - one of:
+   - **template project** (`JIRA_TEMPLATE_PROJECT_KEY`): the same schemes as the template,
+     the board gets the template board's columns and statuses (`board_columns.py`), roles
+     get the developer group and administrators from `.env`;
+   - **source project** (as in "Copy project"): every source scheme gets a copy named after
+     the new project (from its key or name) and boards are copied with their columns -
+     `clone_project.py` does this.
+   "Load statuses" reads the statuses the new project will have (those of the template or
+   the source project).
+4. **Asana sections → Jira statuses** - every section gets its own select with **only the
+   statuses of the chosen configuration**. Suggestions come from the main map (if it points
+   to an existing status) or from the section's name; you can also skip a section. The map
+   is saved as `section_status_map.<KEY>.json` (the previous one is backed up) and applies to
+   this project only. You also choose the status for completed tasks.
+5. **Roles and access** - the same editor as in "Copy project" (people and groups from the
+   whole Jira, any roles). With the template, an empty list means the `.env` defaults; with
+   a source project, nobody except the lead.
+6. **Run** - "Preview (dry-run)" changes nothing; "Create and migrate" asks for
+   confirmation, then: creates and configures the project, writes the section map, sets
+   the board columns (template only), detects Epics and syncs the tasks
+   (`asana_jira_sync.py --asana-link`). Options: only create and configure (no tasks), and
+   "project already exists" to finish the remaining steps or re-sync later.
+
+A project migrated this way is not in the sheet, so the full pipeline does not see it -
+run further syncs from this tab. From the terminal:
+```bash
+.venv/bin/python migrate_project.py --asana-link "https://app.asana.com/1/<ws>/project/<gid>/board" \
+    --key XYZ --config template --map-file section_map.json --dry-run
+.venv/bin/python migrate_project.py --asana-link "<link>" --key XYZ --config source --source ABC --no-roles
+```
+`asana_jira_sync.py` and `detect_epic_candidates.py` also accept `--asana-link` (with exactly
+one project key) and then skip the sheet.
+
 ## Panel views
 
 | View | What it is for |
@@ -147,6 +197,7 @@ new project and configures columns through the browser.
 | **Tools** | 69 scripts in seven groups (table below), each with an options form. The panel shows the exact command before starting |
 | **Statuses and people** | a read-only check per project: Asana sections → Jira statuses (the same rules as the sync: project map, profile, main map, `__ukonczone__`), people → Jira accounts (whether they are in `user_map.json`, active, assignable - when they lack the permission the panel shows the permission scheme and the roles granting it) and status/assignee differences in already migrated issues. A missing section mapping can be saved straight to `section_status_map.<KEY>.json`, a person can be marked "not in Jira" |
 | **People mapping** / **Status mapping** | as above |
+| **Project migration** | one project from an Asana link to a new Jira project, with an individual section → status map (above) |
 | **Copy project** | a new project with an existing one's configuration and its own scheme copies (above) |
 | **Runs** | history with full live logs; an input field for scripts that ask for confirmation; stopping a whole run (with child processes) |
 | **Configuration** | editing `.env` (secrets masked, empty field = unchanged), status maps, profiles, `user_map.json`, `asana_users_not_in_jira.json`, `sync_exclude.txt`, `protected_projects.txt` and YAML schemas; files that don't exist yet are created on the first save |
@@ -1309,6 +1360,9 @@ DEBUG_SYNC=1 python asana_jira_sync.py --limit 1 --project-keys KEY
 | `start.sh` | installation (`.venv`, dependencies) and panel start |
 | `board_columns.py` | board columns and status-to-column mapping through the API - pipeline steps 2-3 (section 11a) |
 | `clone_project.py` | standalone project copy with scheme copies named after the new project (part I, "Copy project") |
+| `migrate_project.py` | one project from an Asana link: create, configure, section map, board, tasks (part I, "Project migration") |
+| `migration_app/asana_lookup.py` | read-only: name, sections and task counts of an Asana project (panel, "Project migration") |
+| `LICENSE` | license: private, non-commercial use only; commercial use prohibited |
 | `asana_users_not_in_jira.json` | Asana people deliberately without a Jira account (panel, "People mapping") |
 | `task_sync_state.json` | **automatically created** sync state (both directions) — do not delete |
 | `workflow_graph_cache.json` | **automatically created** cache of the workflow transition map — safe to delete |

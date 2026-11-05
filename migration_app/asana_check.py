@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Tomasz Strona (GitHub: Achatchriel). All rights reserved.
+# Private, non-commercial use only. Any commercial use is strictly prohibited. See LICENSE.
 """
 asana_check.py — TYLKO ODCZYT, niczego nie zmienia (ani w Asanie, ani w Jirze, ani w stanie).
 

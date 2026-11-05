@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Tomasz Strona (GitHub: Achatchriel). All rights reserved.
+// Private, non-commercial use only. Any commercial use is strictly prohibited. See LICENSE.
 "use strict";
 
 // Język panelu. Interfejs jest pisany po polsku; w trybie EN teksty są tłumaczone
@@ -183,12 +185,44 @@ const EN = {
   "\nWpisy sekcji spoza wczytanej listy zostaną usunięte.": "\nEntries of sections outside the loaded list will be removed.",
   "ta sama nazwa": "same name", "zakończone": "done", "w toku": "in progress", "do zrobienia": "to do",
 
+  // --- Autorstwo i licencja
+  "Wszelkie prawa zastrzeżone.": "All rights reserved.",
+  "Tylko do użytku prywatnego. Użycie komercyjne jest całkowicie zabronione.": "Private use only. Any commercial use is strictly prohibited.",
+  "Licencja": "License",
+
+  // --- Migracja projektu
+  "Migracja projektu": "Project migration",
+  "Jeden projekt z Asany do Jiry na podstawie linku - bez arkusza. Statusy mapujesz indywidualnie na statusy projektu wzorcowego albo źródłowego.": "One project from Asana to Jira from a link - no sheet. You map statuses individually to the statuses of the template or source project.",
+  "1. Projekt w Asanie": "1. Project in Asana", "Link do projektu w Asanie": "Asana project link", "Wczytaj projekt": "Load project", "Wczytuję…": "Loading…",
+  "Wklej link do projektu Asany.": "Paste the Asana project link.", "Nazwa projektu w Jirze": "Project name in Jira", "Puste = nazwa z Asany.": "Empty = the name from Asana.",
+  "2. Nowy projekt w Jirze": "2. New project in Jira",
+  "Puste = DEFAULT_LEAD_ACCOUNT_ID z .env (wzorzec) albo lead projektu źródłowego.": "Empty = DEFAULT_LEAD_ACCOUNT_ID from .env (template) or the source project's lead.",
+  "Puste = projekt bez opisu.": "Empty = no description.", "3. Konfiguracja projektu": "3. Project configuration",
+  "projekt wzorcowy (brak JIRA_TEMPLATE_PROJECT_KEY)": "template project (no JIRA_TEMPLATE_PROJECT_KEY)", "projekt źródłowy (jak w „Kopii projektu”)": "source project (as in \"Copy project\")",
+  "Wzorzec: nowy projekt dostaje te same schematy co projekt wzorcowy, tablica - kolumny i statusy tablicy wzorcowej, a role - grupę deweloperów i administratorów z .env (albo osoby z sekcji „Role i dostęp”).": "Template: the new project gets the same schemes as the template project, its board gets the template board's columns and statuses, and roles get the developer group and administrators from .env (or the people from \"Roles and access\").",
+  "Jak „Kopia projektu”: każdy schemat źródła dostaje kopię z nazwą nowego projektu, tablice z kolumnami i statusami są kopiowane.": "As in \"Copy project\": every source scheme gets a copy named after the new project; boards with columns and statuses are copied.",
+  "od klucza": "from the key", "od nazwy": "from the name", "Wczytaj statusy": "Load statuses",
+  "Brak JIRA_TEMPLATE_PROJECT_KEY w .env.": "No JIRA_TEMPLATE_PROJECT_KEY in .env.", "Podaj projekt źródłowy.": "Enter the source project.",
+  "4. Sekcje Asany → statusy Jiry": "4. Asana sections → Jira statuses",
+  "Wczytaj projekt Asany (krok 1) i statusy konfiguracji (krok 2) - wtedy pojawią się sekcje do zmapowania.": "Load the Asana project (step 1) and the configuration's statuses (step 2) - then the sections to map appear.",
+  "Mapa trafia do section_status_map.<KLUCZ>.json i dotyczy tylko tego projektu (pierwszeństwo przed mapą główną). Propozycje: wpis z mapy głównej, jeśli wskazuje istniejący status, inaczej nazwa i znaczenie sekcji.": "The map goes to section_status_map.<KEY>.json and applies to this project only (precedence over the main map). Suggestions: the main map entry if it points to an existing status, otherwise the section's name and meaning.",
+  "5. Uruchomienie": "5. Run", "Utwórz i migruj": "Create and migrate", "tylko utwórz i skonfiguruj (bez zadań)": "only create and configure (no tasks)",
+  "projekt już istnieje (dokończ pozostałe kroki)": "project already exists (finish the remaining steps)",
+  "Role: przy projekcie wzorcowym pusta lista oznacza grupę deweloperów i administratorów z .env; przy projekcie źródłowym - nikogo (poza leadem). Projekt spoza arkusza nie wchodzi do pełnego pipeline'u - kolejne synchronizacje uruchamiasz stąd (z „projekt już istnieje”).": "Roles: with the template project an empty list means the developer group and administrators from .env; with a source project - nobody (except the lead). A project outside the sheet is not part of the full pipeline - run further syncs from here (with \"project already exists\").",
+  "Wczytaj projekt Asany (krok 1).": "Load the Asana project (step 1).", "Podaj klucz nowego projektu.": "Enter the new project key.",
+  "Wczytaj statusy konfiguracji (krok 2).": "Load the configuration's statuses (step 2).",
+  "Migracja jednego projektu (link do Asany)": "Single project migration (Asana link)",
+  "Link do Asany w każdym zgłoszeniu": "Asana link in every issue",
+  "Link do projektu Asany": "Asana project link", "Nazwa (domyślnie z Asany)": "Name (from Asana by default)", "Konfiguracja z": "Configuration from",
+  "Projekt źródłowy (dla source)": "Source project (for source)", "Plik mapy sekcji (JSON)": "Section map file (JSON)", "Bez migracji zadań": "Without task migration",
+  "Link do projektu w Asanie → nowy projekt w Jirze (konfiguracja ze wzorca albo z projektu źródłowego), indywidualna mapa sekcji, tablica, zadania. Bez arkusza. Karta „Migracja projektu”.": "Asana project link → new Jira project (configuration from the template or a source project), individual section map, board, tasks. No sheet. The \"Project migration\" tab.",
+
   // --- Kopia projektu
   "Nowy projekt z konfiguracją projektu źródłowego - każdy schemat dostaje własną kopię z nazwą nowego projektu. Nie korzysta z projektu wzorcowego ani ustawień z .env (poza dostępem do Jiry).": "A new project with the source project's configuration - every scheme gets its own copy named after the new project. Does not use the template project or .env settings (except Jira access).",
   "Projekt źródłowy (klucz)": "Source project (key)", "Klucz nowego projektu": "New project key",
   "2-10 znaków: wielkie litery i cyfry, na początku litera.": "2-10 characters: uppercase letters and digits, starting with a letter.",
   "Nazwa nowego projektu": "New project name", "Lead (accountId)": "Lead (accountId)", "Puste = lead projektu źródłowego.": "Empty = the source project's lead.",
-  "Opis": "Description", "wartość": "value", "KLUCZ": "KEY", "Nazwa projektu": "Project name", "NOWA_ZMIENNA": "NEW_VARIABLE", "Puste = opis projektu źródłowego.": "Empty = the source project's description.", "Nazwy kopii schematów": "Scheme copy names",
+  "Opis": "Description", "wartość": "value", "KLUCZ": "KEY", "Nazwa projektu": "Project name", "NOWA_ZMIENNA": "NEW_VARIABLE", "Puste = projekt bez opisu (opis źródła nie jest kopiowany).": "Empty = no description (the source description is not copied).", "Nazwy kopii schematów": "Scheme copy names",
   "od klucza nowego projektu": "from the new project's key", "od nazwy nowego projektu": "from the new project's name",
   "Kopiowane są tylko schematy, których źródło używa (np. bez schematu bezpieczeństwa nie powstaje jego kopia). W instancjach sprzed migracji na Field Schemes zamiast „Field Scheme” powstaje „Field Configuration Scheme”. Uprawnień, których Jira nie przyjmuje przy tworzeniu schematu (np. Product Discovery, COPY_PROJECT), nie da się skopiować - log je wymienia. Schemat o takiej nazwie, który już istnieje, jest używany ponownie. Same workflow, ekrany i konfiguracje pól pozostają wspólne ze źródłem - wskazują na nie nowe schematy.": "Only schemes the source uses are copied (e.g. no security scheme means no copy of it). On instances not yet migrated to Field Schemes a \"Field Configuration Scheme\" is created instead of \"Field Scheme\". Permissions Jira does not accept when creating a scheme (e.g. Product Discovery, COPY_PROJECT) cannot be copied - the log lists them. An existing scheme with the same name is reused. Workflows, screens and field configurations themselves stay shared with the source - the new schemes point to them.",
   "Role i dostęp": "Roles and access",
@@ -343,7 +377,7 @@ Object.assign(EN, {
   "Kopia projektu z kopiami schematów": "Project copy with scheme copies",
   "Samodzielna kopia projektu: każdy schemat źródła kopiowany pod nazwą nowego projektu, ustawienia, role, komponenty, wersje, tablice. Bez projektu wzorcowego. Karta „Kopia projektu”.": "A standalone project copy: every source scheme copied under the new project's name, settings, roles, components, versions, boards. No template project. The \"Copy project\" tab.",
   "Projekt źródłowy": "Source project", "Nazwy schematów od": "Scheme names from", "Lead (accountId, domyślnie jak w źródle)": "Lead (accountId, source's by default)",
-  "Opis (domyślnie jak w źródle)": "Description (source's by default)", "Plik: kto z jaką rolą (karta „Kopia projektu”)": "File: who gets which role (\"Copy project\" tab)",
+  "Opis (domyślnie pusty)": "Description (empty by default)", "Plik: kto z jaką rolą (karta „Kopia projektu”)": "File: who gets which role (\"Copy project\" tab)",
   "Role i członkowie jak w źródle": "Roles and members as in the source", "Nikogo nie dodawaj do ról": "Add nobody to roles", "Bez wersji": "No versions",
   "Bez komponentów": "No components", "Bez kontekstów pól (szybciej)": "No field contexts (faster)", "Bez tablic": "No boards", "Projekt docelowy już istnieje": "Target project already exists",
   "Kopia projektu (ta sama Jira)": "Project copy (same Jira)", "Nowy projekt z konfiguracją, tablicami i kolumnami.": "A new project with configuration, boards and columns.",
@@ -475,6 +509,10 @@ const EN_PATTERNS = [
   [/^(.+) \(nie jest „zakończony”\)$/, "$1 (not \"done\")"],
   [/^„(.+)” zapisze zmiany( \(także przez przeglądarkę\))?\. Upewnij się, że wcześniej sprawdziłeś podgląd\.$/, (m, t, b) => `"${EN[t] || t}" will write changes${b ? " (also through the browser)" : ""}. Make sure you have checked the preview first.`],
   [/^ustawione \((.+)\) - wpisz, aby zmienić$/, "set ($1) - type to change"],
+  [/^(.+): (\d+) zadań w (\d+) sekcjach\.$/, "$1: $2 tasks in $3 sections."],
+  [/^Statusy projektu (\S+): (\d+)\.$/, "Statuses of project $1: $2."],
+  [/^projekt wzorcowy \((\S+)\)$/, "template project ($1)"],
+  [/^(\d+) sekcji z zadaniami bez mapowania - ich zadania zostaną w statusie startowym workflow\.$/, "$1 sections with tasks have no mapping - their tasks will stay in the workflow's initial status."],
   [/^Podaj (.+)\.$/, (m, w) => `Enter ${EN[w] || w}.`],
   [/^Wybierz rolę dla: (.+)$/, "Choose a role for: $1"],
   [/^Zapisano (.+)$/, "Saved $1"],

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Tomasz Strona (GitHub: Achatchriel). All rights reserved.
+# Private, non-commercial use only. Any commercial use is strictly prohibited. See LICENSE.
 """
 setup_check.py — TYLKO ODCZYT. Testy połączeń i konfiguracji przed migracją
 (zakładka Start w panelu). Wynik: migration_app/cache/setup_check.json.

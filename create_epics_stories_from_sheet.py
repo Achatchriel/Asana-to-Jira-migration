@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Tomasz Strona (GitHub: Achatchriel). All rights reserved.
+# Private, non-commercial use only. Any commercial use is strictly prohibited. See LICENSE.
 """
 create_epics_stories_from_sheet.py — tworzy Epiki i Story w Jirze z arkusza „Zakres MVP”.
 

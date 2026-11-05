@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Tomasz Strona (GitHub: Achatchriel). All rights reserved.
+# Private, non-commercial use only. Any commercial use is strictly prohibited. See LICENSE.
 """
 catalog.py
 
@@ -49,6 +51,23 @@ TOOLS = [
      "title": "Wczytaj arkusz projektów",
      "desc": "Odczyt arkusza Google do cache panelu (lista projektów). Może potrwać kilka minut, gdy wiersze nie mają nazw.",
      "writes": "never", "params": []},
+    {"id": "migrate_project", "group": "pipeline", "script": "migrate_project.py",
+     "title": "Migracja jednego projektu (link do Asany)",
+     "desc": "Link do projektu w Asanie → nowy projekt w Jirze (konfiguracja ze wzorca albo z projektu źródłowego), indywidualna mapa sekcji, tablica, zadania. Bez arkusza. Karta „Migracja projektu”.",
+     "writes": "unless:--dry-run",
+     "params": [DRY, {"flag": "--asana-link", "kind": "str", "label": "Link do projektu Asany", "required": True},
+                {"flag": "--key", "kind": "str", "label": "Klucz nowego projektu", "required": True},
+                {"flag": "--name", "kind": "str", "label": "Nazwa (domyślnie z Asany)"},
+                {"flag": "--config", "kind": "choice", "label": "Konfiguracja z", "options": ["template", "source"]},
+                {"flag": "--source", "kind": "keys", "label": "Projekt źródłowy (dla source)", "single": True},
+                {"flag": "--name-base", "kind": "choice", "label": "Nazwy schematów od", "options": ["key", "name"]},
+                {"flag": "--lead", "kind": "str", "label": "Lead (accountId)"},
+                {"flag": "--description", "kind": "str", "label": "Opis (domyślnie pusty)"},
+                {"flag": "--map-file", "kind": "str", "label": "Plik mapy sekcji (JSON)"},
+                {"flag": "--roles-file", "kind": "str", "label": "Plik: kto z jaką rolą"},
+                {"flag": "--no-roles", "kind": "bool", "label": "Nikogo nie dodawaj do ról"},
+                {"flag": "--existing-target", "kind": "bool", "label": "Projekt już istnieje"},
+                {"flag": "--no-sync", "kind": "bool", "label": "Bez migracji zadań"}]},
     {"id": "full_pipeline", "group": "pipeline", "script": "run_full_pipeline.py",
      "title": "Pełny pipeline",
      "desc": "Projekty → kolumny i statusy tablic (API) → kontrola tablic → kandydaci na Epiki → synchronizacja zadań (opcjonalnie weryfikacja). Bez przeglądarki.",
@@ -399,7 +418,7 @@ TOOLS = [
                 {"flag": "--target-name", "kind": "str", "label": "Nazwa nowego projektu", "required": True},
                 {"flag": "--name-base", "kind": "choice", "label": "Nazwy schematów od", "options": ["key", "name"]},
                 {"flag": "--lead-account-id", "kind": "str", "label": "Lead (accountId, domyślnie jak w źródle)"},
-                {"flag": "--description", "kind": "str", "label": "Opis (domyślnie jak w źródle)"},
+                {"flag": "--description", "kind": "str", "label": "Opis (domyślnie pusty)"},
                 {"flag": "--board-ids", "kind": "str", "label": "ID tablic źródła"},
                 {"flag": "--roles-file", "kind": "str", "label": "Plik: kto z jaką rolą (karta „Kopia projektu”)"},
                 {"flag": "--roles-from-source", "kind": "bool", "label": "Role i członkowie jak w źródle"},

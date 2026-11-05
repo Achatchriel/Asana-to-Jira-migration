@@ -2,6 +2,12 @@
 
 [English](README.md) · **Polski**
 
+> **© 2026 Tomasz Strona (GitHub: Achatchriel). Wszelkie prawa zastrzeżone.**
+> Repozytorium jest **wyłącznie do użytku prywatnego, niekomercyjnego**. **Jakiekolwiek
+> użycie komercyjne jest całkowicie zabronione** - także w firmie lub na jej rzecz, w pracy
+> płatnej lub dla klientów oraz jako część komercyjnego produktu lub usługi. To nie jest
+> open source; rozpowszechnianie wymaga pisemnej zgody autora. Zob. [LICENSE](LICENSE).
+
 Pakiet narzędzi do przeniesienia wybranych projektów z Asany do Jiry i utrzymania
 ich w synchronizacji. **Pracuje się w nim przez panel webowy** (`migration_app/`):
 lokalną aplikację w przeglądarce, z której uruchamiasz wszystkie kroki migracji,
@@ -109,8 +115,9 @@ skryptów, nie korzysta z projektu wzorcowego i z `.env` czyta tylko dostęp do 
   log je wymienia. Schemat o takiej nazwie, który
   już istnieje (np. po przerwanym uruchomieniu), jest używany ponownie. Same workflow,
   ekrany i konfiguracje pól pozostają wspólne ze źródłem (wskazują na nie nowe schematy).
-- **Projekt:** typ, lead (albo podany), opis, URL, kategoria i domyślne przypisanie jak
-  w źródle; projekt powstaje od razu z kopiami schematów.
+- **Projekt:** typ, lead (albo podany), URL, kategoria i domyślne przypisanie jak w źródle;
+  projekt powstaje od razu z kopiami schematów. **Opis nie jest kopiowany** - zostaje pusty,
+  chyba że wpiszesz go w karcie (`--description`).
 - **Role i dostęp:** wyszukujesz w całej Jirze osoby i grupy i każdej nadajesz jedną lub
   kilka ról (dowolna rola projektowa Jiry) - członkowie projektu źródłowego nie są używani.
   Pusta lista oznacza, że nikt nie jest dodawany (poza leadem). Wybór trafia do skryptu jako
@@ -135,6 +142,48 @@ ponownie z „projekt docelowy już istnieje”. Z terminala:
 Starszy `copy_project.py` (sekcja 4a) podpina do nowego projektu **te same** schematy co
 źródło i konfiguruje kolumny przez przeglądarkę.
 
+## Migracja projektu (jeden projekt z linku do Asany)
+
+Karta do migracji pojedynczego projektu **bez arkusza Google**: wklejasz link do projektu
+w Asanie, a panel tworzy projekt w Jirze, mapuje statusy i przenosi zadania. Pod spodem
+działa `migrate_project.py`.
+
+1. **Projekt w Asanie** - „Wczytaj projekt” odczytuje nazwę, sekcje (w kolejności z Asany)
+   i liczbę otwartych/ukończonych zadań w każdej (`migration_app/asana_lookup.py`, tylko odczyt).
+2. **Nowy projekt w Jirze** - klucz, nazwa (domyślnie z Asany), lead („użyj mojego konta”
+   wstawia Twój accountId) i opis (domyślnie pusty).
+3. **Konfiguracja projektu** - do wyboru:
+   - **projekt wzorcowy** (`JIRA_TEMPLATE_PROJECT_KEY`): te same schematy co wzorzec,
+     tablica dostaje kolumny i statusy tablicy wzorcowej (`board_columns.py`), role - grupę
+     deweloperów i administratorów z `.env`;
+   - **projekt źródłowy** (jak w „Kopii projektu”): każdy schemat źródła dostaje kopię
+     nazwaną od nowego projektu (od klucza albo nazwy), tablice są kopiowane z kolumnami -
+     robi to `clone_project.py`.
+   „Wczytaj statusy” odczytuje statusy, które będzie miał nowy projekt (wzorca albo źródła).
+4. **Sekcje Asany → statusy Jiry** - każda sekcja ma własną listę z **tylko statusami
+   wybranej konfiguracji**. Propozycje pochodzą z mapy głównej (jeśli wskazuje istniejący
+   status) albo z nazwy sekcji; sekcję można też pominąć. Mapa zapisuje się jako
+   `section_status_map.<KLUCZ>.json` (poprzednia trafia do kopii zapasowej) i dotyczy tylko
+   tego projektu. Wybierasz też status dla zadań ukończonych.
+5. **Role i dostęp** - ten sam edytor co w „Kopii projektu” (osoby i grupy z całej Jiry,
+   dowolne role). Przy wzorcu pusta lista oznacza ustawienia z `.env`; przy projekcie
+   źródłowym - nikogo poza leadem.
+6. **Uruchomienie** - „Podgląd (dry-run)” niczego nie zmienia; „Utwórz i migruj” pyta
+   o potwierdzenie, po czym: tworzy i konfiguruje projekt, zapisuje mapę sekcji, ustawia
+   kolumny tablicy (tylko wzorzec), wykrywa Epiki i synchronizuje zadania
+   (`asana_jira_sync.py --asana-link`). Opcje: tylko utwórz i skonfiguruj (bez zadań) oraz
+   „projekt już istnieje”, by dokończyć pozostałe kroki albo później zsynchronizować ponownie.
+
+Projekt zmigrowany w ten sposób nie jest w arkuszu, więc pełny pipeline go nie widzi -
+kolejne synchronizacje uruchamiasz z tej karty. Z terminala:
+```bash
+.venv/bin/python migrate_project.py --asana-link "https://app.asana.com/1/<ws>/project/<gid>/board" \
+    --key XYZ --config template --map-file mapa_sekcji.json --dry-run
+.venv/bin/python migrate_project.py --asana-link "<link>" --key XYZ --config source --source ABC --no-roles
+```
+`asana_jira_sync.py` i `detect_epic_candidates.py` też przyjmują `--asana-link` (z dokładnie
+jednym kluczem projektu) i wtedy pomijają arkusz.
+
 ## Widoki panelu
 
 | Widok | Do czego służy |
@@ -145,7 +194,8 @@ Starszy `copy_project.py` (sekcja 4a) podpina do nowego projektu **te same** sch
 | **Narzędzia** | 69 skryptów w siedmiu grupach (tabela niżej), każdy z formularzem opcji. Panel pokazuje dokładne polecenie przed startem |
 | **Statusy i osoby** | sprawdzenie bez zapisu, per projekt: sekcje Asany → statusy Jiry (te same reguły co synchronizacja: mapa projektu, szablon, mapa główna, `__ukonczone__`), osoby → konta Jiry (czy są w `user_map.json`, czy aktywne, czy można je przypisać - przy braku uprawnienia panel pokazuje schemat uprawnień i role, które je dają) oraz różnice statusu i przypisanego w już zmigrowanych zadaniach. Brakujące mapowanie sekcji zapiszesz od razu do `section_status_map.<KLUCZ>.json`, osobę oznaczysz „nie w Jirze” |
 | **Mapowanie osób** / **Mapowanie statusów** | jak wyżej |
-| **Kopia projektu** | nowy projekt z konfiguracją istniejącego, z własnymi kopiami schematów (niżej) |
+| **Migracja projektu** | jeden projekt z linku do Asany do nowego projektu w Jirze, z indywidualną mapą sekcji → statusy (wyżej) |
+| **Kopia projektu** | nowy projekt z konfiguracją istniejącego, z własnymi kopiami schematów (wyżej) |
 | **Uruchomienia** | historia z pełnymi logami na żywo; pole odpowiedzi dla skryptów, które pytają o potwierdzenie; przerwanie całego uruchomienia (z procesami potomnymi) |
 | **Konfiguracja** | edycja `.env` (sekrety zamaskowane, puste pole = bez zmian), map statusów, szablonów, `user_map.json`, `asana_users_not_in_jira.json`, `sync_exclude.txt`, `protected_projects.txt` i schematów YAML; pliki, których jeszcze nie ma, powstają przy pierwszym zapisie |
 | **Raporty** | `logs/`, `pipeline_summaries/`, `repair_reports/` i raporty CSV/JSON (CSV wyświetlany jako tabela) |
@@ -1316,6 +1366,9 @@ DEBUG_SYNC=1 python asana_jira_sync.py --limit 1 --project-keys KLUCZ
 | `notify.py` | log do pliku + opcjonalne powiadomienie na Slack |
 | `board_columns.py` | kolumny tablic i przypisanie statusów do kolumn przez API - kroki 2-3 pipeline'u (sekcja 11a) |
 | `clone_project.py` | samodzielna kopia projektu z kopiami schematów nazwanymi od nowego projektu (część I, „Kopia projektu”) |
+| `migrate_project.py` | jeden projekt z linku do Asany: utworzenie, konfiguracja, mapa sekcji, tablica, zadania (część I, „Migracja projektu”) |
+| `migration_app/asana_lookup.py` | tylko odczyt: nazwa, sekcje i liczby zadań projektu Asany (panel, „Migracja projektu”) |
+| `LICENSE` | licencja: tylko użytek prywatny, niekomercyjny; użycie komercyjne zabronione |
 | `task_sync_state.json` | **automatycznie tworzony** stan synchronizacji (obu kierunków) — nie kasować |
 | `workflow_graph_cache.json` | **automatycznie tworzony** cache mapy przejść workflow — bezpieczny do skasowania |
 

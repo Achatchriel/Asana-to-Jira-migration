@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Tomasz Strona (GitHub: Achatchriel). All rights reserved.
+# Private, non-commercial use only. Any commercial use is strictly prohibited. See LICENSE.
 """
 create_analysis_for_stories.py — dla każdego Story tworzy zadanie typu „Analysis”
 o tej samej nazwie i łączy je ze Story relacją „jest powiązane z” (Relates).

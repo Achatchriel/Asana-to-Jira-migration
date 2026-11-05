@@ -18,8 +18,9 @@ Co robi, w kolejności:
   2. Tworzy projekt (typ, lead, opis, URL, kategoria, domyślne przypisanie jak w
      źródle) od razu ze schematami uprawnień, powiadomień i bezpieczeństwa, a potem
      podpina kopie pozostałych schematów.
-  3. Kopiuje komponenty, wersje, członków ról i konteksty pól niestandardowych
-     ograniczone do projektu źródłowego (nowy projekt jest do nich dopisywany).
+  3. Kopiuje komponenty, wersje i konteksty pól niestandardowych ograniczone do
+     projektu źródłowego (nowy projekt jest do nich dopisywany). Do ról dodaje osoby
+     i grupy z --roles-file (wybór w panelu) - albo, z --roles-from-source, jak w źródle.
   4. Kopiuje tablice: filtr (JQL z podmienionym projektem, te same udostępnienia),
      tablicę i układ kolumn z przypisaniem statusów (API GreenHopper, tokenem API -
      bez przeglądarki).
@@ -613,10 +614,11 @@ def main() -> None:
                     help="Początek nazw kopii schematów: klucz (XYZ Permission Scheme) albo nazwa nowego projektu")
     ap.add_argument("--existing-target", action="store_true",
                     help="Projekt docelowy już istnieje (np. po przerwanym uruchomieniu) - podepnij kopie i dokończ")
-    ap.add_argument("--no-roles", action="store_true", help="Nie dodawaj nikogo do ról")
     ap.add_argument("--roles-file", default="",
-                    help="JSON z wyborem: [{\"id\": ID roli, \"name\": ..., \"users\": [accountId], \"groups\": [groupId]}] "
-                         "(panel zapisuje go w karcie „Kopia projektu”). Bez pliku: role i członkowie jak w źródle")
+                    help="JSON: kto z jaką rolą - [{\"id\": ID roli, \"name\": ..., \"users\": [accountId], \"groups\": [groupId]}] "
+                         "(panel zapisuje go w karcie „Kopia projektu”). Bez pliku nikt nie jest dodawany do ról")
+    ap.add_argument("--roles-from-source", action="store_true", help="Zamiast pliku: role i członkowie jak w projekcie źródłowym")
+    ap.add_argument("--no-roles", action="store_true", help="Nie dodawaj nikogo do ról (domyślne bez --roles-file)")
     ap.add_argument("--no-versions", action="store_true", help="Nie kopiuj wersji")
     ap.add_argument("--no-components", action="store_true", help="Nie kopiuj komponentów")
     ap.add_argument("--no-field-contexts", action="store_true", help="Nie dopisuj projektu do kontekstów pól (szybciej)")
@@ -663,14 +665,15 @@ def main() -> None:
         copy_components(src["key"], key)
     if not a.no_versions:
         copy_versions(src["key"], key, dst_id)
-    if not a.no_roles:
-        if a.roles_file:
-            selection = json.loads(Path(a.roles_file).read_text(encoding="utf-8"))
-            print(f"   Role według wyboru ({a.roles_file}): {len(selection)}")
-        else:
-            selection = source_role_selection(src["key"])
-            print("   Role i członkowie jak w źródle.")
+    if a.roles_file and not a.no_roles:
+        selection = json.loads(Path(a.roles_file).read_text(encoding="utf-8"))
+        print(f"   Role według wyboru ({a.roles_file}): {len(selection)}")
         apply_roles(key, selection)
+    elif a.roles_from_source and not a.no_roles:
+        print("   Role i członkowie jak w projekcie źródłowym.")
+        apply_roles(key, source_role_selection(src["key"]))
+    else:
+        print("   Role: nikogo nie dodaję (podaj --roles-file albo --roles-from-source).")
     if not a.no_field_contexts:
         copy_field_contexts(src["id"], dst_id)
 

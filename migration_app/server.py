@@ -424,12 +424,14 @@ def save_google_key(text: str) -> dict:
 def status_map_step(status_map: dict) -> dict:
     """Mapa statusów jest gotowa, gdy ma wpisy, jawny status dla ukończonych i wszystkie
     wskazane statusy istnieją w projekcie wzorcowym (lista z ostatniego odczytu źródeł)."""
-    sections = {k: v for k, v in status_map.items() if not k.startswith("__")}
+    # Klucze zaczynające się od "_" to wpisy specjalne (__ukonczone__) albo komentarze (_komentarz).
+    sections = {k: v for k, v in status_map.items() if not k.startswith("_")}
     if not sections:
         return {"done": False, "detail": "Brak mapy statusów."}
     source = read_json_file(CACHE_DIR / "statuses.json", None)
     known = {s["name"] for s in source["statuses"]} if source else None
-    used = [v.get("status") if isinstance(v, dict) else (v[0] if isinstance(v, list) and v else v) for v in status_map.values()]
+    used = [v.get("status") if isinstance(v, dict) else (v[0] if isinstance(v, list) and v else v)
+            for k, v in status_map.items() if not k.startswith("_") or k == "__ukonczone__"]
     invalid = sorted({u for u in used if isinstance(u, str) and u and known is not None and u not in known})
     done_status = status_map.get("__ukonczone__")
     problems = []
@@ -660,8 +662,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_error_json(404, "Brak wyniku sprawdzenia dla tego projektu.")
             return self.send_json(json.loads(f.read_text(encoding="utf-8")))
         # -- karta „Kopia projektu”: odczyty z Jiry i wybór ról
-        if len(p) == 2 and p[0] == "jira" and method == "GET" and p[1] in ("roles", "users", "groups"):
-            arg = ["--project", q.get("project", "")] if p[1] == "roles" else ["--query", q.get("q", "")]
+        if len(p) == 2 and p[0] == "jira" and method == "GET" and p[1] in ("allroles", "roles", "users", "groups"):
+            arg = (["--project", q.get("project", "")] if p[1] == "roles" else ["--query", q.get("q", "")]
+                   if p[1] != "allroles" else ["--query", "-"])
             if not arg[1].strip():
                 raise ValueError("Podaj projekt albo tekst do wyszukania.")
             out = subprocess.run([python_executable(), str(APP_DIR / "jira_lookup.py"), p[1], *arg], cwd=ROOT,

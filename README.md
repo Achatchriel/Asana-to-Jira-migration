@@ -16,9 +16,10 @@ Jira: the tools create and sync only the projects in the sheet's rows.
 - **Part II — the scripts:** documentation of every tool, options, state files,
   repair procedures and troubleshooting.
 
-> The panel and the scripts are in Polish. Script messages quoted in this README
-> are kept in the original wording (with a translation where helpful) so you can
-> search for them in the console output.
+> The panel is in Polish by default - switch it to **English** with **PL / EN** at the bottom
+> of the sidebar (the choice is remembered in the browser). Script output (run logs) stays in
+> Polish; script messages quoted in this README are kept in the original wording (with a
+> translation where helpful) so you can search for them in the console output.
 
 ---
 
@@ -43,7 +44,7 @@ again only when it changes) and the browser for Playwright (about 300 MB, once p
 machine), then starts the panel and opens it in your browser. Options:
 `./start.sh --port 9000` (another port), `NO_BROWSER=1 ./start.sh` (don't open a browser),
 `PYTHON=python3.12 ./start.sh` (another interpreter). The server listens on `127.0.0.1`
-only. Stop it with `Ctrl+C`.
+only. Stop it with `Ctrl+C`. Language: **PL / EN** at the bottom of the sidebar.
 
 The panel works from an empty folder: `.env` is created from `.env.example` on the first
 configuration save, maps and lists from templates. From there the **Start** tab guides you.
@@ -113,10 +114,11 @@ from the source project**.
   configurations themselves stay shared with the source (the new schemes point to them).
 - **Project:** type, lead (or the one you give), description, URL, category and default
   assignee as in the source; the project is created with the scheme copies right away.
-- **Roles and access:** the tab loads the source roles with their people and groups (all
-  pre-selected). You can deselect them, add people or groups from the search and add other
-  roles; exactly that selection goes to the new project (`--roles-file`). From the terminal
-  without the file, roles and members are as in the source; `--no-roles` adds nobody.
+- **Roles and access:** you search the whole Jira for people and groups and give each of them
+  one or more roles (any project role in Jira) - the source project's members are not used.
+  An empty list adds nobody (except the lead). The selection goes to the script as
+  `--roles-file`. From the terminal: without the file nobody is added; `--roles-from-source`
+  copies the source project's roles and members.
 - **Boards:** a filter with the project replaced and the same sharing, the board, its columns
   and **the status-to-column mapping** as in the source (via the GreenHopper API with the
   token, no browser). Workflows are shared with the source, so statuses keep their IDs. After
@@ -2768,7 +2770,7 @@ Using the panel is described in part I. Files:
 | `status_source.py` | Asana sections and template project statuses for mapping |
 | `jira_lookup.py` | roles, people and groups for the "Copy project" tab |
 | `cache/` | read results (sheet, people, sections, tests) — not in the repository |
-| `static/` | the user interface (HTML, JS, CSS) |
+| `static/` | the user interface (HTML, JS, CSS); `i18n.js` - English version (dictionary and PL/EN switch) |
 | `runs/` | run history (metadata and log) — not in the repository |
 | `checks/` | results of status and people checks — not in the repository |
 | `backups/` | copies of files from before every save in the panel — not in the repository |

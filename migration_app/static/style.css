@@ -163,3 +163,8 @@ dialog .cmd { margin: 10px 0 14px; }
   .tool-list { position: static; max-height: 40vh; }
   .env-row { grid-template-columns: 1fr; }
 }
+
+.lang-switch { display: flex; gap: 4px; padding: 0 4px; }
+.lang-switch button { flex: 1; }
+.lang-switch button.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); font-weight: 600; }
+@media (max-width: 900px) { .lang-switch { width: auto; } }

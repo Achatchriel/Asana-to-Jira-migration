@@ -46,7 +46,7 @@ function h(tag, attrs, ...children) {
 }
 
 const $ = (sel, root = document) => root.querySelector(sel);
-const fmtTime = t => t ? new Date(t * 1000).toLocaleString("pl-PL", { dateStyle: "short", timeStyle: "short" }) : "—";
+const fmtTime = t => t ? new Date(t * 1000).toLocaleString(LOCALE, { dateStyle: "short", timeStyle: "short" }) : "—";
 const fmtDur = (a, b) => { if (!a) return ""; const s = Math.round(((b || Date.now() / 1000) - a)); return s < 60 ? `${s} s` : s < 3600 ? `${Math.floor(s / 60)} min ${s % 60} s` : `${Math.floor(s / 3600)} h ${Math.floor(s % 3600 / 60)} min`; };
 const fmtSize = n => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
 const pill = (text, kind) => h("span", { class: "pill " + (kind || "") }, text);
@@ -482,7 +482,7 @@ VIEWS.overview = async main => {
     ...notices,
     h("div", { class: "grid cols-4" },
       stat(o.state.projects, "projektów w stanie synchronizacji"),
-      stat(o.state.entries.toLocaleString("pl-PL"), "zmapowanych zadań (task_sync_state.json)"),
+      stat(o.state.entries.toLocaleString(LOCALE), "zmapowanych zadań (task_sync_state.json)"),
       stat(o.user_map_size, "osób w user_map.json"),
       stat(o.running, "trwających uruchomień")),
     h("div", { class: "grid cols-2", style: "margin-top:14px" },
@@ -1111,86 +1111,85 @@ VIEWS.people = async main => {
 
 // ------------------------------------------------------------------ Kopia projektu
 
-// Wybór osób i grup dla ról nowego projektu: start od ról źródła, z możliwością
-// odznaczenia, dodania osób/grup z wyszukiwarki i dodania innych ról.
-function rolesEditor(sourceKey) {
-  let data = null, none = false;
-  const body = h("div");
+// Kto i z jakimi rolami trafia do nowego projektu: osoby i grupy wyszukiwane w całej Jirze,
+// każdej przypisujesz jedną lub kilka ról (spośród wszystkich ról projektowych Jiry).
+function rolesEditor() {
+  let allRoles = [], entries = [];
+  const list = h("div");
   const card = h("div", { class: "card" });
-
-  const addSearch = role => {
-    const kind = h("select", { style: "max-width:110px" }, h("option", { value: "users" }, "osoba"), h("option", { value: "groups" }, "grupa"));
-    const q = h("input", { type: "text", placeholder: "imię, e-mail albo nazwa grupy…", style: "max-width:240px" });
-    const results = h("div", { class: "row", style: "margin-top:4px" });
-    const search = async () => {
-      if (q.value.trim().length < 2) return toast("Wpisz co najmniej 2 znaki.", true);
-      results.replaceChildren(h("small", { class: "muted" }, "Szukam…"));
-      try {
-        const found = await api("GET", `jira/${kind.value}?q=${encodeURIComponent(q.value.trim())}`);
-        const list = kind.value === "users" ? role.users : role.groups;
-        const idKey = kind.value === "users" ? "accountId" : "groupId";
-        results.replaceChildren(...(found.length ? found.map(x => h("button", { class: "small", title: x.email || "",
-          onclick: () => { if (!list.some(y => y[idKey] === x[idKey])) list.push({ [idKey]: x[idKey], name: x.name, on: true }); draw(); } },
-          "+ " + x.name + (x.active === false ? " (nieaktywne)" : ""))) : [h("small", { class: "muted" }, "Nic nie znaleziono.")]));
-      } catch (e) { results.replaceChildren(h("small", { style: "color:var(--bad)" }, e.message)); }
-    };
-    q.addEventListener("keydown", e => { if (e.key === "Enter") search(); });
-    return h("div", {}, h("div", { class: "row" }, kind, q, h("button", { class: "small", onclick: search }, "Szukaj")), results);
+  const roleLabel = r => {
+    const same = allRoles.filter(x => x.name === r.name).length > 1;
+    return same ? `${r.name} (${(r.description || "").slice(0, 40) || "id " + r.id})` : r.name;
   };
 
-  const chip = (item, label) => h("label", { class: "check", style: "margin-right:12px" },
-    h("input", { type: "checkbox", checked: item.on, onchange: e => { item.on = e.target.checked; } }), label);
-
   function draw() {
-    if (!data) {
-      body.replaceChildren(h("p", { class: "muted" }, none ? "Nikt nie zostanie dodany do ról nowego projektu (poza leadem)."
-        : "Wczytaj role projektu źródłowego - osoby i grupy będą wstępnie zaznaczone, możesz je odznaczyć albo dodać inne."));
+    if (!entries.length) {
+      list.replaceChildren(h("p", { class: "muted", style: "margin:10px 0 0" }, "Lista jest pusta - nikt nie zostanie dodany do ról nowego projektu (poza leadem). Wyszukaj osoby albo grupy powyżej."));
       return;
     }
-    const shown = data.rows.filter(r => r.users.length || r.groups.length || r.added);
-    const free = data.all_roles.filter(r => !shown.some(x => x.id === r.id));
-    const roleSel = h("select", { style: "max-width:260px" }, h("option", { value: "" }, "+ dodaj rolę…"), free.map(r => h("option", { value: r.id }, r.name)));
-    roleSel.onchange = () => {
-      const r = data.all_roles.find(x => x.id === roleSel.value);
-      if (!r) return;
-      const row = data.rows.find(x => x.id === r.id);
-      if (row) row.added = true; else data.rows.push({ id: r.id, name: r.name, users: [], groups: [], added: true });
-      draw();
-    };
-    body.replaceChildren(
-      ...shown.map(r => h("div", { style: "border-top:1px solid var(--border);padding:10px 0" },
-        h("strong", {}, r.name),
-        h("div", { style: "margin:6px 0" },
-          r.groups.map(g => chip(g, "👥 " + g.name)), r.users.map(u => chip(u, u.name || u.accountId)),
-          !r.users.length && !r.groups.length ? h("small", { class: "muted" }, "nikogo - dodaj poniżej") : null),
-        addSearch(r))),
-      h("div", { class: "row", style: "border-top:1px solid var(--border);padding-top:10px" }, roleSel));
+    list.replaceChildren(h("table", { style: "margin-top:10px" },
+      h("tr", {}, h("th", {}, "Osoba / grupa"), h("th", {}, "Role w nowym projekcie"), h("th", {}, "")),
+      entries.map((e, i) => {
+        const sel = h("select", { style: "max-width:240px" }, h("option", { value: "" }, "+ dodaj rolę…"),
+          allRoles.filter(r => !e.roles.includes(r.id)).map(r => h("option", { value: r.id }, roleLabel(r))));
+        sel.onchange = () => { if (sel.value) { e.roles.push(sel.value); draw(); } };
+        return h("tr", {},
+          h("td", {}, e.kind === "group" ? "👥 " : "👤 ", e.name, e.email ? h("small", { style: "display:block" }, e.email) : null),
+          h("td", {}, h("div", { class: "row" },
+            e.roles.map(rid => { const r = allRoles.find(x => x.id === rid) || { id: rid, name: rid };
+              return h("span", { class: "pill info" }, roleLabel(r), " ", h("button", { class: "link small", title: "usuń rolę", onclick: () => { e.roles = e.roles.filter(x => x !== rid); draw(); } }, "×")); }),
+            sel, !e.roles.length ? pill("wybierz rolę", "bad") : null)),
+          h("td", {}, h("button", { class: "small ghost", onclick: () => { entries.splice(i, 1); draw(); } }, "Usuń")));
+      })));
   }
 
-  const loadBtn = h("button", { onclick: async () => {
-    const key = sourceKey();
-    if (!key) return toast("Najpierw podaj projekt źródłowy.", true);
-    loadBtn.disabled = true; loadBtn.textContent = "Wczytuję…";
+  const kind = h("select", { style: "max-width:110px" }, h("option", { value: "users" }, "osoba"), h("option", { value: "groups" }, "grupa"));
+  const q = h("input", { type: "text", placeholder: "imię, e-mail albo fragment nazwy grupy…", style: "max-width:300px" });
+  const defRole = h("select", { style: "max-width:220px" });
+  const results = h("div", { class: "row", style: "margin-top:6px" });
+  const search = async () => {
+    if (q.value.trim().length < 2) return toast("Wpisz co najmniej 2 znaki.", true);
+    results.replaceChildren(h("small", { class: "muted" }, "Szukam…"));
     try {
-      const d = await api("GET", `jira/roles?project=${encodeURIComponent(key)}`);
-      data = { all_roles: d.all_roles, rows: d.roles.map(r => ({ id: r.id, name: r.name,
-        users: r.users.map(u => ({ ...u, on: true })), groups: r.groups.map(g => ({ ...g, on: true })) })) };
-      none = false; noneBox.checked = false;
-      draw();
-    } catch (e) { toast(e.message, true); }
-    loadBtn.disabled = false; loadBtn.textContent = data ? "Wczytaj ponownie" : "Wczytaj role źródła";
-  } }, "Wczytaj role źródła");
-  const noneBox = h("input", { type: "checkbox", onchange: e => { none = e.target.checked; if (none) data = null; draw(); } });
+      const found = await api("GET", `jira/${kind.value}?q=${encodeURIComponent(q.value.trim())}`);
+      const isUser = kind.value === "users";
+      results.replaceChildren(...(found.length ? found.map(x => {
+        const id = isUser ? x.accountId : x.groupId;
+        const added = entries.some(e => e.id === id);
+        return h("button", { class: "small", disabled: added, title: x.email || "", onclick: () => {
+          entries.push({ kind: isUser ? "user" : "group", id, name: x.name, email: x.email, roles: defRole.value ? [defRole.value] : [] });
+          draw(); results.replaceChildren(); q.value = ""; q.focus();
+        } }, (added ? "✓ " : "+ ") + x.name + (x.active === false ? " (nieaktywne)" : ""));
+      }) : [h("small", { class: "muted" }, "Nic nie znaleziono.")]));
+    } catch (e) { results.replaceChildren(h("small", { style: "color:var(--bad)" }, e.message)); }
+  };
+  q.addEventListener("keydown", e => { if (e.key === "Enter") search(); });
 
-  card.append(h("div", { class: "row" }, h("h2", { style: "margin:0" }, "Role i dostęp"), h("span", { class: "spacer" }),
-      h("label", { class: "check" }, noneBox, "nikogo nie dodawaj"), loadBtn),
-    h("p", { class: "muted", style: "margin:8px 0" }, "Kogo i z jaką rolą dodać do nowego projektu. Uwaga: przypisywać zadania można tylko osobom z roli, która w schemacie uprawnień ma „Assignable User”."),
-    body);
+  card.append(
+    h("h2", {}, "Role i dostęp"),
+    h("p", { class: "muted", style: "margin:4px 0 10px" }, "Wyszukaj w Jirze osoby i grupy, które mają mieć dostęp do nowego projektu, i nadaj każdej role. Uwaga: przypisywać zadania można tylko osobom z roli, która w schemacie uprawnień ma „Assignable User”."),
+    h("div", { class: "row" }, kind, q, h("button", { onclick: search }, "Szukaj"),
+      h("span", { class: "muted" }, "nowym wpisom nadaj rolę:"), defRole),
+    results, list);
+  api("GET", "jira/allroles").then(r => {
+    allRoles = r;
+    defRole.replaceChildren(h("option", { value: "" }, "(wybiorę przy wpisie)"), ...r.map(x => h("option", { value: x.id }, roleLabel(x))));
+    draw();
+  }).catch(e => list.replaceChildren(h("small", { style: "color:var(--bad)" }, "Nie udało się pobrać ról Jiry: " + e.message)));
   draw();
   return {
-    card, none: () => none, loaded: () => !!data,
-    selection: () => (data ? data.rows : []).map(r => ({ id: r.id, name: r.name,
-      users: r.users.filter(u => u.on).map(u => u.accountId), groups: r.groups.filter(g => g.on).map(g => g.groupId) })),
+    card,
+    count: () => entries.length,
+    missingRole: () => entries.filter(e => !e.roles.length).map(e => e.name),
+    selection: () => {
+      const byRole = {};
+      for (const e of entries) for (const rid of e.roles) {
+        const r = allRoles.find(x => x.id === rid) || { id: rid, name: rid };
+        const slot = byRole[rid] = byRole[rid] || { id: rid, name: r.name, users: [], groups: [] };
+        (e.kind === "user" ? slot.users : slot.groups).push(e.id);
+      }
+      return Object.values(byRole);
+    },
   };
 }
 
@@ -1206,25 +1205,24 @@ VIEWS.copy = async main => {
   const check = (name, label) => h("label", { class: "check" }, h("input", { type: "checkbox", onchange: e => { v[name] = e.target.checked; } }), label);
   const names = h("ul", { class: "mono", style: "margin:6px 0 0;padding-left:18px;font-size:12.5px" });
   const draw = () => {
-    const base = v["--name-base"] === "name" ? (v["--target-name"] || "Nazwa projektu") : (v["--target-key"] || "KLUCZ");
+    const base = v["--name-base"] === "name" ? (v["--target-name"] || tr("Nazwa projektu")) : (v["--target-key"] || tr("KLUCZ"));
     names.replaceChildren(...SCHEME_LABELS.map(l => h("li", {}, `${base} ${l}`)));
   };
   const logBox = h("div", { style: "margin-top:12px" });
-  const roles = rolesEditor(() => (v["--source"] || "").toUpperCase());
+  const roles = rolesEditor();
   const run = dry => async () => {
     for (const [k, l] of [["--source", "projekt źródłowy"], ["--target-key", "klucz nowego projektu"], ["--target-name", "nazwę nowego projektu"]])
       if (!v[k]) return toast(`Podaj ${l}.`, true);
-    const values = { ...v, "--source": (v["--source"] || "").toUpperCase(), "--dry-run": dry, "--no-roles": roles.none() };
+    const values = { ...v, "--source": (v["--source"] || "").toUpperCase(), "--dry-run": dry, "--no-roles": !roles.count() };
     delete values["--roles-file"];
-    if (!roles.none()) {
-      if (roles.loaded()) {
-        try {
-          const r = await api("POST", "clone/roles", { target_key: v["--target-key"], roles: roles.selection() });
-          values["--roles-file"] = r.path;
-        } catch (e) { return toast(e.message, true); }
-      } else if (!dry) {
-        return toast("Wczytaj role projektu źródłowego i wybierz, kogo dodać (albo zaznacz „nikogo nie dodawaj”).", true);
-      }
+    if (roles.missingRole().length) return toast("Wybierz rolę dla: " + roles.missingRole().join(", "), true);
+    if (roles.count()) {
+      try {
+        const r = await api("POST", "clone/roles", { target_key: v["--target-key"], roles: roles.selection() });
+        values["--roles-file"] = r.path;
+      } catch (e) { return toast(e.message, true); }
+    } else if (!dry && !confirm("Lista „Role i dostęp” jest pusta - nikt nie zostanie dodany do ról nowego projektu (poza leadem). Kontynuować?")) {
+      return;
     }
     await runInline(logBox, "clone_project", values);
   };
@@ -1286,7 +1284,8 @@ async function envEditor(body) {
       oninput: ev => { changed[e.key] = ev.target.value; } });
     return h("div", { class: "env-row" },
       h("div", { class: "k" }, e.key, " ", e.set ? null : pill("puste", "")),
-      h("div", {}, input, e.help ? h("small", { class: "muted" }, e.help) : null));
+      h("div", {}, input, (LANG === "en" && ENV_HELP_EN[e.key]) || e.help
+        ? h("small", { class: "muted", "data-no-tr": LANG === "en" && !ENV_HELP_EN[e.key] ? "" : null }, (LANG === "en" && ENV_HELP_EN[e.key]) || e.help) : null));
   });
   const keyIn = h("input", { type: "text", placeholder: "NOWA_ZMIENNA" });
   const valIn = h("input", { type: "text", placeholder: "wartość" });

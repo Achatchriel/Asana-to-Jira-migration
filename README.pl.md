@@ -39,7 +39,8 @@ cd jiraSync
 (ok. 300 MB, raz na komputer), a potem uruchamia panel i otwiera go w przeglądarce.
 Opcje: `./start.sh --port 9000` (inny port), `NO_BROWSER=1 ./start.sh` (bez otwierania
 przeglądarki), `PYTHON=python3.12 ./start.sh` (inny interpreter). Serwer nasłuchuje
-wyłącznie na `127.0.0.1`. Zatrzymanie: `Ctrl+C`.
+wyłącznie na `127.0.0.1`. Zatrzymanie: `Ctrl+C`. Język panelu: **PL / EN** na dole panelu
+bocznego (wybór zapamiętywany w przeglądarce; logi skryptów pozostają po polsku).
 
 Panel działa od pustego folderu: `.env` powstaje z `.env.example` przy pierwszym
 zapisie konfiguracji, a mapy i listy - z szablonów. Dalej prowadzi zakładka **Start**.
@@ -110,10 +111,11 @@ skryptów, nie korzysta z projektu wzorcowego i z `.env` czyta tylko dostęp do 
   ekrany i konfiguracje pól pozostają wspólne ze źródłem (wskazują na nie nowe schematy).
 - **Projekt:** typ, lead (albo podany), opis, URL, kategoria i domyślne przypisanie jak
   w źródle; projekt powstaje od razu z kopiami schematów.
-- **Role i dostęp:** karta wczytuje role źródła z osobami i grupami (wstępnie
-  zaznaczonymi). Możesz je odznaczyć, dodać osoby lub grupy z wyszukiwarki i dodać
-  inne role; do nowego projektu trafia dokładnie ten wybór (`--roles-file`). Z terminala
-  bez pliku role i członkowie są jak w źródle, `--no-roles` - nikogo.
+- **Role i dostęp:** wyszukujesz w całej Jirze osoby i grupy i każdej nadajesz jedną lub
+  kilka ról (dowolna rola projektowa Jiry) - członkowie projektu źródłowego nie są używani.
+  Pusta lista oznacza, że nikt nie jest dodawany (poza leadem). Wybór trafia do skryptu jako
+  `--roles-file`. Z terminala: bez pliku nikt nie jest dodawany, `--roles-from-source`
+  kopiuje role i członków projektu źródłowego.
 - **Tablice:** filtr z podmienionym projektem i tymi samymi udostępnieniami, tablica,
   kolumny i **przypisanie statusów do kolumn** jak w źródle (przez API GreenHopper,
   tokenem, bez przeglądarki). Workflow są wspólne ze źródłem, więc statusy mają te same
@@ -2845,7 +2847,7 @@ Obsługę panelu opisuje część I. Pliki:
 | `status_source.py` | sekcje Asany i statusy projektu wzorcowego do mapowania |
 | `jira_lookup.py` | role, osoby i grupy dla karty „Kopia projektu” |
 | `cache/` | wyniki odczytów (arkusz, osoby, sekcje, testy) — nie jest w repozytorium |
-| `static/` | interfejs (HTML, JS, CSS) |
+| `static/` | interfejs (HTML, JS, CSS); `i18n.js` - wersja angielska (słownik i przełącznik PL/EN) |
 | `runs/` | historia uruchomień (metadane i log) — nie jest w repozytorium |
 | `checks/` | wyniki sprawdzeń statusów i osób — nie jest w repozytorium |
 | `backups/` | kopie plików sprzed każdego zapisu z panelu — nie jest w repozytorium |

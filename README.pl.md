@@ -1472,6 +1472,23 @@ powiązanych parach z `task_sync_state.json` — WSPÓLNYM plikiem z `asana_jira
   (`{"status": ..., "labels": ...}`) brany jest `status`.
 - Nowe komentarze i załączniki z Jiry do Asany.
 
+**Pierwsze uruchomienie = punkt startowy.** Dla zadania, którego kierunek zwrotny jeszcze
+nie zna (brak `jira_updated` w stanie, np. zaraz po migracji Asana → Jira), skrypt tylko
+zapisuje obecny stan Jiry - znacznik `updated` oraz istniejące komentarze i załączniki - i
+**niczego** nie zmienia w Asanie. Od kolejnego przebiegu do Asany trafiają tylko zmiany
+zrobione w Jirze po tej chwili. Bez tego pierwsze uruchomienie nadpisałoby wszystkie
+zadania w Asanie i odesłało komentarze i załączniki, które dopiero co z niej przyszły.
+
+**Bez echa między kierunkami:** `asana_jira_sync.py` zapisuje identyfikatory komentarzy
+i załączników, które tworzy w Jirze, a `jira_asana_sync.py` je pomija (i odwrotnie: to,
+co kierunek zwrotny doda w Asanie, nie wraca do Jiry). Po zapisie do Jiry synchronizacja
+w przód odświeża też znacznik `updated` zadań, które kierunek zwrotny już zna, więc jej
+własne zmiany nie wracają.
+
+**Status → sekcja** zmienia się tylko wtedy, gdy zgłoszenie zmieniło się w Jirze od
+ostatniego przebiegu, a zadanie zostaje w obecnej sekcji, jeśli ta mapuje się na ten sam
+status (kilka sekcji może mieć wspólny status).
+
 **Rozstrzyganie konfliktów:** proste porównanie znacznika czasu ostatniej
 modyfikacji w Jirze (`updated`) — **nie ma pełnego mergowania pól**, jeśli
 oba systemy zmieniły to samo zadanie w tym samym czasie; wygrywa stan z Jiry.
@@ -1479,18 +1496,17 @@ oba systemy zmieniły to samo zadanie w tym samym czasie; wygrywa stan z Jiry.
 ### Uruchomienie
 
 ```bash
-python jira_asana_sync.py --dry-run --limit 1   # podgląd, bez --project-keys (patrz niżej)
-python jira_asana_sync.py --limit 1
+python jira_asana_sync.py --dry-run --project-keys ABC   # podgląd dla jednego projektu
+python jira_asana_sync.py --project-keys ABC              # 1. uruchomienie: tylko punkt startowy
 python jira_asana_sync.py
+python jira_asana_sync.py --project-keys XYZ --asana-link "https://app.asana.com/..."  # projekt spoza arkusza
 DEBUG_SYNC=1 python jira_asana_sync.py --limit 1   # ze szczegółową diagnostyką
 ```
 
-**Ważne o `--project-keys`:** jeśli podasz konkretne klucze tą flagą, skrypt
-NIE ma skąd wziąć `asana_project_link`/nazwy projektu z arkusza dla tych
-kluczy — synchronizacja statusu → sekcja **nie zadziała** w tym trybie
-(dostaniesz czytelne ostrzeżenie). Do testowania na 1 projekcie użyj
-`--limit 1` **bez** `--project-keys` — wtedy skrypt bierze pierwszy wiersz
-z arkusza razem z jego linkiem.
+Przy `--project-keys` link do projektu Asany jest brany z arkusza (klucz z kolumny
+`jira_key` albo z `project_key_cache.json`), więc status → sekcja działa także dla
+wybranych projektów - również po wybraniu projektów w panelu. Projekt spoza arkusza (np.
+z karty „Migracja projektu”) wymaga `--asana-link`.
 
 **Kolejność przy używaniu obu kierunków:** uruchamiaj naprzemiennie
 (`asana_jira_sync.py`, potem `jira_asana_sync.py`), nie równolegle —

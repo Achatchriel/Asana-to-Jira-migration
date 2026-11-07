@@ -1215,7 +1215,7 @@ def transition_jira_issue_to_status(issue_key: str, status_id: str, final_fields
     return True
 
 
-def post_jira_comment(issue_key: str, author_name: str, created_at: str, html_text: str) -> None:
+def post_jira_comment(issue_key: str, author_name: str, created_at: str, html_text: str) -> Optional[str]:
     url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}/comment"
     # Prefiks z autorem/datą z Asany, bo Jira i tak pokaże jako autora konto
     # API (nie da się "podszyć" pod oryginalnego autora bez uprawnień admina
@@ -1272,15 +1272,48 @@ def post_jira_comment(issue_key: str, author_name: str, created_at: str, html_te
 
     if resp.status_code >= 300:
         raise RuntimeError(f"Błąd dodawania komentarza do {issue_key}: {resp.status_code} {resp.text}")
+    try:
+        return str(resp.json().get("id") or "") or None
+    except ValueError:
+        return None
 
 
-def upload_jira_attachment(issue_key: str, filename: str, content: bytes) -> None:
+def upload_jira_attachment(issue_key: str, filename: str, content: bytes) -> list:
     url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}/attachments"
     headers = {"X-Atlassian-Token": "no-check"}  # wymagane przez Jirę dla uploadu załączników
     files = {"file": (filename, content)}
     resp = request_with_retry("POST", url, auth=JIRA_AUTH, headers=headers, files=files, timeout=REQUEST_TIMEOUT)
     if resp.status_code >= 300:
         raise RuntimeError(f"Błąd wgrywania załącznika '{filename}' do {issue_key}: {resp.status_code} {resp.text}")
+    try:
+        return [str(a["id"]) for a in resp.json() if a.get("id")]
+    except (ValueError, TypeError, AttributeError):
+        return []
+
+
+def remember_for_reverse(task_state: dict, key: str, jira_ids) -> None:
+    """Identyfikatory komentarzy/załączników, które TA synchronizacja utworzyła w Jirze,
+    trafiają do list „już znane w Asanie” kierunku zwrotnego (jira_asana_sync.py) -
+    inaczej wróciłyby do Asany jako duplikaty."""
+    ids = [i for i in (jira_ids if isinstance(jira_ids, list) else [jira_ids]) if i]
+    if ids:
+        task_state[key] = sorted(set(task_state.get(key, [])) | set(ids))
+
+
+def refresh_reverse_marker(jira_key: str, task_state: dict, dry_run: bool) -> None:
+    """Po zapisie do Jiry: aktualny znacznik „updated” zgłoszenia jako punkt odniesienia
+    kierunku zwrotnego, żeby zmiana zrobiona przez TĘ synchronizację nie wróciła do
+    Asany. Tylko dla zadań, które kierunek zwrotny już zna (jest „jira_updated”) -
+    reszta nie płaci dodatkowym zapytaniem."""
+    if dry_run or "jira_updated" not in task_state:
+        return
+    try:
+        resp = request_with_retry("GET", f"{JIRA_BASE_URL}/rest/api/3/issue/{jira_key}",
+                                  auth=JIRA_AUTH, params={"fields": "updated"}, timeout=REQUEST_TIMEOUT)
+        if resp.status_code < 300:
+            task_state["jira_updated"] = (resp.json().get("fields") or {}).get("updated")
+    except Exception:  # noqa: BLE001 - znacznik jest pomocniczy, brak nie psuje synchronizacji
+        pass
 
 
 def sync_comments(task_gid: str, jira_key: str, task_state: dict, dry_run: bool) -> int:
@@ -1297,7 +1330,8 @@ def sync_comments(task_gid: str, jira_key: str, task_state: dict, dry_run: bool)
             print(f"      [DRY-RUN] Dodałbym komentarz od {(c.get('created_by') or {}).get('name', '?')}")
         else:
             author = (c.get("created_by") or {}).get("name", "")
-            post_jira_comment(jira_key, author, c.get("created_at", ""), c.get("html_text") or c.get("text", ""))
+            jira_comment_id = post_jira_comment(jira_key, author, c.get("created_at", ""), c.get("html_text") or c.get("text", ""))
+            remember_for_reverse(task_state, "synced_from_jira_comment_ids", jira_comment_id)
             synced.add(c["gid"])
         added += 1
     if not dry_run:
@@ -1356,7 +1390,8 @@ def sync_attachments(task_gid: str, jira_key: str, task_state: dict, dry_run: bo
         try:
             file_resp = requests.get(download_url, timeout=REQUEST_TIMEOUT)
             file_resp.raise_for_status()
-            upload_jira_attachment(jira_key, a.get("name") or "attachment", file_resp.content)
+            created_ids = upload_jira_attachment(jira_key, a.get("name") or "attachment", file_resp.content)
+            remember_for_reverse(task_state, "synced_from_jira_attachment_ids", created_ids)
             synced.add(a["gid"])
             added += 1
         except Exception as exc:  # noqa: BLE001
@@ -1494,6 +1529,7 @@ def sync_subtasks(parent_asana_gid: str, parent_jira_key: str, jira_project_key:
                 stats["comments"] += sync_comments(sub_gid, sub_key, sub_task_state, dry_run)
                 stats["attachments"] += sync_attachments(sub_gid, sub_key, sub_task_state, dry_run)
                 ensure_asana_link(sub_gid, sub_key, sub_name, sub_task_state, dry_run)
+                refresh_reverse_marker(sub_key, sub_task_state, dry_run)
                 if sub_gid not in _OWN_SECTION_STATUS:  # z własną sekcją -> ustawia pętla główna
                     target = fertig_id if sub_completed else inherited_status_id
                     if target and not dry_run and sub_task_state.get("status_applied") != target:
@@ -1880,6 +1916,7 @@ def sync_project(asana_project_name: str, jira_key: str, state: dict,
                 added_comments = sync_comments(gid, target_key, task_state, dry_run)
                 added_attachments = sync_attachments(gid, target_key, task_state, dry_run)
                 ensure_asana_link(gid, target_key, name, task_state, dry_run)
+                refresh_reverse_marker(target_key, task_state, dry_run)
                 stats["comments"] += added_comments
                 stats["attachments"] += added_attachments
 

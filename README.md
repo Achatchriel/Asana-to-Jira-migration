@@ -1467,6 +1467,23 @@ over the already linked pairs from `task_sync_state.json` — a file SHARED with
   for extended entries (`{"status": ..., "labels": ...}`) the `status` is used.
 - New comments and attachments from Jira to Asana.
 
+**First run = starting point.** For a task the reverse direction does not know yet (no
+`jira_updated` in the state, e.g. right after the Asana → Jira migration) the script only
+records Jira's current state - the `updated` timestamp and the existing comments and
+attachments - and changes **nothing** in Asana. From the next run on only changes made in
+Jira after that point go to Asana. Without this the first run would overwrite every Asana
+task and send back comments and attachments that had just come from Asana.
+
+**No echo between directions:** `asana_jira_sync.py` records the IDs of the comments and
+attachments it creates in Jira, and `jira_asana_sync.py` skips them (and the other way
+round: what the reverse direction adds to Asana is not sent back to Jira). After writing to
+Jira, the forward sync also refreshes the `updated` marker of tasks the reverse direction
+already knows, so its own edits do not come back.
+
+**Status → section** changes only when the issue changed in Jira since the last run, and a
+task stays in its current section when that section maps to the same status (several
+sections can share one status).
+
 **Conflict resolution:** a simple comparison of the last modification timestamp in
 Jira (`updated`) — **there is no full field merge** if both systems changed the same
 task at the same time; the Jira state wins.
@@ -1474,17 +1491,17 @@ task at the same time; the Jira state wins.
 ### Running
 
 ```bash
-python jira_asana_sync.py --dry-run --limit 1   # preview, without --project-keys (see below)
-python jira_asana_sync.py --limit 1
+python jira_asana_sync.py --dry-run --project-keys ABC   # preview for one project
+python jira_asana_sync.py --project-keys ABC              # 1st run: starting point only
 python jira_asana_sync.py
+python jira_asana_sync.py --project-keys XYZ --asana-link "https://app.asana.com/..."  # project outside the sheet
 DEBUG_SYNC=1 python jira_asana_sync.py --limit 1   # with detailed diagnostics
 ```
 
-**Important about `--project-keys`:** if you pass specific keys with this flag, the
-script has NO way to get the `asana_project_link`/project name from the sheet for those
-keys — status → section sync **will not work** in this mode (you will get a readable
-warning). To test on 1 project use `--limit 1` **without** `--project-keys` — the
-script then takes the first row of the sheet together with its link.
+With `--project-keys` the Asana project link is taken from the sheet (key from the
+`jira_key` column or `project_key_cache.json`), so status → section works for selected
+projects too - also when you pick projects in the panel. A project outside the sheet (e.g.
+from the "Project migration" tab) needs `--asana-link`.
 
 **Order when using both directions:** run them alternately (`asana_jira_sync.py`, then
 `jira_asana_sync.py`), not in parallel — this avoids both overwriting each other while

@@ -154,6 +154,9 @@ def main() -> None:
     ap.add_argument("--existing-target", action="store_true", help="Projekt już istnieje - pomiń tworzenie, dokończ resztę")
     ap.add_argument("--no-sync", action="store_true", help="Tylko utwórz i skonfiguruj, bez migracji zadań")
     ap.add_argument("--dry-run", action="store_true", help="Podgląd, nic nie zapisuj")
+    ap.add_argument("--tags", action="store_true", help="Tagi Asany jako etykiety Jiry")
+    ap.add_argument("--watchers", action="store_true", help="Obserwujący Asany jako obserwujący Jiry (user_map.json)")
+    ap.add_argument("--custom-fields", action="store_true", help="Pola niestandardowe (custom_field_map.json albo po nazwie)")
     a = ap.parse_args()
     core.check_config()
     key = a.key.strip().upper()
@@ -222,10 +225,12 @@ def main() -> None:
     run(["detect_epic_candidates.py", "--project-keys", key, "--asana-link", a.asana_link, "--force"])
 
     step("6. Migracja zadań Asana → Jira")
+    extras = [f for f, on in (("--tags", a.tags), ("--watchers", a.watchers), ("--custom-fields", a.custom_fields)) if on]
     rc = run(["asana_jira_sync.py", "--project-keys", key, "--asana-link", a.asana_link, "--asana-name", asana.name]
-             + (["--dry-run"] if dry else []))
+             + extras + (["--dry-run"] if dry else []))
     print(f"\n{'PODGLĄD - nic nie zapisano' if dry else 'GOTOWE'}: {asana.name} → {key}")
-    print(f"Kolejne synchronizacje: python asana_jira_sync.py --project-keys {key} --asana-link \"{a.asana_link}\"")
+    print(f"Kolejne synchronizacje: python asana_jira_sync.py --project-keys {key} --asana-link \"{a.asana_link}\""
+          + "".join(" " + f for f in extras))
     sys.exit(rc)
 
 

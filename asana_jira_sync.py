@@ -346,6 +346,8 @@ def get_asana_tasks(project_gid: str) -> list[dict]:
         "name", "html_notes", "completed", "due_on", "assignee.gid", "assignee.email",
         "modified_at", "memberships.section.name", "memberships.project.gid", "parent.gid",
     ]
+    if extras_enabled():
+        fields += ASANA_EXTRA_FIELDS
     params = {"opt_fields": ",".join(fields), "limit": 100}
     tasks = []
     offset = None
@@ -420,6 +422,8 @@ def get_asana_subtasks(task_gid: str) -> list[dict]:
     są migrowane")."""
     url = f"{ASANA_API}/tasks/{task_gid}/subtasks"
     fields = ["name", "html_notes", "completed", "due_on", "assignee.gid", "assignee.email", "modified_at"]
+    if extras_enabled():
+        fields += ASANA_EXTRA_FIELDS
     params = {"opt_fields": ",".join(fields), "limit": 100}
     subtasks = []
     offset = None
@@ -1316,6 +1320,273 @@ def refresh_reverse_marker(jira_key: str, task_state: dict, dry_run: bool) -> No
         pass
 
 
+# --------------------------------------------------------------------------- #
+# Tagi, obserwujący i pola niestandardowe (opcjonalne: --tags, --watchers,
+# --custom-fields albo SYNC_TAGS / SYNC_WATCHERS / SYNC_CUSTOM_FIELDS=1 w .env)
+# --------------------------------------------------------------------------- #
+#   - tagi Asany -> etykiety Jiry (spacje zamienione na "_"); etykieta tagu usuniętego
+#     w Asanie znika, ale tylko taka, którą dodała ta synchronizacja,
+#   - obserwujący (followers) Asany -> obserwujący Jiry przez user_map.json; nikt nie
+#     jest usuwany (Jira sama dopisuje autora i komentujących),
+#   - pola niestandardowe Asany -> pola Jiry według custom_field_map.json
+#     ({"Nazwa pola w Asanie": "Nazwa pola w Jirze" albo "customfield_10050"},
+#     opcjonalnie "_projects": {"KLUCZ": {...}} na wyjątki projektu). Bez pliku pola
+#     są dopasowywane po identycznej nazwie (bez wielkości liter).
+# Ostatnio zapisany zestaw trafia do stanu (extras_applied), więc niezmienione zadanie
+# nie kosztuje żadnego zapytania do Jiry.
+EXTRAS = {"tags": False, "watchers": False, "custom_fields": False}
+CUSTOM_FIELD_MAP_FILE = Path("custom_field_map.json")
+ASANA_EXTRA_FIELDS = [
+    "tags.name", "followers.gid",
+    "custom_fields.name", "custom_fields.resource_subtype", "custom_fields.text_value",
+    "custom_fields.number_value", "custom_fields.display_value", "custom_fields.enum_value.name",
+    "custom_fields.multi_enum_values.name", "custom_fields.date_value.date",
+    "custom_fields.date_value.date_time", "custom_fields.people_value.gid",
+]
+_JIRA_FIELDS_CACHE: dict = {}
+_FIELD_MATCH_CACHE: dict = {}
+_EXTRA_WARNED: set = set()
+_EXTRA_STATS = {"labels": 0, "watchers": 0, "fields": 0, "rejected_fields": 0}
+_UNMAPPED_PEOPLE: set = set()
+
+
+def extras_enabled() -> bool:
+    return any(EXTRAS.values())
+
+
+def configure_extras(args) -> None:
+    def on(flag: bool, env: str) -> bool:
+        return bool(flag) or (os.getenv(env) or "").strip().lower() in ("1", "true", "tak", "yes")
+    EXTRAS["tags"] = on(getattr(args, "tags", False), "SYNC_TAGS")
+    EXTRAS["watchers"] = on(getattr(args, "watchers", False), "SYNC_WATCHERS")
+    EXTRAS["custom_fields"] = on(getattr(args, "custom_fields", False), "SYNC_CUSTOM_FIELDS")
+
+
+def tag_to_label(name: str) -> str:
+    """Etykieta Jiry nie może zawierać spacji i ma maks. 255 znaków."""
+    return re.sub(r"\s+", "_", (name or "").strip())[:255]
+
+
+def _warn_once(project_key: str, item: str, message: str) -> None:
+    if (project_key, item, message) in _EXTRA_WARNED:
+        return
+    _EXTRA_WARNED.add((project_key, item, message))
+    print(f"      [OSTRZEŻENIE] {item}: {message}")
+    record_warning(project_key, item, message)
+
+
+def jira_fields() -> list:
+    if "all" not in _JIRA_FIELDS_CACHE:
+        resp = request_with_retry("GET", f"{JIRA_BASE_URL}/rest/api/3/field", auth=JIRA_AUTH, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        _JIRA_FIELDS_CACHE["all"] = resp.json()
+    return _JIRA_FIELDS_CACHE["all"]
+
+
+def load_custom_field_map() -> dict:
+    if CUSTOM_FIELD_MAP_FILE.exists():
+        return json.loads(CUSTOM_FIELD_MAP_FILE.read_text(encoding="utf-8"))
+    return {}
+
+
+def _jira_field_for(project_key: str, asana_name: str) -> Optional[dict]:
+    """Pole Jiry (z /rest/api/3/field) dla pola Asany albo None = pomiń."""
+    cache_key = (project_key, asana_name.lower())
+    if cache_key in _FIELD_MATCH_CACHE:
+        return _FIELD_MATCH_CACHE[cache_key]
+    cmap = load_custom_field_map()
+    per_project = ((cmap.get("_projects") or {}).get(project_key) or {})
+    merged = {k.lower(): v for k, v in cmap.items() if not k.startswith("_")}
+    merged.update({k.lower(): v for k, v in per_project.items()})
+    target = merged.get(asana_name.lower(), asana_name if not merged else None)
+    field = None
+    if target:
+        fields = jira_fields()
+        explicit = asana_name.lower() in merged
+        # bez wpisu w mapie tylko pola niestandardowe i priorytet - inaczej pole Asany
+        # "Status" czy "Summary" trafiłoby na pole systemowe Jiry
+        pool = fields if explicit else [f for f in fields if f.get("custom") or f.get("id") == "priority"]
+        field = next((f for f in pool if f.get("id") == target), None) or \
+            next((f for f in pool if (f.get("name") or "").lower() == str(target).lower()), None)
+        if not field and explicit:
+            _warn_once(project_key, f"pole '{asana_name}'", f"brak w Jirze pola '{target}' z custom_field_map.json")
+    _FIELD_MATCH_CACHE[cache_key] = field
+    return field
+
+
+def _asana_people(values, user_map: dict) -> list:
+    ids = []
+    for p in values or []:
+        acc = user_map.get((p or {}).get("gid"))
+        if acc:
+            ids.append(acc)
+        elif (p or {}).get("gid"):
+            _UNMAPPED_PEOPLE.add(p["gid"])
+    return ids
+
+
+def convert_custom_value(cf: dict, field: dict, user_map: dict):
+    """Wartość pola Asany w formacie pola Jiry; (False, None) = nie da się przenieść."""
+    schema = field.get("schema") or {}
+    ftype, items, custom = schema.get("type"), schema.get("items"), schema.get("custom") or ""
+    enum = ((cf.get("enum_value") or {}).get("name"))
+    multi = [v.get("name") for v in (cf.get("multi_enum_values") or []) if v.get("name")]
+    names = multi or ([enum] if enum else [])
+    date_v = cf.get("date_value") or {}
+    text = cf.get("text_value")
+    if text is None and cf.get("number_value") is not None:
+        text = str(cf.get("number_value"))
+    if text is None:
+        text = cf.get("display_value") or (", ".join(names) if names else None)
+
+    if ftype == "string":
+        if text is None:
+            return True, None
+        return True, (text_to_adf(text) if custom.endswith(":textarea") else str(text)[:255])
+    if ftype == "number":
+        num = cf.get("number_value")
+        if num is None and text not in (None, ""):
+            try:
+                num = float(str(text).replace(",", ".").replace("%", "").strip())
+            except ValueError:
+                return False, None
+        return True, num
+    if ftype == "option":
+        return True, ({"value": names[0]} if names else None)
+    if ftype == "priority":
+        return True, ({"name": names[0]} if names else None)
+    if ftype == "date":
+        d = date_v.get("date") or (date_v.get("date_time") or "")[:10] or None
+        return True, d
+    if ftype == "datetime":
+        dt = date_v.get("date_time") or (f"{date_v['date']}T00:00:00.000+0000" if date_v.get("date") else None)
+        return True, dt
+    if ftype == "user":
+        ids = _asana_people(cf.get("people_value"), user_map)
+        return True, ({"accountId": ids[0]} if ids else None)
+    if ftype == "array" and items == "option":
+        return True, [{"value": n} for n in names]
+    if ftype == "array" and items == "user":
+        return True, [{"accountId": i} for i in _asana_people(cf.get("people_value"), user_map)]
+    if ftype == "array" and items == "string":
+        return True, [tag_to_label(n) for n in names] or ([tag_to_label(text)] if text else [])
+    return False, None
+
+
+def desired_extras(task: dict, project_key: str, user_map: dict) -> dict:
+    want: dict = {}
+    if EXTRAS["tags"]:
+        want["labels"] = sorted({tag_to_label(t.get("name")) for t in (task.get("tags") or []) if (t.get("name") or "").strip()})
+    if EXTRAS["watchers"]:
+        want["watchers"] = sorted(set(_asana_people(task.get("followers"), user_map)))
+    if EXTRAS["custom_fields"]:
+        fields = {}
+        for cf in task.get("custom_fields") or []:
+            name = (cf.get("name") or "").strip()
+            if not name:
+                continue
+            field = _jira_field_for(project_key, name)
+            if not field:
+                continue
+            ok, value = convert_custom_value(cf, field, user_map)
+            if ok and field["id"] == "labels":
+                # systemowe Etykiety: dopisywane do etykiet zarządzanych jak tagi - zapis
+                # przez "fields" zastąpiłby wszystkie etykiety zgłoszenia (także te z sekcji)
+                want["labels"] = sorted(set(want.get("labels") or []) | set(value or []))
+                continue
+            if not ok:
+                _warn_once(project_key, f"pole '{name}'",
+                           f"typ pola Jiry '{field.get('name')}' ({(field.get('schema') or {}).get('type')}) nie pasuje do pola Asany")
+                continue
+            fields[field["id"]] = value
+        want["fields"] = fields
+    return want
+
+
+def sync_extras(task: dict, issue_key: str, project_key: str, task_state: dict,
+                user_map: dict, dry_run: bool) -> None:
+    """Tagi, obserwujący i pola niestandardowe jednego zadania (patrz opis wyżej)."""
+    if not extras_enabled():
+        return
+    want = desired_extras(task, project_key, user_map)
+    applied = task_state.get("extras_applied") or {}
+    if all(applied.get(k) == v for k, v in want.items()):
+        return
+    url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}"
+    new_applied = dict(applied)
+
+    if "labels" in want and applied.get("labels") != want["labels"]:
+        add = sorted(set(want["labels"]) - set(applied.get("labels") or []))
+        remove = sorted(set(applied.get("labels") or []) - set(want["labels"]))
+        if dry_run:
+            if add or remove:
+                print(f"      [DRY-RUN] {issue_key}: etykiety z tagów +{add} -{remove}")
+        else:
+            ops = [{"add": l} for l in add] + [{"remove": l} for l in remove]
+            resp = request_with_retry("PUT", url, auth=JIRA_AUTH, json={"update": {"labels": ops}},
+                                      params={"notifyUsers": "false"}, timeout=REQUEST_TIMEOUT)
+            if resp.status_code < 300:
+                new_applied["labels"] = want["labels"]
+                _EXTRA_STATS["labels"] += len(add)
+            else:
+                _warn_once(project_key, issue_key, f"etykiety z tagów odrzucone: {resp.status_code} {resp.text[:200]}")
+
+    if "watchers" in want and applied.get("watchers") != want["watchers"]:
+        add = sorted(set(want["watchers"]) - set(applied.get("watchers") or []))
+        if dry_run:
+            if add:
+                print(f"      [DRY-RUN] {issue_key}: obserwujący +{len(add)}")
+        else:
+            failed = False
+            for account_id in add:
+                resp = request_with_retry("POST", f"{url}/watchers", auth=JIRA_AUTH, json=account_id,
+                                          timeout=REQUEST_TIMEOUT)
+                if resp.status_code < 300:
+                    _EXTRA_STATS["watchers"] += 1
+                else:
+                    failed = True
+                    _warn_once(project_key, issue_key,
+                               f"nie można dodać obserwującego {account_id}: {resp.status_code} {resp.text[:200]}")
+            if not failed:
+                new_applied["watchers"] = want["watchers"]
+
+    if "fields" in want and applied.get("fields") != want["fields"]:
+        before = applied.get("fields") or {}
+        changed = {fid: v for fid, v in want["fields"].items()
+                   if before.get(fid) != v and (v not in (None, []) or fid in before)}
+        if dry_run:
+            if changed:
+                names = {f["id"]: f.get("name") for f in jira_fields()}
+                print(f"      [DRY-RUN] {issue_key}: pola " + ", ".join(names.get(k, k) for k in changed))
+        elif changed:
+            send = dict(changed)
+            while send:
+                resp = request_with_retry("PUT", url, auth=JIRA_AUTH, json={"fields": send},
+                                          params={"notifyUsers": "false"}, timeout=REQUEST_TIMEOUT)
+                if resp.status_code < 300:
+                    _EXTRA_STATS["fields"] += len(send)
+                    break
+                try:
+                    bad = set(((resp.json() or {}).get("errors") or {}).keys()) & set(send)
+                except ValueError:
+                    bad = set()
+                if not bad:
+                    _warn_once(project_key, issue_key, f"pola niestandardowe odrzucone: {resp.status_code} {resp.text[:200]}")
+                    break
+                for fid in bad:
+                    _EXTRA_STATS["rejected_fields"] += 1
+                    msg = (resp.json().get("errors") or {}).get(fid, "")
+                    _warn_once(project_key, f"pole {fid}",
+                               f"Jira odrzuca wartość ({msg}) - pole poza ekranem edycji projektu albo brak takiej opcji")
+                    send.pop(fid, None)
+            new_applied["fields"] = want["fields"]
+        else:
+            new_applied["fields"] = want["fields"]
+
+    if not dry_run:
+        task_state["extras_applied"] = new_applied
+
+
 def sync_comments(task_gid: str, jira_key: str, task_state: dict, dry_run: bool) -> int:
     """Dodaje w Jirze komentarze z Asany, których jeszcze nie ma (śledzone po
     gid komentarza w task_state['synced_comment_gids']). Zwraca liczbę nowo
@@ -1529,6 +1800,7 @@ def sync_subtasks(parent_asana_gid: str, parent_jira_key: str, jira_project_key:
                 stats["comments"] += sync_comments(sub_gid, sub_key, sub_task_state, dry_run)
                 stats["attachments"] += sync_attachments(sub_gid, sub_key, sub_task_state, dry_run)
                 ensure_asana_link(sub_gid, sub_key, sub_name, sub_task_state, dry_run)
+                sync_extras(sub, sub_key, jira_project_key, sub_task_state, user_map, dry_run)
                 refresh_reverse_marker(sub_key, sub_task_state, dry_run)
                 if sub_gid not in _OWN_SECTION_STATUS:  # z własną sekcją -> ustawia pętla główna
                     target = fertig_id if sub_completed else inherited_status_id
@@ -1916,6 +2188,7 @@ def sync_project(asana_project_name: str, jira_key: str, state: dict,
                 added_comments = sync_comments(gid, target_key, task_state, dry_run)
                 added_attachments = sync_attachments(gid, target_key, task_state, dry_run)
                 ensure_asana_link(gid, target_key, name, task_state, dry_run)
+                sync_extras(task, target_key, jira_key, task_state, user_map, dry_run)
                 refresh_reverse_marker(target_key, task_state, dry_run)
                 stats["comments"] += added_comments
                 stats["attachments"] += added_attachments
@@ -2114,10 +2387,19 @@ def main() -> None:
              "pełne wyjaśnienie. Ignorowane razem z --project-keys (tam i tak wybierasz "
              "konkretne klucze ręcznie).",
     )
+    parser.add_argument("--tags", action="store_true", help="Tagi Asany jako etykiety Jiry (albo SYNC_TAGS=1 w .env)")
+    parser.add_argument("--watchers", action="store_true",
+                        help="Obserwujący Asany jako obserwujący Jiry, przez user_map.json (albo SYNC_WATCHERS=1)")
+    parser.add_argument("--custom-fields", action="store_true",
+                        help="Pola niestandardowe według custom_field_map.json, bez pliku po nazwie (albo SYNC_CUSTOM_FIELDS=1)")
     args = parser.parse_args()
 
     if not args.dry_run:
         setup_file_logging("asana_jira_sync")
+    configure_extras(args)
+    if extras_enabled():
+        print("Dodatkowo: " + ", ".join(n for n, k in (("tagi -> etykiety", "tags"), ("obserwujący", "watchers"),
+                                                      ("pola niestandardowe", "custom_fields")) if EXTRAS[k]))
 
     pairs = get_project_pairs(args)
     if args.shard:
@@ -2195,6 +2477,13 @@ def main() -> None:
     print(f"  Załączników:    {totals['attachments']}")
     print(f"  Statusy OK:     {totals['status_ok']}")
     print(f"  Statusy błąd:   {totals['status_failed']}")
+    if extras_enabled():
+        print(f"  Etykiety z tagów dodane: {_EXTRA_STATS['labels']} | obserwujący dodani: {_EXTRA_STATS['watchers']} | "
+              f"pola zapisane: {_EXTRA_STATS['fields']}")
+        if _UNMAPPED_PEOPLE:
+            print(f"    osoby z Asany bez wpisu w user_map.json (pominięte): {len(_UNMAPPED_PEOPLE)}")
+        if _EXTRA_STATS["rejected_fields"]:
+            print(f"    wartości pól odrzucone przez Jirę: {_EXTRA_STATS['rejected_fields']} (szczegóły w ostrzeżeniach)")
     if all_unmapped_sections:
         print(f"\nSekcje BEZ wpisu w section_status_map.json (zadania zostały przy statusie domyślnym):")
         for name in sorted(all_unmapped_sections):

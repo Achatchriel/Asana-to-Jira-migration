@@ -38,6 +38,9 @@ YES = {"flag": "--yes", "kind": "bool", "label": "Bez pytania o potwierdzenie (-
 LIMIT = {"flag": "--limit", "kind": "int", "label": "Limit projektów"}
 KEYS = {"flag": "--project-keys", "kind": "keys", "label": "Projekty"}
 SHARD = {"flag": "--shard", "kind": "str", "label": "Shard K/N", "placeholder": "1/3"}
+EXTRA_PARAMS = [{"flag": "--tags", "kind": "bool", "label": "Tagi jako etykiety"},
+                {"flag": "--watchers", "kind": "bool", "label": "Obserwujący (przez mapę osób)"},
+                {"flag": "--custom-fields", "kind": "bool", "label": "Pola niestandardowe (custom_field_map.json albo po nazwie)"}]
 KEY1 = {"flag": "--project-key", "kind": "keys", "label": "Projekt", "single": True, "required": True}
 
 
@@ -67,7 +70,7 @@ TOOLS = [
                 {"flag": "--roles-file", "kind": "str", "label": "Plik: kto z jaką rolą"},
                 {"flag": "--no-roles", "kind": "bool", "label": "Nikogo nie dodawaj do ról"},
                 {"flag": "--existing-target", "kind": "bool", "label": "Projekt już istnieje"},
-                {"flag": "--no-sync", "kind": "bool", "label": "Bez migracji zadań"}]},
+                {"flag": "--no-sync", "kind": "bool", "label": "Bez migracji zadań"}] + EXTRA_PARAMS},
     {"id": "full_pipeline", "group": "pipeline", "script": "run_full_pipeline.py",
      "title": "Pełny pipeline",
      "desc": "Projekty → kolumny i statusy tablic (API) → kontrola tablic → kandydaci na Epiki → synchronizacja zadań (opcjonalnie weryfikacja). Bez przeglądarki.",
@@ -126,8 +129,8 @@ TOOLS = [
      "params": [KEYS, SHARD, {"flag": "--force", "kind": "bool", "label": "Skanuj od nowa (--force)"}]},
     {"id": "asana_jira_sync", "group": "pipeline", "script": "asana_jira_sync.py",
      "title": "5. Synchronizacja Asana → Jira",
-     "desc": "Zadania, podzadania, komentarze, załączniki, statusy i przypisania.",
-     "writes": "unless:--dry-run", "params": [DRY, KEYS, LIMIT, SHARD]},
+     "desc": "Zadania, podzadania, komentarze, załączniki, statusy i przypisania. Opcjonalnie tagi, obserwujący i pola niestandardowe.",
+     "writes": "unless:--dry-run", "params": [DRY, KEYS, LIMIT, SHARD] + EXTRA_PARAMS},
     {"id": "jira_asana_sync", "group": "pipeline", "script": "jira_asana_sync.py",
      "title": "Kierunek zwrotny Jira → Asana",
      "desc": "Przenosi zmiany z Jiry z powrotem do Asany. Pierwsze uruchomienie dla projektu zapisuje tylko punkt startowy (nic nie zmienia w Asanie); kolejne przenoszą zmiany zrobione w Jirze od tej chwili. Zapisuje do Asany!",

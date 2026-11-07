@@ -987,6 +987,23 @@ Osobny skrypt (obok `jira_sync.py`, który tworzy tylko *projekty*) — synchron
   którą Jira odrzuci jako niepoprawną (rzadkie, ale się zdarza), skrypt
   automatycznie ponawia z opisem jako zwykłym tekstem (bez formatowania)
   zamiast tracić całe zadanie.
+- **Tagi, obserwujący i pola niestandardowe (opcjonalnie)** — włączane przez `--tags`,
+  `--watchers`, `--custom-fields` (albo `SYNC_TAGS=1`, `SYNC_WATCHERS=1`, `SYNC_CUSTOM_FIELDS=1`
+  w `.env`, co obejmuje też pipeline). W panelu: pola wyboru w kroku 5 i w Migracji projektu.
+  - Tagi stają się etykietami Jiry (spacje zamienione na `_`). Usunięcie tagu w Asanie usuwa
+    etykietę, ale tylko taką, którą dodała ta synchronizacja.
+  - Obserwujący trafiają do obserwujących Jiry przez `user_map.json`; osoby bez wpisu są
+    pomijane i liczone w podsumowaniu. Nikt nie jest usuwany z obserwujących.
+  - Pola niestandardowe według `custom_field_map.json`, np.
+    `{"Priority": "priority", "Team": "customfield_10050", "_projects": {"KLUCZ": {"Estimate": "Story Points"}}}`
+    (pole Jiry po nazwie albo ID). Bez pliku pole trafia do pola **niestandardowego** Jiry
+    (albo Priorytetu) o tej samej nazwie. Obsługiwane typy Jiry: lista wyboru pojedynczego
+    i wielokrotnego (opcja musi istnieć w Jirze), tekst i akapit, liczba, data, data z godziną,
+    użytkownik i wielu użytkowników (przez `user_map.json`), etykiety, priorytet. Pole musi być
+    na ekranie edycji projektu; odrzucona wartość jest pomijana z ostrzeżeniem, reszta się zapisuje.
+  - Ostatnio zapisany zestaw jest w stanie (`extras_applied`), więc niezmienione zadanie nie
+    kosztuje żadnego zapytania do Jiry. Żeby ponowić odrzuconą wartość po poprawce w Jirze,
+    zmień ją w Asanie albo usuń `extras_applied` z wpisu tego zadania w stanie.
 
 ### Hierarchia zadań: Epic → Task → Sub-task
 
@@ -1281,6 +1298,7 @@ python asana_jira_sync.py --dry-run --limit 1 --project-keys KLUCZ   # podgląd 
 python asana_jira_sync.py --limit 1 --project-keys KLUCZ             # faktyczny zapis, 1 projekt
 python asana_jira_sync.py                                             # wszystkie projekty z arkusza
 python asana_jira_sync.py --shard 1/3                                 # 1. z 3 równoległych procesów
+python asana_jira_sync.py --project-keys KLUCZ --tags --watchers --custom-fields  # z tagami, obserwującymi, polami
 ```
 
 Na końcu skrypt wypisuje podsumowanie z podziałem na typy, np.

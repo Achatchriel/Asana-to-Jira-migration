@@ -991,6 +991,23 @@ direction is a separate script, `jira_asana_sync.py` — see section 12).
 - **Formatting fallback** — if the HTML→ADF conversion produces a structure Jira
   rejects as invalid (rare, but it happens), the script automatically retries with
   the description as plain text (without formatting) instead of losing the whole task.
+- **Tags, followers and custom fields (optional)** — enabled with `--tags`, `--watchers`,
+  `--custom-fields` (or `SYNC_TAGS=1`, `SYNC_WATCHERS=1`, `SYNC_CUSTOM_FIELDS=1` in `.env`,
+  which also covers the pipeline). Panel: checkboxes in step 5 and in Project migration.
+  - Tags become Jira labels (spaces replaced with `_`). A tag removed in Asana removes its
+    label, but only a label this sync added.
+  - Followers become watchers through `user_map.json`; people without an entry are skipped
+    and counted in the summary. Nobody is removed from watchers.
+  - Custom fields follow `custom_field_map.json`, e.g.
+    `{"Priority": "priority", "Team": "customfield_10050", "_projects": {"KEY": {"Estimate": "Story Points"}}}`
+    (Jira field by name or ID). Without the file a field is matched to a Jira **custom** field
+    (or Priority) with the same name. Supported Jira types: single and multi select (the
+    option must exist in Jira), text and paragraph, number, date, date-time, user and
+    multi-user (through `user_map.json`), labels, priority. The field must be on the project's
+    edit screen; a rejected value is skipped with a warning and the rest is saved.
+  - The last written set is kept in the state (`extras_applied`), so an unchanged task costs
+    no Jira request. To write a rejected value again after fixing Jira, change it in Asana
+    or remove `extras_applied` from that task's state entry.
 
 ### Task hierarchy: Epic → Task → Sub-task
 
@@ -1277,6 +1294,7 @@ python asana_jira_sync.py --dry-run --limit 1 --project-keys KEY   # preview wit
 python asana_jira_sync.py --limit 1 --project-keys KEY             # actual write, 1 project
 python asana_jira_sync.py                                           # all projects from the sheet
 python asana_jira_sync.py --shard 1/3                               # 1st of 3 parallel processes
+python asana_jira_sync.py --project-keys KEY --tags --watchers --custom-fields  # with tags, followers, fields
 ```
 
 At the end the script prints a summary broken down by type, e.g.
